@@ -6,8 +6,12 @@ Thank you for your support and understanding!
 ---
 
 # Credits
-- Structure, OpenGL & Vulkan backend : Oscar Soirey (oscarsoirey.contact@gmail.com)
-- DirectX 11 backend : [@CodeBYMehdi](https://github.com/CodeBYMehdi) (mehdibjjj@gmail.com)
+### Structure, OpenGL & Vulkan backend
+- Oscar Soirey
+- contact : oscarsoirey.contact@gmail.com
+### DirectX 11 backend
+- [@CodeBYMehdi](https://github.com/CodeBYMehdi)
+- contact : mehdibjjj@gmail.com
 
 ---
 
