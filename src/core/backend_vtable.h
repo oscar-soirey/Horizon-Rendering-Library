@@ -47,6 +47,9 @@ typedef struct {
 	//Shaders//
 	HRL_id(*RHI_CreateShader)(const char* vertContent, size_t vertSize, const char* fragContent, size_t fragSize);
 	void(*RHI_DeleteShader)(HRL_id id);
+
+	//Debug//
+	void(*RHI_DrawDebug)(const DebugRenderer&, float line_thickness);
 }HRL_vtable;
 
 #endif

@@ -1,0 +1,22 @@
+Dev plan :
+
+API features :
+- Pivot point
+- Post Processing
+- Animations frame par frame
+- Gestion des erreurs meilleure, avec des enums code : HRL_OK, HRL_ERROR_INVALID_ID, etc
+
+HRL Core features :
+- 3D Meshes
+- Fallback texture en cas de non texture
+- Texture filter coté backend
+- Creer plusieurs UBO pour suporter différentes lights par scene
+
+Optimisation :
+- Batching simple
+- Culling simple pour les sprites
+
+Documentation & Debug :
+- Gestion des erreurs
+- Documentation
+- Ajouter des logs en cas d'oubli du dev user (actif que dans une configuration debug), par exemple : WARNING: Scene 3 has no viewport, skipped

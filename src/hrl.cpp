@@ -61,6 +61,11 @@ static std::unordered_map<HRL_id, HRL_PostProcess*> post_processes_;
 static std::unordered_map<HRL_id, HRL_Material*> materials_;
 
 
+//debugs triés par scenes
+static std::unordered_map<HRL_id, DebugRenderer> debug_renderers{};
+static float debug_line_thickness = 1.f;
+
+
 //Utils Non-API Functions :
 std::vector<HRL_Mesh*> GetSortedSprites(hrl_scene_t* _scene)
 {
@@ -248,6 +253,15 @@ void HRL_EndFrame()
 
 				g_Backend.RHI_DrawMesh(sprite);
 			}
+
+			auto it_debug = debug_renderers.find(scene_id);
+			if (it_debug != debug_renderers.end())
+			{
+				g_Backend.RHI_DrawDebug(it_debug->second, debug_line_thickness);
+			}
+
+			//clear le debug a chaque frame
+			debug_renderers.clear();
 
 			// --- Mettre ici le draw des mesh 3D --- //
 		}
@@ -994,4 +1008,150 @@ void HRL_SetCameraRotation(HRL_id _camid, float pitch, float yaw, float roll)
 	{
 		it->second->rotation_ = glm::vec3(pitch, yaw, roll);
 	}
+}
+
+
+//Debug
+
+void HRL_SetDebugLineThickness(float a)
+{
+	debug_line_thickness = a;
+}
+
+void HRL_DrawDebugSegment(HRL_id _sceneid, float a_x, float a_y, float a_z, float b_x, float b_y, float b_z, float r, float g, float b)
+{
+	auto it = scenes_.find(_sceneid);
+	if (it == scenes_.end())
+	{
+		SetErrorCode("HRL_DebugDrawSegment, sceneid is not valid");
+		return;
+	}
+
+	//scene id is valid
+
+	debug_renderers[_sceneid].lines.emplace_back(a_x, a_y, a_z, r, g, b);
+	debug_renderers[_sceneid].lines.emplace_back(b_x, b_y, b_z, r, g, b);
+}
+
+void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode, const float *vertices_x, const float *vertices_y, const float *vertices_z, int vertices_count, float r, float g, float b)
+{
+	auto it = scenes_.find(_sceneid);
+	if (it == scenes_.end())
+	{
+		SetErrorCode("HRL_DebugDrawSegment, sceneid is not valid");
+		return;
+	}
+
+	//scene id is valid
+
+	if (_mode == HRL_DebugSolid)
+	{
+		for (int i=1; i < vertices_count-1; i++)
+		{
+			//pivot
+			debug_renderers[_sceneid].triangles.emplace_back(vertices_x[0], vertices_y[0], vertices_z[0], r, g, b);
+			//i
+			debug_renderers[_sceneid].triangles.emplace_back(vertices_x[i], vertices_y[i], vertices_z[i], r, g, b);
+			//i+1
+			debug_renderers[_sceneid].triangles.emplace_back(vertices_x[i+1], vertices_y[i+1], vertices_z[i+1], r, g, b);
+		}
+	}
+	else if (_mode == HRL_DebugHollow)
+	{
+		for (int i=0; i < vertices_count - 1; i++)
+		{
+			debug_renderers[_sceneid].lines.emplace_back(vertices_x[i], vertices_y[i], vertices_z[i], r, g, b);
+			debug_renderers[_sceneid].lines.emplace_back(vertices_x[i+1], vertices_y[i+1], vertices_z[i+1], r, g, b);
+		}
+
+		//line entre le dernier et le 0 pour refermer
+		debug_renderers[_sceneid].lines.emplace_back(vertices_x[vertices_count-1], vertices_y[vertices_count-1], vertices_z[vertices_count-1], r, g, b);
+		debug_renderers[_sceneid].lines.emplace_back(vertices_x[0], vertices_y[0], vertices_z[0], r, g, b);
+	}
+}
+
+void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode, float center_x, float center_y, float center_z, float radius, float segments, float r, float g, float b)
+{
+	auto it = scenes_.find(_sceneid);
+	if (it == scenes_.end()) { SetErrorCode("HRL_DrawDebugCircle, sceneid is not valid"); return; }
+
+	int seg = (int)segments;
+	auto* vx = (float*)alloca(seg * sizeof(float));
+	auto* vy = (float*)alloca(seg * sizeof(float));
+	auto* vz = (float*)alloca(seg * sizeof(float));
+
+	for (int i = 0; i < seg; i++)
+	{
+		float angle = (float)(2.f * M_PI * i) / (float)seg;
+		vx[i] = center_x + radius * cosf(angle);
+		vy[i] = center_y + radius * sinf(angle);
+		vz[i] = center_z;
+	}
+
+	HRL_DrawDebugPolygon(_sceneid, _mode, vx, vy, vz, seg, r, g, b);
+}
+
+void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode, float a_x, float a_y, float a_z, float b_x, float b_y, float b_z, float radius, float segments, float r, float g, float b)
+{
+	auto it = scenes_.find(_sceneid);
+	if (it == scenes_.end()) { SetErrorCode("HRL_DrawDebugCapsule, sceneid is not valid"); return; }
+
+	int half_seg = (int)segments / 2;
+
+	// direction A→B
+	float dx = b_x - a_x;
+	float dy = b_y - a_y;
+	float len = sqrtf(dx * dx + dy * dy);
+
+	// vecteur unitaire perpendiculaire
+	float nx = 0.f, ny = 0.f;
+	if (len > 1e-6f) { nx = -dy / len; ny = dx / len; }
+
+	// angle de l'axe A→B
+	float base_angle = atan2f(dy, dx);
+
+	// demi-cercle autour de B — face opposée à A
+	// plage : [base_angle - PI/2 → base_angle + PI/2]
+	for (int i = 0; i < half_seg; i++)
+	{
+		float a0 = base_angle - (float)M_PI / 2.f + (float)M_PI * (float)i       / (float)half_seg;
+		float a1 = base_angle - (float)M_PI / 2.f + (float)M_PI * (float)(i + 1) / (float)half_seg;
+
+		debug_renderers[_sceneid].lines.emplace_back(b_x + radius * cosf(a0), b_y + radius * sinf(a0), b_z, r, g, b);
+		debug_renderers[_sceneid].lines.emplace_back(b_x + radius * cosf(a1), b_y + radius * sinf(a1), b_z, r, g, b);
+	}
+
+	// demi-cercle autour de A — face opposée à B
+	// plage : [base_angle + PI/2 → base_angle + 3PI/2]
+	for (int i = 0; i < half_seg; i++)
+	{
+		float a0 = base_angle + (float)M_PI / 2.f + (float)M_PI * (float)i       / (float)half_seg;
+		float a1 = base_angle + (float)M_PI / 2.f + (float)M_PI * (float)(i + 1) / (float)half_seg;
+
+		debug_renderers[_sceneid].lines.emplace_back(a_x + radius * cosf(a0), a_y + radius * sinf(a0), a_z, r, g, b);
+		debug_renderers[_sceneid].lines.emplace_back(a_x + radius * cosf(a1), a_y + radius * sinf(a1), a_z, r, g, b);
+	}
+
+	// deux segments latéraux reliant les demi-cercles
+	debug_renderers[_sceneid].lines.emplace_back(a_x + nx * radius, a_y + ny * radius, a_z, r, g, b);
+	debug_renderers[_sceneid].lines.emplace_back(b_x + nx * radius, b_y + ny * radius, b_z, r, g, b);
+
+	debug_renderers[_sceneid].lines.emplace_back(a_x - nx * radius, a_y - ny * radius, a_z, r, g, b);
+	debug_renderers[_sceneid].lines.emplace_back(b_x - nx * radius, b_y - ny * radius, b_z, r, g, b);
+
+}
+
+void HRL_DrawDebugPoint(HRL_id _sceneid, float a_x, float a_y, float a_z, float size, float r, float g, float b)
+{
+	auto it = scenes_.find(_sceneid);
+	if (it == scenes_.end()) { SetErrorCode("HRL_DrawDebugPoint, sceneid is not valid"); return; }
+
+	float h = size * 0.5f;
+
+	debug_renderers[_sceneid].lines.emplace_back(a_x - h, a_y,     a_z, r, g, b);
+	debug_renderers[_sceneid].lines.emplace_back(a_x + h, a_y,     a_z, r, g, b);
+
+	debug_renderers[_sceneid].lines.emplace_back(a_x,     a_y - h, a_z, r, g, b);
+	debug_renderers[_sceneid].lines.emplace_back(a_x,     a_y + h, a_z, r, g, b);
+
 }

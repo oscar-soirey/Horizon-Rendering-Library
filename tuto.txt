@@ -1,0 +1,15 @@
+HRL API :
+Everything is mandatory, if you don't create it, it does't exists
+
+Initialization : 
+Init
+InitContext
+CreateScene
+CreateCamera
+CreateViewport
+CreateRessources (textures, shaders, material)
+CreateMeshes and CreateLights
+
+While loop : 
+BeginFrame
+EndFrame

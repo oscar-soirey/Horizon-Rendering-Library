@@ -64,9 +64,9 @@ build CMakeFiles/example.dir/main.cpp.obj: CXX_COMPILER__example_unscanned_Debug
 #############################################
 # Link the executable example.exe
 
-build example.exe: CXX_EXECUTABLE_LINKER__example_Debug CMakeFiles/example.dir/main.cpp.obj | S$:/Horizon/hrl_rendering/example/lib/libhrl.a S$:/Horizon/hrl_rendering/example/lib/libglfw3.a
+build example.exe: CXX_EXECUTABLE_LINKER__example_Debug CMakeFiles/example.dir/main.cpp.obj | S$:/Horizon/hrl_rendering/example/lib/libhrldll.dll.a S$:/Horizon/hrl_rendering/example/lib/libglfw3.a
   FLAGS = -g
-  LINK_LIBRARIES = -Wl,--whole-archive  S:/Horizon/hrl_rendering/example/lib/libhrl.a  -Wl,--no-whole-archive  S:/Horizon/hrl_rendering/example/lib/libglfw3.a  -lopengl32  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
+  LINK_LIBRARIES = -Wl,--whole-archive  S:/Horizon/hrl_rendering/example/lib/libhrldll.dll.a  -Wl,--no-whole-archive  S:/Horizon/hrl_rendering/example/lib/libglfw3.a  -lopengl32  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
   OBJECT_DIR = CMakeFiles\example.dir
   POST_BUILD = cd .
   PRE_LINK = cd .

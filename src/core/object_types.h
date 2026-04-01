@@ -4,6 +4,7 @@
 #include "../hrl.h"
 #include <unordered_map>
 #include <glm/glm.hpp>
+#include <vector>
 
 typedef uint64_t HRL_BackendHandle;
 
@@ -43,12 +44,12 @@ typedef struct {
 typedef struct {
   HRL_id shader_;
 
-  std::unordered_map<const char*, int> intParams_;
-  std::unordered_map<const char*, HRL_id> textureParams_;
-  std::unordered_map<const char*, float> floatParams_;
-  std::unordered_map<const char*, glm::vec2> vec2Params_;
-  std::unordered_map<const char*, glm::vec3> vec3Params_;
-  std::unordered_map<const char*, glm::vec4> vec4Params_;
+  std::unordered_map<std::string, int> intParams_;
+  std::unordered_map<std::string, HRL_id> textureParams_;
+  std::unordered_map<std::string, float> floatParams_;
+  std::unordered_map<std::string, glm::vec2> vec2Params_;
+  std::unordered_map<std::string, glm::vec3> vec3Params_;
+  std::unordered_map<std::string, glm::vec4> vec4Params_;
 }HRL_Material;
 
 //CAMERA
@@ -72,5 +73,21 @@ typedef struct {
   float width_;
   float height_;
 }HRL_Viewport;
+
+
+//Debug//
+
+typedef struct {
+  float x, y, z;
+  float r, g, b;
+}DebugVertex;
+
+struct DebugRenderer {
+  //for example : lines = [ A, B, C, D, E, F ], it will draw lines : A->B   C->D   E->F
+  //manage grouping at the draw moment (opengl is automatic for example)
+  std::vector<DebugVertex> lines;
+  //every vertex of triangles, each traingles grouped by 3 vertices
+  std::vector<DebugVertex> triangles;
+};
 
 #endif

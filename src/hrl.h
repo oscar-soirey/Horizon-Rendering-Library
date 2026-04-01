@@ -38,15 +38,15 @@
 
 //compatibilité dll
 //#define HRL_BUILD_DLL
-//#define HRL_USE_DLL
+//#define HRL_NO_DLL
 
 #ifdef _WIN32
 	#ifdef HRL_BUILD_DLL
 		#define HRL_API __declspec(dllexport)   //compilation de la DLL
-	#elif HRL_USE_DLL
-		#define HRL_API __declspec(dllimport)   //utilisation de la DLL
+	#elifdef HRL_NO_DLL
+		#define HRL_API													//static
 	#else
-		#define HRL_API
+		#define HRL_API __declspec(dllimport)   //utilisation de la DLL
 	#endif
 #else
 	#define HRL_API
@@ -97,9 +97,12 @@ typedef unsigned int HRL_uint;
 #define HRL_3D_Mesh											0x0023
 
 //Debug geometry
-#define HRL_DebugLine										0x0031
-#define HRL_DebugBox										0x0032
-#define HRL_DebugSphere									0x0033
+//#define HRL_DebugLine										0x0031
+//#define HRL_DebugBox										0x0032
+//#define HRL_DebugSphere									0x0033
+
+#define HRL_DebugHollow									0x0031
+#define HRL_DebugSolid									0x0032
 
 //Camera
 #define HRL_Ortho												0x0041
@@ -120,6 +123,7 @@ typedef unsigned int HRL_uint;
 #define HRL_SpriteShader								(UINT32_MAX)
 #define HRL_Mesh2DShader								(UINT32_MAX - 1)
 #define HRL_Mesh3DShader								(UINT32_MAX - 2)
+#define HRL_DebugShader									(UINT32_MAX - 3)
 
 
 #ifdef __cplusplus
@@ -293,6 +297,61 @@ extern "C" {
 	 * Pitch : X, Yaw : Y, Roll : Z
 	 */
 	HRL_API void HRL_SetCameraRotation(HRL_id _camid, float pitch, float yaw, float roll);
+
+
+	//Matrices
+	//HRL_API void HRL_GetProjectionMatrice(float* aa, ...);
+	//HRL_API void HRL_GetViewMatrice(float* aa, ...);
+	//HRL_API void HRL_GetModelMatrice(float* aa, ...);
+
+
+	//Debug shapes
+	//Rach functions need to be called every frame to render continuously
+
+	//The value used by backend to define the thickness
+	HRL_API void HRL_SetDebugLineThickness(float a);
+
+	/**
+	 * @param _sceneid Scene where to display debug draw
+	 * @param a_x, a_y, a_z Coordinates of the start
+	 * @param b_x, b_y, b_z Coordinates of the end
+	 * @param r, g, b Color
+	 */
+	HRL_API void HRL_DrawDebugSegment(HRL_id _sceneid,
+		float a_x, float a_y, float a_z,
+		float b_x, float b_y, float b_z,
+		float r, float g, float b
+	);
+
+	HRL_API void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode,
+		const float* vertices_x, const float* vertices_y, const float* vertices_z,
+		int vertices_count,
+		float r, float g, float b
+	);
+
+	HRL_API void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode,
+		float center_x, float center_y, float center_z,
+		float radius, float segments,
+		float r, float g, float b
+	);
+
+	/**
+	 * @param A Start
+	 * @param B End
+	 * @param _mode HRL_DebugHollow or HRL_DebugSolid
+	 */
+	HRL_API void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode,
+		float a_x, float a_y, float a_z,
+		float b_x, float b_y, float b_z,
+		float radius, float segments,
+		float r, float g, float b
+	);
+
+	HRL_API void HRL_DrawDebugPoint(HRL_id _sceneid,
+		float a_x, float a_y, float a_z,
+		float size,
+		float r, float g, float b
+	);
 
 
 #ifdef __cplusplus

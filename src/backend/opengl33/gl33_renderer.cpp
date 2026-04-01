@@ -23,11 +23,12 @@
 #include <string>
 
 
-#define Buffer_Num      3
+#define Buffer_Num      4
 
 #define Sprite_Buffer   0
 #define Mesh2D_Buffer   1
 #define Mesh3D_Buffer   2
+#define Debug_Buffer   2
 
 
 //ordre d'importance du batching :
@@ -154,6 +155,10 @@ static std::unordered_map<int, HRL_id> fallback_textures_;
 
 
 
+//Debug//
+const std::unordered_map<HRL_id, DebugRenderer>* internal_debug_renderer=nullptr;
+
+
 /** Backend Implementation */
 
 void GL33_Init() {}
@@ -217,13 +222,7 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void* loader)
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo[Sprite_Buffer]);
   glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(sprite_indices), sprite_indices, GL_DYNAMIC_DRAW);
 
-  //gerer les vao Mesh2D et Mesh3D ici
-  //
-  //
-
-
-
-  //on crée les shaders
+  //Sprite shader
   //ajouter une gestion des erreurs
   auto* spriteShader = new GL33_Shader();
   spriteShader->GL33_Create(
@@ -233,6 +232,36 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void* loader)
     res_sprite_frag_glsl_len);
 
   shaders_.emplace(HRL_SpriteShader, spriteShader);
+
+  //gerer les vao Mesh2D et Mesh3D ici
+  //
+  //
+
+  //debug
+  glBindVertexArray(vao[Debug_Buffer]);
+  glBindBuffer(GL_ARRAY_BUFFER, vbo[Debug_Buffer]);
+
+  //nullptr car taille inconnue à l'avance, réallouée au flush
+  glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
+
+  //position (x, y, z) — 3 floats
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
+  glEnableVertexAttribArray(0);
+
+  //couleur (r, g, b) — 3 floats
+  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)(3*sizeof(float)));
+  glEnableVertexAttribArray(1);
+  //pas de glBindBuffer(GL_ELEMENT_ARRAY_BUFFER) — pas d'EBO
+
+  auto* debugShader = new GL33_Shader();
+  debugShader->GL33_Create(
+    (const char*)res_debug_vert_glsl,
+    res_debug_vert_glsl_len,
+    (const char*)res_debug_frag_glsl,
+    res_debug_frag_glsl_len);
+
+  shaders_.emplace(HRL_DebugShader, debugShader);
+
 
 
   //Creer les texures de fallback
@@ -320,6 +349,14 @@ void GL33_BindViewport(HRL_Viewport* viewport)
   currentCamera = viewport->camera_;
 }
 
+static void ApplyFallback(int index)
+{
+  //texture non trouvée, on passe la fallback texture
+  glActiveTexture(GL_TEXTURE0 + index);
+  HRL_id fallback_hrl_id = fallback_textures_[index];
+  glBindTexture(GL_TEXTURE_2D, textures_[fallback_hrl_id]->GetGL_ID());
+}
+
 void GL33_BindMaterial(HRL_Material* mat)
 {
   auto it = shaders_.find(mat->shader_);
@@ -332,6 +369,8 @@ void GL33_BindMaterial(HRL_Material* mat)
   //on set CurrentShader pour spécifier que les prochains calls utiliseront ce shader
   currentShader = s;
   s->Use();
+
+  //!!!Centraliser tout ca pour le faire une seule fois par frame!!!
 
   //taille absolue du viewport width et height (on prend en compte la taille de la fenetre et la taille relative du viewport HRL)
   float viewportWidth  = (float)currentWidth * currentViewport->width_;
@@ -370,7 +409,7 @@ void GL33_BindMaterial(HRL_Material* mat)
   s->SetMat4("view", view);
 
   //on passe tous les uniforms donnés par l'utilisateur
-  for (auto [name, value] : mat->intParams_)
+  for (const auto& [name, value] : mat->intParams_)
   {
     s->SetInt(name, value);
   }
@@ -378,29 +417,26 @@ void GL33_BindMaterial(HRL_Material* mat)
   //utilisé pour unbind les textures apres avoir draw
   textureSlotsBinded = (int)mat->textureParams_.size();
 
-  for (auto [name, val] : mat->textureParams_)
-  {
-    printf("material param, name : %s, hrl id : %u", name, val);
-  }
-
   for (int i=0; i<6; i++)
   {
     //on passe toujours les memes uniforms
     s->SetInt(tex_uniform_name[i], i);
 
     //on recherche la texture
-    auto itTexture = textures_.find(mat->textureParams_[tex_uniform_name[i]]);
-    if (itTexture == textures_.end())
+    auto itParam = mat->textureParams_.find(std::string(tex_uniform_name[i]));
+    if (itParam == mat->textureParams_.end())
     {
-      //texture non trouvée, on passe la fallback texture
-      glActiveTexture(GL_TEXTURE0 + i);
-      HRL_id fallback_hrl_id = fallback_textures_[i];
-      glBindTexture(GL_TEXTURE_2D, textures_[fallback_hrl_id]->GetGL_ID());
-      printf("texture non trouvée : %s\n", tex_uniform_name[i]);
+      ApplyFallback(i);
       continue;
     }
 
-    printf("texture trouvée : %s\n", tex_uniform_name[i]);
+    auto itTexture = textures_.find(itParam->second);
+    if (itTexture == textures_.end())
+    {
+      ApplyFallback(i);
+      continue;
+    }
+
     glActiveTexture(GL_TEXTURE0 + i);
     glBindTexture(GL_TEXTURE_2D, itTexture->second->GetGL_ID());
   }
@@ -453,7 +489,7 @@ void GL33_DrawMesh(HRL_Mesh* mesh)
   //on draw sur tous le render target
   glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
 
-  //reset les binds de textures
+  //reset les binds de textures (changer avec le nouveau systeme)
   for (int i = 0; i < textureSlotsBinded; i++)
   {
     glActiveTexture(GL_TEXTURE0 + i);
@@ -633,7 +669,114 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
   it->second->height_ = _height;
 }
 
+struct GL33_DebugRenderer {
+  size_t current_lines_buffer_size     = 0;
+  size_t current_triangles_buffer_size = 0;
+};
 
+//passer a une map pour gerer toutes les scenes
+static GL33_DebugRenderer gl_debug_renderer{};
+
+//Debug//
+void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness)
+{
+  auto it = shaders_.find(HRL_DebugShader);
+  if (it == shaders_.end())
+  {
+    SetErrorCode("GL33_DrawDebug error : debug shader doesn't exists");
+    return;
+  }
+  auto* s = it->second;
+  //on set CurrentShader pour spécifier que les prochains calls utiliseront ce shader
+  currentShader = s;
+  s->Use();
+
+  //!!!Centraliser tout ca pour le faire une seule fois par frame!!!
+
+  //taille absolue du viewport width et height (on prend en compte la taille de la fenetre et la taille relative du viewport HRL)
+  float viewportWidth  = (float)currentWidth * currentViewport->width_;
+  float viewportHeight = (float)currentHeight * currentViewport->height_;
+
+  //on evite la division par 0
+  if (viewportHeight < 1e-3f)
+  {
+    viewportHeight = 1.f;
+  }
+
+  //calcul du ratio largeur/hauteur du viewport
+  float aspect = viewportWidth / viewportHeight;
+
+  glm::mat4 proj;
+  if (currentCamera->type_ == HRL_Perspective)
+  {
+    proj = glm::perspective(glm::radians(currentCamera->value_), aspect, currentCamera->near_plane_, currentCamera->far_plane_);
+  }
+  else
+  {
+    //on calcule la taille en hauteur d'abord, puis on fait le calcul de la largeur en fonction de la hauteur et de l'aspect
+    float halfHeight = currentCamera->value_ * 0.5f;
+    float halfWidth  = halfHeight * aspect;
+    proj = glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight,
+                      currentCamera->near_plane_, currentCamera->far_plane_);
+  }
+  s->SetMat4("projection", proj);
+
+  //position et vue de la camera
+  glm::mat4 view = glm::lookAt(
+    currentCamera->position_,
+    currentCamera->position_ + GetForwardVector(currentCamera->rotation_),
+    GetUpVector(currentCamera->rotation_)
+  );
+  s->SetMat4("view", view);
+
+  //bind vao and initialize opengl evironement
+  glBindVertexArray(vao[Debug_Buffer]);
+  glBindBuffer(GL_ARRAY_BUFFER, vbo[Debug_Buffer]);
+
+  glEnable(GL_DEPTH_TEST);
+
+  //remplacer par une seule fonction dans la vtable pour eviter de le faire a chaque frames
+  glLineWidth(line_thickness);
+
+  // lignes
+  if (!_renderer.lines.empty())
+  {
+    size_t size = _renderer.lines.size() * sizeof(DebugVertex);
+
+    //réalloue si le buffer est trop petit
+    if (size > gl_debug_renderer.current_lines_buffer_size)
+    {
+      glBufferData(GL_ARRAY_BUFFER, (GLsizei)size, _renderer.lines.data(), GL_STREAM_DRAW);
+      gl_debug_renderer.current_lines_buffer_size = size;
+    }
+    else
+    {
+      glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizei)size, _renderer.lines.data());
+    }
+
+    glDrawArrays(GL_LINES, 0, (GLsizei)_renderer.lines.size());
+  }
+
+  // triangles
+  if (!_renderer.triangles.empty())
+  {
+    size_t size = _renderer.triangles.size() * sizeof(DebugVertex);
+
+    if (size > gl_debug_renderer.current_triangles_buffer_size)
+    {
+      glBufferData(GL_ARRAY_BUFFER, (GLsizei)size, _renderer.triangles.data(), GL_STREAM_DRAW);
+      gl_debug_renderer.current_triangles_buffer_size = size;
+    }
+    else
+    {
+      glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizei)size, _renderer.triangles.data());
+    }
+
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)_renderer.triangles.size());
+  }
+
+
+}
 
 
 

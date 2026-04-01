@@ -1,0 +1,19 @@
+🔒 Bloquants
+
+ Lights isolées par scene
+ Fallback texture globale
+ Unbind implicite sûr (ou reset d’état)
+ Render texture size configurable
+ HRL_Result + HRL_GetLastErrorCode()
+
+📣 Debug
+
+ Logs warning activables
+ Messages humains (pas cryptiques)
+ Mode debug vs release clair
+
+📄 Minimum doc
+
+ README : philosophie + flow
+ Exemple minimal qui marche
+ Liste des limitations connues (comme tu l’as déjà)

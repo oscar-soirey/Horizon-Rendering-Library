@@ -32,5 +32,7 @@ HRL_vtable GetOpenGL33Backend()
 	vtable.RHI_CreateShader = GL33_CreateShader;
 	vtable.RHI_DeleteShader = GL33_DeleteShader;
 
+	vtable.RHI_DrawDebug = GL33_DrawDebug;
+
 	return vtable;
 }

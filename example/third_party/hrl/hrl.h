@@ -38,15 +38,15 @@
 
 //compatibilité dll
 //#define HRL_BUILD_DLL
-//#define HRL_USE_DLL
+//#define HRL_NO_DLL
 
 #ifdef _WIN32
 	#ifdef HRL_BUILD_DLL
 		#define HRL_API __declspec(dllexport)   //compilation de la DLL
-	#elif HRL_USE_DLL
-		#define HRL_API __declspec(dllimport)   //utilisation de la DLL
+	#elifdef HRL_NO_DLL
+		#define HRL_API													//static
 	#else
-		#define HRL_API
+		#define HRL_API __declspec(dllimport)   //utilisation de la DLL
 	#endif
 #else
 	#define HRL_API
@@ -97,9 +97,12 @@ typedef unsigned int HRL_uint;
 #define HRL_3D_Mesh											0x0023
 
 //Debug geometry
-#define HRL_DebugLine										0x0031
-#define HRL_DebugBox										0x0032
-#define HRL_DebugSphere									0x0033
+//#define HRL_DebugLine										0x0031
+//#define HRL_DebugBox										0x0032
+//#define HRL_DebugSphere									0x0033
+
+#define HRL_DebugHollow									0x0031
+#define HRL_DebugSolid									0x0032
 
 //Camera
 #define HRL_Ortho												0x0041
@@ -120,6 +123,7 @@ typedef unsigned int HRL_uint;
 #define HRL_SpriteShader								(UINT32_MAX)
 #define HRL_Mesh2DShader								(UINT32_MAX - 1)
 #define HRL_Mesh3DShader								(UINT32_MAX - 2)
+#define HRL_DebugShader									(UINT32_MAX - 3)
 
 
 #ifdef __cplusplus
@@ -163,7 +167,7 @@ extern "C" {
 	 */
 	HRL_API void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid);
 	HRL_API void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z);
-	HRL_API void HRL_SetMeshRotation(HRL_id _meshid, float roll, float pitch, float yaw);
+	HRL_API void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll);
 	HRL_API void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z);
 	/**
 	 * This will be used only when 2 sprites are collinding in Z axle
@@ -187,7 +191,7 @@ extern "C" {
 	HRL_API void HRL_SetLightAttenuation(HRL_id _lightid, float a);
 
 	HRL_API void HRL_SetLightLocation(HRL_id _lightid, float x, float y, float z);
-	HRL_API void HRL_SetLightRotation(HRL_id _lightid, float roll, float pitch, float yaw);
+	HRL_API void HRL_SetLightRotation(HRL_id _lightid, float pitch, float yaw, float roll);
 
 
 
@@ -195,12 +199,10 @@ extern "C" {
 	/**
 	 * @brief Supported extensions : png, jpeg, jpg, bmp, tga, gif (single image), hdr, psd (half)
 	 * To have more information, you can visit the stb website
-	 * @param _type HRL_Tex_Albedo, HRL_Tex_Normal, HRL_Tex_Specular,
-	 * HRL_Tex_Roughness, HRL_Tex_Metalic, HRL_Tex_Alpha, HRL_Tex_ShadowMap
-	 * @param _fileContent content of the file (supported extensions) (opened in binary mode)
+	 * @param _data content of the file (supported extensions) (opened in binary mode)
 	 * @return HRL_id of the new object
 	 */
-	HRL_API HRL_id HRL_CreateTexture(const char* _fileContent, size_t _bufferSize);
+	HRL_API HRL_id HRL_CreateTexture(const char* _data, size_t _bufferSize);
 	/**
 	 * @param _textureid HRL_id of the texture
 	 */
@@ -214,8 +216,19 @@ extern "C" {
 
 
 	//scenes
+	/**
+	 * @param _renderOnScreen render scene directely on the screen or render in a texture buffer.
+	 * Default texture buffer size : 480x480, call ResizeSceneTexture to resize
+	 */
 	HRL_API HRL_id HRL_CreateScene(int _renderOnScreen);
 	HRL_API void HRL_DeleteScene(HRL_id _sceneid);
+	HRL_API void HRL_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height);
+
+	/**
+	 * Util for color picking gpu
+	 * @param _enable 0 for false, 1 for true.
+	 */
+	HRL_API void HRL_EnableColorPickingBuffer(HRL_id _scene, int _enable);
 
 
 	//Post Process
@@ -224,17 +237,17 @@ extern "C" {
 
 
 	//Shaders
-	HRL_API HRL_id HRL_CreateShader(const char* _vertContent, size_t _vertSize, const char* _fragContent, size_t _fragSize);
+	HRL_API HRL_id HRL_CreateShader(const char* _vertData, size_t _vertSize, const char* _fragData, size_t _fragSize);
 	HRL_API void HRL_DeleteShader(HRL_id _shaderid);
 
 
 	//Materials
 	//Wich contains values used by the source shader
 	/**
-	 * @param _shaderContent Code of the fragment shader (opened in binary mode)
 	 * @return HRL_id of the new object
 	 */
 	HRL_API HRL_id HRL_CreateMaterial(HRL_id _shaderid);
+
 	/**
 	 * @param _meshid HRL_id of the light
 	 */
@@ -266,7 +279,6 @@ extern "C" {
 	//Camera
 	/**
 	 * @brief Default type = ortho
-	 * @param _viewportid Id of the viewport (wich includes the camera) (default viewport id = 0)
 	 * @param _type HRL_Ortho, HRL_Perspective
 	 */
 	HRL_API HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_uint _type);
@@ -282,9 +294,64 @@ extern "C" {
 	HRL_API void HRL_SetCameraPosition(HRL_id _camid, float x, float y, float z);
 	/**
 	 * Backend information :
-	 * Roll : X, Pitch : Y, Yaw : Z
+	 * Pitch : X, Yaw : Y, Roll : Z
 	 */
-	HRL_API void HRL_SetCameraRotation(HRL_id _camid, float roll, float pitch, float yaw);
+	HRL_API void HRL_SetCameraRotation(HRL_id _camid, float pitch, float yaw, float roll);
+
+
+	//Matrices
+	//HRL_API void HRL_GetProjectionMatrice(float* aa, ...);
+	//HRL_API void HRL_GetViewMatrice(float* aa, ...);
+	//HRL_API void HRL_GetModelMatrice(float* aa, ...);
+
+
+	//Debug shapes
+	//Rach functions need to be called every frame to render continuously
+
+	//The value used by backend to define the thickness
+	HRL_API void HRL_SetDebugLineThickness(float a);
+
+	/**
+	 * @param _sceneid Scene where to display debug draw
+	 * @param a_x, a_y, a_z Coordinates of the start
+	 * @param b_x, b_y, b_z Coordinates of the end
+	 * @param r, g, b Color
+	 */
+	HRL_API void HRL_DrawDebugSegment(HRL_id _sceneid,
+		float a_x, float a_y, float a_z,
+		float b_x, float b_y, float b_z,
+		float r, float g, float b
+	);
+
+	HRL_API void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode,
+		const float* vertices_x, const float* vertices_y, const float* vertices_z,
+		int vertices_count,
+		float r, float g, float b
+	);
+
+	HRL_API void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode,
+		float center_x, float center_y, float center_z,
+		float radius, float segments,
+		float r, float g, float b
+	);
+
+	/**
+	 * @param A Start
+	 * @param B End
+	 * @param _mode HRL_DebugHollow or HRL_DebugSolid
+	 */
+	HRL_API void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode,
+		float a_x, float a_y, float a_z,
+		float b_x, float b_y, float b_z,
+		float radius, float segments,
+		float r, float g, float b
+	);
+
+	HRL_API void HRL_DrawDebugPoint(HRL_id _sceneid,
+		float a_x, float a_y, float a_z,
+		float size,
+		float r, float g, float b
+	);
 
 
 #ifdef __cplusplus

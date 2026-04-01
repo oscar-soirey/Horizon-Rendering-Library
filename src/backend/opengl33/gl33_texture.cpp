@@ -2,7 +2,7 @@
 
 #include "../../core/utils_functions.h"
 
-/** Librarie donnant acces aux fonctions OpenGL */
+/** Loader OpenGL */
 #include <glad/glad.h>
 
 /** Librarie permettant de décoder les images png, jpg, jpeg, ... */
