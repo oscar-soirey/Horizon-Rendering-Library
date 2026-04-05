@@ -25,6 +25,10 @@ public:
 
   void Resize(HRL_uint width, HRL_uint height);
 
+  void SetMinFilter(HRL_uint filter);
+  void SetMaxFilter(HRL_uint filter);
+
+
 private:
   GLuint glID_;
   GLint width_, height_, nr_channels_;

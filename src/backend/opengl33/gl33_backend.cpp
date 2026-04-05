@@ -26,6 +26,8 @@ HRL_vtable GetOpenGL33Backend()
 	vtable.RHI_CreateTextureFromBitmap = GL33_CreateTextureFromBitmap;
 	vtable.RHI_DeleteTexture = GL33_DeleteTexture;
 	vtable.RHI_GetTextureSize = GL33_GetTextureSize;
+	vtable.RHI_SetTextureMinFilter = GL33_SetTextureMinFilter;
+	vtable.RHI_SetTextureMaxFilter = GL33_SetTextureMaxFilter;
 
 	vtable.RHI_CreateScene = GL33_CreateScene;
 	vtable.RHI_DeleteScene = GL33_DeleteScene;

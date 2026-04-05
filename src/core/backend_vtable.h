@@ -37,6 +37,8 @@ typedef struct {
 	HRL_id(*RHI_CreateTextureFromBitmap)(BitmapResult bitmapResult);
 	void(*RHI_DeleteTexture)(HRL_id id);
 	void(*RHI_GetTextureSize)(HRL_id id, int *width, int *height);
+	void(*RHI_SetTextureMinFilter)(HRL_id textureid, HRL_uint filter);
+	void(*RHI_SetTextureMaxFilter)(HRL_id textureid, HRL_uint filter);
 
 	//Scenes//
 	void(*RHI_CreateScene)(HRL_id newSceneId, int renderOnScreen);

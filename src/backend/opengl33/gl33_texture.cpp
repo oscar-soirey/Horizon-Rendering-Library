@@ -116,5 +116,50 @@ HRL_uint GL33_Texture::GetHeight() const
 
 void GL33_Texture::Resize(HRL_uint width, HRL_uint height)
 {
-  //fonction pas encore implémentée
+  width_ = width;
+  height_ = height;
+
+  glBindTexture(GL_TEXTURE_2D, glID_);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+  glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void GL33_Texture::SetMinFilter(HRL_uint filter)
+{
+  glBindTexture(GL_TEXTURE_2D, glID_);
+  uint32_t param;
+  switch (filter)
+  {
+    case HRL_Filter_Nearest: { param = GL_NEAREST; break; }
+    case HRL_Filter_Linear: { param = GL_LINEAR; break; }
+    case HRL_Filter_Bilinear: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR_MIPMAP_NEAREST; break; }
+    case HRL_Filter_Trilinear: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR_MIPMAP_LINEAR; break; }
+
+    //not avalaible with opengl 3.3
+    case HRL_Filter_Anisotropic: { param = GL_LINEAR; break; }
+
+    case HRL_Filter_Supersampling: { param = GL_LINEAR; break; }
+    default: { param = GL_LINEAR; break; }
+  }
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, param);
+}
+
+void GL33_Texture::SetMaxFilter(HRL_uint filter)
+{
+  glBindTexture(GL_TEXTURE_2D, glID_);
+  uint32_t param;
+  switch (filter)
+  {
+    case HRL_Filter_Nearest: { param = GL_NEAREST; break; }
+    case HRL_Filter_Linear: { param = GL_LINEAR; break; }
+    case HRL_Filter_Bilinear: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR; break; }
+    case HRL_Filter_Trilinear: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR; break; }
+
+    //not avalaible with opengl 3.3
+    case HRL_Filter_Anisotropic: { param = GL_LINEAR; break; }
+
+    case HRL_Filter_Supersampling: { param = GL_LINEAR; break; }
+    default: { param = GL_LINEAR; break; }
+  }
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, param);
 }

@@ -316,13 +316,8 @@ HRL_id HRL_CreateMeshSprite(HRL_id _sceneid)
 	{
 		return HRL_InvalidID;
 	}
-	auto* m = new HRL_Mesh();
+	auto* m = new HRL_MeshSprite();
 	m->type_ = HRL_Sprite;
-	//default values
-	m->material_ = HRL_InvalidID;
-	m->position_ = glm::vec3(0.f);
-	m->rotation_ = glm::vec3(0.f);
-	m->scale_ = glm::vec3(1.f);
 
 	HRL_id newId = GenerateHRL_ID();
 	it_scene->second->meshes.emplace(newId, m);
@@ -331,14 +326,40 @@ HRL_id HRL_CreateMeshSprite(HRL_id _sceneid)
 	return newId;
 }
 
-void HRL_SetSpritePivotPoint(HRL_id _meshid, float x, float y)
+void HRL_SetMeshPivotPoint(HRL_id _meshid, float x, float y, float z)
 {
-
+	auto it = meshes_.find(_meshid);
+	if (it == meshes_.end())
+	{
+		lastErrorCode = "HRL_SetMeshPivotPoint, invalid ID";
+		return;
+	}
+	it->second->pivot_point_ = {x, y, z};
 }
 
-void HRL_SetSpriteUV(HRL_id _meshid, float min_u, float min_v, float max_u, float max_v)
+void HRL_SetSpriteRegion(HRL_id _meshid, float min_u, float min_v, float max_u, float max_v)
 {
-
+	if (min_u > max_u || min_v > max_v)
+	{
+		lastErrorCode = "HRL_SetSpriteRegion, minimun cannot be greater than maximum";
+		return;
+	}
+	auto it = meshes_.find(_meshid);
+	if (it == meshes_.end())
+	{
+		lastErrorCode = "HRL_SetSpriteRegion, invalid ID";
+		return;
+	}
+	auto* mesh = dynamic_cast<HRL_MeshSprite*>(it->second);
+	if (!mesh)
+	{
+		lastErrorCode = "HRL_SetSpriteRegion: trying to set region on a non-sprite mesh";
+		return;
+	}
+	mesh->region_[0] = min_u;
+	mesh->region_[1] = min_v;
+	mesh->region_[2] = max_u;
+	mesh->region_[3] = max_v;
 }
 
 void HRL_DeleteMesh(HRL_id _meshid)
@@ -572,13 +593,13 @@ void HRL_GetTextureSize(HRL_id _textureid, int *_width, int *_height)
 	}
 }
 
-void HRL_SetTextureMinFilter(HRL_uint _filter)
+void HRL_SetTextureMinFilter(HRL_id _textureid, HRL_uint _filter)
 {
-	textureMinFilter = _filter;
+	g_Backend.RHI_SetTextureMinFilter(_textureid, _filter);
 }
-void HRL_SetTextureMagFilter(HRL_uint _filter)
+void HRL_SetTextureMagFilter(HRL_id _textureid, HRL_uint _filter)
 {
-	textureMagFilter = _filter;
+	g_Backend.RHI_SetTextureMaxFilter(_textureid, _filter);
 }
 
 HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
@@ -1130,19 +1151,19 @@ void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode, const float *vertices
 	}
 }
 
-void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode, float center_x, float center_y, float center_z, float radius, float segments, float r, float g, float b)
+void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode, float center_x, float center_y, float center_z, float radius, int segments, float r, float g, float b)
 {
 	auto it = scenes_.find(_sceneid);
 	if (it == scenes_.end()) { SetErrorCode("HRL_DrawDebugCircle, sceneid is not valid"); return; }
 
-	int seg = (int)segments;
+	int seg = segments;
 	auto* vx = (float*)alloca(seg * sizeof(float));
 	auto* vy = (float*)alloca(seg * sizeof(float));
 	auto* vz = (float*)alloca(seg * sizeof(float));
 
 	for (int i = 0; i < seg; i++)
 	{
-		float angle = (float)(2.f * M_PI * i) / (float)seg;
+		float angle = (float)(2.f * M_PI * i) / seg;
 		vx[i] = center_x + radius * cosf(angle);
 		vy[i] = center_y + radius * sinf(angle);
 		vz[i] = center_z;
@@ -1151,12 +1172,12 @@ void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode, float center_x, float 
 	HRL_DrawDebugPolygon(_sceneid, _mode, vx, vy, vz, seg, r, g, b);
 }
 
-void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode, float a_x, float a_y, float a_z, float b_x, float b_y, float b_z, float radius, float segments, float r, float g, float b)
+void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode, float a_x, float a_y, float a_z, float b_x, float b_y, float b_z, float radius, int segments, float r, float g, float b)
 {
 	auto it = scenes_.find(_sceneid);
 	if (it == scenes_.end()) { SetErrorCode("HRL_DrawDebugCapsule, sceneid is not valid"); return; }
 
-	int half_seg = (int)segments / 2;
+	int half_seg = segments / 2;
 
 	// direction A→B
 	float dx = b_x - a_x;
@@ -1213,7 +1234,6 @@ void HRL_DrawDebugPoint(HRL_id _sceneid, float a_x, float a_y, float a_z, float 
 
 	debug_renderers[_sceneid].lines.emplace_back(a_x,     a_y - h, a_z, r, g, b);
 	debug_renderers[_sceneid].lines.emplace_back(a_x,     a_y + h, a_z, r, g, b);
-
 }
 
 

@@ -3,7 +3,7 @@
  * https://github.com/oscar-soirey/Horizon-Rendering-Library
  *
  * This project was developed by a single passionate developer.
- * I�ve tried to make everything work smoothly, but there may still be bugs.
+ * I've tried to make everything work smoothly, but there may still be bugs.
  * If you encounter any issues or have suggestions, please feel free to contact me at:
  * oscarsoirey.contact@gmail.com
  * Thank you for your support and understanding
@@ -46,7 +46,7 @@
   HRL_API unsigned int HRL_GL_GetShaderGL_ID(HRL_id _shaderid);
 
 	HRL_API unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid);
-  HRL_API unsigned int HRL_GL_GetSceneColorBuferGL_ID(HRL_id _sceneid);
+  HRL_API unsigned int HRL_GL_GetSceneColorBufferGL_ID(HRL_id _sceneid);
 
 #ifdef __cplusplus
   }

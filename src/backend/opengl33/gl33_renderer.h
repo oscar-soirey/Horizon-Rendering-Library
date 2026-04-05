@@ -28,6 +28,8 @@ HRL_id GL33_CreateTexture(const char* _imageContent, size_t _imageSize);
 HRL_id GL33_CreateTextureFromBitmap(BitmapResult bitmapResult);
 void GL33_DeleteTexture(HRL_id _id);
 void GL33_GetTextureSize(HRL_id id, int* width, int* height);
+void GL33_SetTextureMinFilter(HRL_id id, HRL_uint _filter);
+void GL33_SetTextureMaxFilter(HRL_id id, HRL_uint _filter);
 
 //Scene//
 void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen);

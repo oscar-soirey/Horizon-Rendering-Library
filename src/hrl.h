@@ -27,7 +27,7 @@
 #ifndef HRL_IMPL
 #define HRL_IMPL
 
-#define HRL_API_VERSION "0.2"
+#define HRL_API_VERSION "0.3"
 
 #ifdef __cplusplus
  #include <cstdint>
@@ -110,7 +110,7 @@ typedef unsigned int HRL_uint;
 #define HRL_Filter_Linear								0x0051
 #define HRL_Filter_Bilinear							0x0052
 #define HRL_Filter_Trilinear						0x0053
-#define HRL_Filter_Anistropic						0x0054
+#define HRL_Filter_Anisotropic					0x0054
 #define HRL_Filter_Supersampling				0x0055
 
 //Debug Views
@@ -164,13 +164,13 @@ extern "C" {
 	 * @brief Sets the pivot point of a sprite.
 	 *
 	 * Coordinates are normalized relative to the sprite:
-	 * (0,0) = top-left, (1,1) = bottom-right, (0.5,0.5) = center.
+	 * (-0.5,-0.5) = top-left, (0.5,0.5) = bottom-right, (0,0) = center.
 	 *
 	 * @param _meshid ID of the sprite.
-	 * @param x Normalized horizontal pivot (0 = left, 1 = right).
-	 * @param y Normalized vertical pivot (0 = top, 1 = bottom).
+	 * @param x Normalized horizontal pivot.
+	 * @param y Normalized vertical pivot.
 	 */
-	HRL_API void HRL_SetSpritePivotPoint(HRL_id _meshid, float x, float y);
+	HRL_API void HRL_SetMeshPivotPoint(HRL_id _meshid, float x, float y, float z);
 
 	/**
 	 * @brief Sets the UV coordinates for a sprite’s texture.
@@ -181,7 +181,7 @@ extern "C" {
 	 * @param max_u Maximum U coordinate (right).
 	 * @param max_v Maximum V coordinate (bottom).
 	 */
-	HRL_API void HRL_SetSpriteUV(HRL_id _meshid, float min_u, float min_v, float max_u, float max_v);
+	HRL_API void HRL_SetSpriteRegion(HRL_id _meshid, float min_u, float min_v, float max_u, float max_v);
 
 	/**
 	 * @param _sceneid
@@ -246,7 +246,14 @@ extern "C" {
 	 * @param _textureid HRL_id of the texture
 	 */
 	HRL_API void HRL_DeleteTexture(HRL_id _textureid);
-	//ajouter des fonctions de controle des textures
+
+	/**
+	 * @brief Set texture size
+	 * @param _textureid
+	 * @param width 
+	 * @param height 
+	 */
+	HRL_API void HRL_ResizeTexture(HRL_id _textureid, int width, int height);
 
 	/**
 	 * @param _textureid Texture created by HRL_GenerateTextureFromText
@@ -255,9 +262,9 @@ extern "C" {
 	HRL_API void HRL_GetTextureSize(HRL_id _textureid, int* _width, int* _height);
 
 	//when the texture is smaller on the screen than its real size
-	HRL_API void HRL_SetTextureMinFilter(HRL_uint _filter);
+	HRL_API void HRL_SetTextureMinFilter(HRL_id _textureid, HRL_uint _filter);
 	//when the texture is bigger on the screen than its real size
-	HRL_API void HRL_SetTextureMagFilter(HRL_uint _filter);
+	HRL_API void HRL_SetTextureMagFilter(HRL_id _textureid, HRL_uint _filter);
 
 	/**
 	 * @param _text Text input
@@ -288,7 +295,7 @@ extern "C" {
 	 * Util for color picking gpu
 	 * @param _enable 0 for false, 1 for true.
 	 */
-	HRL_API void HRL_EnableColorPickingBuffer(HRL_id _scene, int _enable);
+	HRL_API void HRL_EnableColorPickingBuffer(HRL_id _scene, HRL_uint _enable);
 
 
 	//Post Process
@@ -366,7 +373,7 @@ extern "C" {
 	 */
 	HRL_API void HRL_GetProjectionMatrix(float* aa);
 	HRL_API void HRL_GetViewMatrix(float* aa);
-	HRL_API void HRL_GetModelMatrix(HRL_id _objectid, float* aa);
+	HRL_API void HRL_GetModelMatrix(HRL_id _meshid, float* aa);
 
 
 	//Debug views//
@@ -403,7 +410,7 @@ extern "C" {
 
 	HRL_API void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode,
 		float center_x, float center_y, float center_z,
-		float radius, float segments,
+		float radius, int segments,
 		float r, float g, float b
 	);
 
@@ -415,7 +422,7 @@ extern "C" {
 	HRL_API void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode,
 		float a_x, float a_y, float a_z,
 		float b_x, float b_y, float b_z,
-		float radius, float segments,
+		float radius, int segments,
 		float r, float g, float b
 	);
 
@@ -432,6 +439,20 @@ extern "C" {
 	 * @param _target_path Absolute path where to save image
 	 */
 	HRL_API void HRL_TakeScreenshot(HRL_id _sceneid, const char* _target_path);
+
+	/**
+	 * @param _mode
+	 */
+	HRL_API void HRL_SetAntialiasingMode(HRL_uint _mode);
+
+
+	//Optimizations
+	/**
+	 * @brief HRL will automatically resize the textures based on the distance with the camera and the texture
+	 * @param _enable 0 means disable, 1 means enable
+	 */
+	HRL_API void HRL_EnableTextureAutoResize(HRL_uint _enable);
+
 
 
 

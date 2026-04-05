@@ -281,13 +281,14 @@ int main()
   vec3 lightpos(0.f, 0.f, 0.f);
   HRL_id light0 = HRL_CreateLight(scene, HRL_PointLight);
   HRL_SetLightAttenuation(light0, 0.02f);
+  HRL_SetLightLocation(light0, 0.f, 0.f, 12.f);
   HRL_SetLightIntensity(light0, 5.f);
   HRL_SetLightColor(light0, 1.f, 1.f, 1.f);
   HRL_SetLightRotation(light0, 0.f, 0.f, 0.f);
 
 
   size_t liAlbSize;
-  std::string AlbString = OpenFile("point_light.png", &liAlbSize);
+  std::string AlbString = OpenFile("atlas.png", &liAlbSize);
   HRL_id liAlb = HRL_CreateTexture(AlbString.c_str(), liAlbSize);
 
   HRL_id liMat = HRL_CreateMaterial(HRL_SpriteShader);
@@ -296,14 +297,22 @@ int main()
   HRL_id sprite_light = HRL_CreateMeshSprite(scene);
   HRL_SetMeshMaterial(sprite_light, liMat);
   HRL_SetMeshScale(sprite_light, 2, 2, 2);
-  HRL_SetMeshLocation(sprite_light, 10, 10, 10);
+  HRL_SetMeshLocation(sprite_light, 0, 0, 10);
   HRL_SetSpriteDrawOrder(sprite_light, 50.f);
+  HRL_SetSpriteRegion(sprite_light, 0.5f, 0.5f, 1.f, 1.f);
+  //HRL_SetMeshPivotPoint(sprite_light, 0.f,0.f,0.f);
+
+  HRL_SetTextureMinFilter(ptTex, HRL_Filter_Nearest);
+  HRL_SetTextureMagFilter(ptTex, HRL_Filter_Nearest);
+
+  float light_rotation_z=0.f;
 
 
+  //Text and font
   size_t fontSize;
   std::string font = OpenFile("simsunb.ttf", &fontSize);
   HRL_id font_id = HRL_CreateFont(font.c_str(), fontSize);
-  HRL_id text_texture = HRL_CreateTextureFromText("Hello", font_id, 100.f, 0.f,
+  HRL_id text_texture = HRL_CreateTextureFromText("Hello World !", font_id, 100.f, 0.f,
     1.f, 1.f, 1.f,
     0.f, 0.f, 0.f, 0.f
   );
@@ -347,8 +356,10 @@ int main()
     HRL_SetCameraRotation(cam1, pitch, yaw, 0.f);
 
     lightpos.z += (float)dt;
-    HRL_SetLightLocation(light0, lightpos.x, lightpos.y, lightpos.z + 10);
-    HRL_SetMeshLocation(sprite_light, lightpos.x, lightpos.y, lightpos.z);
+    light_rotation_z += (float)dt*5;
+    //HRL_SetLightLocation(light0, 0,0, lightpos.z + 10.f);
+    //HRL_SetMeshLocation(sprite_light, 0, 0, lightpos.z);
+    //HRL_SetMeshRotation(sprite_light, 0.f,0.f,light_rotation_z);
 
     //ptZRot += 1.f * (float)dt;
     //HRL_SetMeshRotation(sprite2, 0.f, 0.f, ptZRot);
@@ -356,10 +367,15 @@ int main()
     //debug keys
     if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS)
       glfwSetWindowShouldClose(win, true);
+
     if (glfwGetKey(win, GLFW_KEY_F1) == GLFW_PRESS)
       glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     if (glfwGetKey(win, GLFW_KEY_F2) == GLFW_PRESS)
       glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+
+    if (glfwGetKey(win, GLFW_KEY_F3) == GLFW_PRESS)
+      //activer l'anti-aliasing, 4x MSAA
+      glfwWindowHint(GLFW_SAMPLES, 8);
   }
 
   //on libere les ressources HRL

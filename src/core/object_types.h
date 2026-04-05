@@ -9,17 +9,26 @@
 typedef uint64_t HRL_BackendHandle;
 
 //MESH
-typedef struct {
+struct HRL_Mesh {
+  virtual ~HRL_Mesh()=default;
+
   HRL_uint type_;
 
-  HRL_id material_;
+  HRL_id material_=HRL_InvalidID;
 
-  float draw_order_;
+  float draw_order_=0.f;
 
-  glm::vec3 position_;
-  glm::vec3 rotation_;
-  glm::vec3 scale_;
-}HRL_Mesh;
+  glm::vec3 position_{0.f};
+  glm::vec3 rotation_{0.f};
+  glm::vec3 scale_{1.f};
+
+  glm::vec3 pivot_point_{0.f};
+};
+
+struct HRL_MeshSprite : HRL_Mesh {
+  //uMin, vMin, uMax, vMax
+  float region_[4] = {0.f, 0.f, 1.f, 1.f};
+};
 
 //LIGHT
 typedef struct {

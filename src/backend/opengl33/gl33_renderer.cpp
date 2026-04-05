@@ -56,14 +56,6 @@ static GLuint ubo[Ubo_Num];
 #define MAX_LIGHTS      32
 
 
-static float sprite_vertices[] = {
-  // pos      // uv
-  -0.5f, -0.5f,   0.f, 0.f,
-   0.5f, -0.5f,   1.f, 0.f,
-   0.5f,  0.5f,   1.f, 1.f,
-  -0.5f,  0.5f,   0.f, 1.f
-};
-
 //indices pour deux triangles
 static unsigned int sprite_indices[] = {
     0, 1, 2,
@@ -179,6 +171,9 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void* loader)
   //activer la transparence des shaders
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+  //activer l'anti-aliasing
+  glEnable(GL_MULTISAMPLE);
 
   //on crée les vao
   glGenVertexArrays(Buffer_Num, vao);
@@ -462,38 +457,63 @@ void GL33_BindMaterial(HRL_Material* mat)
 void GL33_DrawMesh(HRL_Mesh* mesh)
 {
   glm::mat4 model = glm::mat4(1.f);
+
+  //aller à la position du mesh
   model = glm::translate(model, mesh->position_);
 
-  //rotation autour de X
+  //aller au pivot
+  model = glm::translate(model, mesh->pivot_point_);
+
+  //tourner
   model = glm::rotate(model, mesh->rotation_.x, glm::vec3(1.f, 0.f, 0.f));
-  //Y
   model = glm::rotate(model, mesh->rotation_.y, glm::vec3(0.f, 1.f, 0.f));
-  //Z
   model = glm::rotate(model, mesh->rotation_.z, glm::vec3(0.f, 0.f, 1.f));
 
+  //revenir en arrière
+  model = glm::translate(model, -mesh->pivot_point_);
+
+  //scale
   model = glm::scale(model, mesh->scale_);
+
   currentShader->SetMat4("model", model);
 
-  //on bind le bon vao (pas besoin de bind de vbo ou ebo car ils sont configurés pour le vao)
-  glBindVertexArray(vao[Sprite_Buffer]);
-
-  //on bind le vbo et on lui envoie les données du mesh
-  glBindBuffer(GL_ARRAY_BUFFER, vbo[Sprite_Buffer]);
-
-  glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(sprite_vertices), sprite_vertices);
-
-  //desactiver si 2D, activer si 3D
-  glDisable(GL_DEPTH_TEST);
-
-
-  //on draw sur tous le render target
-  glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
-
-  //reset les binds de textures (changer avec le nouveau systeme)
-  for (int i = 0; i < textureSlotsBinded; i++)
+  if (mesh->type_ == HRL_Sprite)
   {
-    glActiveTexture(GL_TEXTURE0 + i);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    float uMin, vMin, uMax, vMax;
+    auto* sprite = static_cast<HRL_MeshSprite*>(mesh);
+    uMin = sprite->region_[0];
+    vMin = sprite->region_[1];
+    uMax = sprite->region_[2];
+    vMax = sprite->region_[3];
+
+    float vertices[] = {
+      -0.5f, -0.5f,  uMin, vMin,
+       0.5f, -0.5f,  uMax, vMin,
+       0.5f,  0.5f,  uMax, vMax,
+      -0.5f,  0.5f,  uMin, vMax,
+    };
+
+    //on bind le bon vao (pas besoin de bind de vbo ou ebo car ils sont configurés pour le vao)
+    glBindVertexArray(vao[Sprite_Buffer]);
+
+    //on bind le vbo et on lui envoie les données du mesh
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[Sprite_Buffer]);
+
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
+
+    //desactiver si 2D, activer si 3D
+    glDisable(GL_DEPTH_TEST);
+
+
+    //on draw sur tous le render target
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+
+    //reset les binds de textures (changer avec le nouveau systeme)
+    for (int i = 0; i < textureSlotsBinded; i++)
+    {
+      glActiveTexture(GL_TEXTURE0 + i);
+      glBindTexture(GL_TEXTURE_2D, 0);
+    }
   }
 }
 
@@ -594,6 +614,29 @@ void GL33_GetTextureSize(HRL_id id, int *width, int *height)
   *width = (int)it->second->GetWidth();
   *height = (int)it->second->GetHeight();
 }
+
+void GL33_SetTextureMinFilter(HRL_id id, HRL_uint _filter)
+{
+  auto it = textures_.find(id);
+  if (it == textures_.end())
+  {
+    SetErrorCode("GL33_SetTextureMinFilter error : Texture ID doesn't exists");
+    return;
+  }
+  it->second->SetMinFilter(_filter);
+}
+
+void GL33_SetTextureMaxFilter(HRL_id id, HRL_uint _filter)
+{
+  auto it = textures_.find(id);
+  if (it == textures_.end())
+  {
+    SetErrorCode("GL33_SetTextureMaxFilter error : Texture ID doesn't exists");
+    return;
+  }
+  it->second->SetMaxFilter(_filter);
+}
+
 
 
 
