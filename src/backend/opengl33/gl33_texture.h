@@ -6,12 +6,15 @@
 
 //a l'avenir, donner plus de possibilités aux textures, changer l'encodage couleur, la mode de filtrage, etc...
 
+struct BitmapResult;
+
 class GL33_Texture final {
 public:
   GL33_Texture()=default;
 
   //retourne 0 pour pas d'erreur et -1 pour erreur
   int GL33_Create(const char* _imageContent, const size_t _imageSize);
+  int GL33_CreateFromBitmap(BitmapResult* bmp);
 
   ~GL33_Texture();
 

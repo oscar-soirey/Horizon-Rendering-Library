@@ -27,6 +27,8 @@
 #ifndef HRL_IMPL
 #define HRL_IMPL
 
+#define HRL_API_VERSION "0.2"
+
 #ifdef __cplusplus
  #include <cstdint>
  #include <iostream>
@@ -36,9 +38,7 @@
 #endif
 
 
-//compatibilité dll
-//#define HRL_BUILD_DLL
-//#define HRL_NO_DLL
+//windows dll compatibility
 
 #ifdef _WIN32
 	#ifdef HRL_BUILD_DLL
@@ -92,15 +92,12 @@ typedef unsigned int HRL_uint;
 #define HRL_SpotLight										0x0013
 
 //Meshes & sprite
-#define HRL_Sprite											0x0021
+#define HRL_Sprite											0x0021   //[[deprecated]] in API
 #define HRL_2D_Mesh											0x0022
 #define HRL_3D_Mesh											0x0023
+#define HRL_3D_SkeletalMesh							0x0024
 
 //Debug geometry
-//#define HRL_DebugLine										0x0031
-//#define HRL_DebugBox										0x0032
-//#define HRL_DebugSphere									0x0033
-
 #define HRL_DebugHollow									0x0031
 #define HRL_DebugSolid									0x0032
 
@@ -115,6 +112,11 @@ typedef unsigned int HRL_uint;
 #define HRL_Filter_Trilinear						0x0053
 #define HRL_Filter_Anistropic						0x0054
 #define HRL_Filter_Supersampling				0x0055
+
+//Debug Views
+#define HRL_DebugViewNone								0x0060
+#define HRL_DebugViewNormal							0x0061
+#define HRL_DebugViewLights							0x0062
 
 
 
@@ -152,10 +154,47 @@ extern "C" {
 
 	//HRL Meshes
 	/**
-	 * @param _type HRL_Sprite, HRL_2D_Mesh, HRL_3D_Mesh
-	 * @return HRL_id of the new object
+	 * @brief Creates a new sprite in the given scene.
+	 * @param _sceneid ID of the scene to add the sprite to.
+	 * @return HRL_id of the new sprite object.
 	 */
-	HRL_API HRL_id HRL_CreateMesh(HRL_id _sceneid, HRL_uint _type);
+	HRL_API HRL_id HRL_CreateMeshSprite(HRL_id _sceneid);
+
+	/**
+	 * @brief Sets the pivot point of a sprite.
+	 *
+	 * Coordinates are normalized relative to the sprite:
+	 * (0,0) = top-left, (1,1) = bottom-right, (0.5,0.5) = center.
+	 *
+	 * @param _meshid ID of the sprite.
+	 * @param x Normalized horizontal pivot (0 = left, 1 = right).
+	 * @param y Normalized vertical pivot (0 = top, 1 = bottom).
+	 */
+	HRL_API void HRL_SetSpritePivotPoint(HRL_id _meshid, float x, float y);
+
+	/**
+	 * @brief Sets the UV coordinates for a sprite’s texture.
+	 *
+	 * @param _meshid ID of the sprite.
+	 * @param min_u Minimum U coordinate (left).
+	 * @param min_v Minimum V coordinate (top).
+	 * @param max_u Maximum U coordinate (right).
+	 * @param max_v Maximum V coordinate (bottom).
+	 */
+	HRL_API void HRL_SetSpriteUV(HRL_id _meshid, float min_u, float min_v, float max_u, float max_v);
+
+	/**
+	 * @param _sceneid
+	 * @param _type HRL_2D_Mesh, HRL_3D_Mesh, HRL_3D_SkeletalMesh
+	 */
+	HRL_API HRL_id HRL_CreateMesh(HRL_id _sceneid, HRL_uint _type, float* _vertices);
+
+	/**
+	 * Supported extensions : fbx, obj
+	 * @return
+	 */
+	HRL_API HRL_id HRL_CreateMeshFromFile(HRL_id _sceneid, HRL_uint _type, const char* _data, size_t _bufferSize);
+
 	/**
 	 * @param _meshid HRL_id of the mesh
 	 */
@@ -209,10 +248,31 @@ extern "C" {
 	HRL_API void HRL_DeleteTexture(HRL_id _textureid);
 	//ajouter des fonctions de controle des textures
 
+	/**
+	 * @param _textureid Texture created by HRL_GenerateTextureFromText
+	 * @param _width, _height Output dimensions in pixels
+	 */
+	HRL_API void HRL_GetTextureSize(HRL_id _textureid, int* _width, int* _height);
+
 	//when the texture is smaller on the screen than its real size
 	HRL_API void HRL_SetTextureMinFilter(HRL_uint _filter);
 	//when the texture is bigger on the screen than its real size
 	HRL_API void HRL_SetTextureMagFilter(HRL_uint _filter);
+
+	/**
+	 * @param _text Text input
+	 * @param _fontid Font id (created with HRL_CreateFont)
+	 * @param _font_size Vertical size (in pixel)
+	 * @param _wrap_with Size (in pixel) before text wrap, 0 = no wrap
+	 * @param r,g,b Text color
+	 * @param bg_r, bg_g, bg_b Color of the background. bg_a (alpha), 0 means transparent
+	 * @return id of the texture
+	 */
+	HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
+		float _font_size, float _wrap_width,
+		float r, float g, float b,
+		float bg_r, float bg_g, float bg_b, float bg_a
+	);
 
 
 	//scenes
@@ -269,6 +329,7 @@ extern "C" {
 	 * Normalized coordinates [0 - 1].
 	 * [0,0] ----- [1,0]
 	 * [0,1] ----- [1,1]
+	 * @param _cameraid Can be HRL_InvalidID
 	 */
 	HRL_API HRL_id HRL_CreateViewport(HRL_id _sceneid, HRL_id _cameraid, float x, float y, float _width, float _height);
 	HRL_API void HRL_DeleteViewport(HRL_id _viewportid);
@@ -300,9 +361,20 @@ extern "C" {
 
 
 	//Matrices
-	//HRL_API void HRL_GetProjectionMatrice(float* aa, ...);
-	//HRL_API void HRL_GetViewMatrice(float* aa, ...);
-	//HRL_API void HRL_GetModelMatrice(float* aa, ...);
+	/**
+	 * @param aa Mat 4x4 colum-major (contiguous)
+	 */
+	HRL_API void HRL_GetProjectionMatrix(float* aa);
+	HRL_API void HRL_GetViewMatrix(float* aa);
+	HRL_API void HRL_GetModelMatrix(HRL_id _objectid, float* aa);
+
+
+	//Debug views//
+	/**
+	 * @brief Draw the scene as debug, usefull to show normals, lights, ...
+	 * @param mode HRL_DebugViewNone, HRL_DebugViewNormal, HRL_DebugViewLights,
+	 */
+	HRL_API void HRL_DrawSceneAsDebugMode(HRL_id _sceneid, HRL_uint mode);
 
 
 	//Debug shapes
@@ -352,6 +424,26 @@ extern "C" {
 		float size,
 		float r, float g, float b
 	);
+
+
+	//Utility//
+	/**
+	 * @brief Take a screenshot of the target scene and save it as png image
+	 * @param _target_path Absolute path where to save image
+	 */
+	HRL_API void HRL_TakeScreenshot(HRL_id _sceneid, const char* _target_path);
+
+
+
+	//Text
+	/**
+	 * @param data Data of a ttf file
+	 * @param _data_size file size in bytes
+	 * @return New HRL id for the font
+	 */
+	HRL_API HRL_id HRL_CreateFont(const char* data, size_t _data_size);
+	HRL_API void HRL_DeleteFont(HRL_id _fontid);
+
 
 
 #ifdef __cplusplus

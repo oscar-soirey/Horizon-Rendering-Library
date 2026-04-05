@@ -25,7 +25,9 @@ void GL33_UpdateLights(const std::vector<HRL_Light*>& lights);
 
 //Texture//
 HRL_id GL33_CreateTexture(const char* _imageContent, size_t _imageSize);
+HRL_id GL33_CreateTextureFromBitmap(BitmapResult bitmapResult);
 void GL33_DeleteTexture(HRL_id _id);
+void GL33_GetTextureSize(HRL_id id, int* width, int* height);
 
 //Scene//
 void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen);

@@ -202,14 +202,12 @@ int main()
 {
   //on init HRL avec l'api cible
   HRL_Init(HRL_OpenGL33);
-  HRL_CheckErrors();
 
   //GLFW WINDOW//
 
   //(la gestion de glfw est mauvaise : il faudrait ajouter des logs en cas de crash, mais la ca ne nous interesse pas)
   //on init glfw
   glfwInit();
-  HRL_CheckErrors();
 
   //on crée la fenetre
   GLFWwindow* win = glfwCreateWindow(1280, 720, "HRL Example", nullptr, nullptr);
@@ -217,7 +215,6 @@ int main()
   //important! : le contexte doit etre actif avant HRL_InitContext
   glfwMakeContextCurrent(win);
   glfwSetFramebufferSizeCallback(win, framebuffer_size_callback);
-  HRL_CheckErrors();
 
   //cacher le curseur
   glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
@@ -250,7 +247,7 @@ int main()
   HRL_MaterialSetFloat(mat, "NormalStrength", 1);
 
   //mesh 1 : canada flag
-  HRL_id sprite = HRL_CreateMesh(scene, HRL_Sprite);
+  HRL_id sprite = HRL_CreateMeshSprite(scene);
   HRL_SetMeshMaterial(sprite, mat);
   HRL_SetMeshScale(sprite, 10, 10, 10);
 
@@ -263,7 +260,7 @@ int main()
   HRL_id ptTex = HRL_CreateTexture(ptString.c_str(), ptSize);
   HRL_id ptMat = HRL_CreateMaterial(HRL_SpriteShader);
   HRL_MaterialSetTexture(ptMat, HRL_T_Albedo, ptTex);
-  HRL_id sprite2 = HRL_CreateMesh(scene, HRL_Sprite);
+  HRL_id sprite2 = HRL_CreateMeshSprite(scene);
   HRL_SetMeshMaterial(sprite2, ptMat);
   HRL_SetMeshScale(sprite2, 80, 80, 80);
 
@@ -276,7 +273,8 @@ int main()
   //other camera and viewport
   HRL_id cam1 = HRL_CreateCamera(scene, HRL_Perspective);
   HRL_SetCameraPerspectiveFov(cam1, 90.f);
-  HRL_id viewport = HRL_CreateViewport(scene, cam1, 0.f, 0.f, 1.f, 1.f);
+  HRL_id viewport = HRL_CreateViewport(scene, HRL_InvalidID, 0.f, 0.f, 1.f, 1.f);
+  HRL_SetViewportCamera(viewport, cam1);
 
 
   //Lights
@@ -295,69 +293,38 @@ int main()
   HRL_id liMat = HRL_CreateMaterial(HRL_SpriteShader);
   HRL_MaterialSetTexture(liMat, HRL_T_Albedo, liAlb);
 
-  HRL_id sprite_light = HRL_CreateMesh(scene, HRL_Sprite);
+  HRL_id sprite_light = HRL_CreateMeshSprite(scene);
   HRL_SetMeshMaterial(sprite_light, liMat);
   HRL_SetMeshScale(sprite_light, 2, 2, 2);
   HRL_SetMeshLocation(sprite_light, 10, 10, 10);
   HRL_SetSpriteDrawOrder(sprite_light, 50.f);
 
 
-  //test carré debug
-	float vx[] = { 0.f, 1.f, 1.f, 0.f, 5.f };
-	float vy[] = { 0.f, 0.f, 1.f, 1.f, 4.f };
-	float vz[] = { 0.f, 0.f, 0.f, 0.f, -1.5f };
+  size_t fontSize;
+  std::string font = OpenFile("simsunb.ttf", &fontSize);
+  HRL_id font_id = HRL_CreateFont(font.c_str(), fontSize);
+  HRL_id text_texture = HRL_CreateTextureFromText("Hello", font_id, 100.f, 0.f,
+    1.f, 1.f, 1.f,
+    0.f, 0.f, 0.f, 0.f
+  );
+  HRL_id text_mat = HRL_CreateMaterial(HRL_SpriteShader);
+  HRL_MaterialSetTexture(text_mat, HRL_T_Albedo, text_texture);
+
+  HRL_id text_sprite = HRL_CreateMeshSprite(scene);
+  HRL_SetMeshMaterial(text_sprite, text_mat);
+  HRL_SetMeshLocation(text_sprite, 1, 1, 1);
 
 
+  int w;
+  int h;
+  HRL_GetTextureSize(text_texture, &w, &h);
+  HRL_SetMeshScale(text_sprite, w/40, h/40, 1.f);
 
-  //laisser
-  HRL_CheckErrors();
 
 
   //boucle principale
   while (!glfwWindowShouldClose(win))
   {
-    // cercle plein
-    //HRL_DrawDebugCircle(scene, HRL_DebugSolid,
-    //  5.f, 0.f, 1.f,
-    //  0.5f, 64,
-    //  0.f, 1.f, 0.f);
-
-    // carré creux
-    float sq1_x[] = { -0.5f,  0.5f,  0.5f, -0.5f };
-    float sq1_y[] = { -0.5f, -0.5f,  0.5f,  0.5f };
-    float sq1_z[] = {  0.f,   0.f,   0.f,   0.f  };
-    //HRL_DrawDebugPolygon(scene, HRL_DebugHollow,
-    //  sq1_x, sq1_y, sq1_z, 4,
-    //  0.f, 0.f, 1.f);
-
-    // carré plein
-    float sq2_x[] = {  4.f,  6.f,  6.f,  4.f  };
-    float sq2_y[] = { -0.5f, -0.5f, 0.5f, 0.5f };
-    float sq2_z[] = {  0.f,   0.f,  0.f,  0.f  };
-    //HRL_DrawDebugPolygon(scene, HRL_DebugSolid,
-    //  sq2_x, sq2_y, sq2_z, 4,
-    //  1.f, 1.f, 0.f);
-
-    // capsule
-    //HRL_DrawDebugCapsule(scene, HRL_DebugSolid,
-    //  -4.f, -1.f, 0.f,
-    //  -4.f,  1.f, 0.f,
-    //  0.4f, 32,
-    //  1.f, 0.5f, 0.f);
-
-    // segment
-    //HRL_DrawDebugSegment(scene,
-    //  -5.f, -2.f, 0.f,
-    //   5.f, -2.f, 0.f,
-    //  1.f, 1.f, 1.f);
-
-    // points
-    HRL_DrawDebugPoint(scene, -0.f, 0.f, 1.f, 0.1f, 1.f, 0.f, 1.f);
-    //HRL_DrawDebugPoint(scene,  0.f, 3.f, 0.f, 0.1f, 0.f, 1.f, 1.f);
-    //HRL_DrawDebugPoint(scene,  2.f, 3.f, 0.f, 0.1f, 1.f, 1.f, 0.f);
-
-    HRL_CheckErrors();
-
     //efface la frame précedente
     HRL_BeginFrame();
     //dessine les objets à l'ecran

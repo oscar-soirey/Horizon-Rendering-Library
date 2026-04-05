@@ -58,10 +58,10 @@ static GLuint ubo[Ubo_Num];
 
 static float sprite_vertices[] = {
   // pos      // uv
-  0.f, 0.f,   0.f, 0.f,
-  1.f, 0.f,   1.f, 0.f,
-  1.f, 1.f,   1.f, 1.f,
-  0.f, 1.f,   0.f, 1.f
+  -0.5f, -0.5f,   0.f, 0.f,
+   0.5f, -0.5f,   1.f, 0.f,
+   0.5f,  0.5f,   1.f, 1.f,
+  -0.5f,  0.5f,   0.f, 1.f
 };
 
 //indices pour deux triangles
@@ -553,6 +553,24 @@ HRL_id GL33_CreateTexture(const char* _imageContent, size_t _imageSize)
   return HRL_InvalidID;
 }
 
+HRL_id GL33_CreateTextureFromBitmap(BitmapResult bmp)
+{
+  //on crée la texture et on récupere le code d'erreur
+  auto* t = new GL33_Texture();
+  int error = t->GL33_CreateFromBitmap(&bmp);
+
+  //si il n'y a pas d'erreur, on génere un ID et on push la texture dans la liste des textures, sinon on retourne invalid
+  //la classe texture s'occupe des codes d'erreurs HRL, pas besoin de le faire ici.
+  if (error == 0)
+  {
+    HRL_id id = GenerateHRL_ID();
+    textures_.emplace(id, t);
+    return id;
+  }
+  return HRL_InvalidID;
+}
+
+
 void GL33_DeleteTexture(HRL_id _id)
 {
   auto it = textures_.find(_id);
@@ -563,6 +581,18 @@ void GL33_DeleteTexture(HRL_id _id)
   }
   delete it->second;
   textures_.erase(it);
+}
+
+void GL33_GetTextureSize(HRL_id id, int *width, int *height)
+{
+  auto it = textures_.find(id);
+  if (it == textures_.end())
+  {
+    SetErrorCode("GL33_GetTextureSize error : Texture ID doesn't exists");
+    return;
+  }
+  *width = (int)it->second->GetWidth();
+  *height = (int)it->second->GetHeight();
 }
 
 
@@ -670,8 +700,7 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
 }
 
 struct GL33_DebugRenderer {
-  size_t current_lines_buffer_size     = 0;
-  size_t current_triangles_buffer_size = 0;
+  size_t current_buffer_size     = 0;
 };
 
 //passer a une map pour gerer toutes les scenes
@@ -744,10 +773,10 @@ void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness)
     size_t size = _renderer.lines.size() * sizeof(DebugVertex);
 
     //réalloue si le buffer est trop petit
-    if (size > gl_debug_renderer.current_lines_buffer_size)
+    if (size > gl_debug_renderer.current_buffer_size)
     {
       glBufferData(GL_ARRAY_BUFFER, (GLsizei)size, _renderer.lines.data(), GL_STREAM_DRAW);
-      gl_debug_renderer.current_lines_buffer_size = size;
+      gl_debug_renderer.current_buffer_size = size;
     }
     else
     {
@@ -762,10 +791,10 @@ void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness)
   {
     size_t size = _renderer.triangles.size() * sizeof(DebugVertex);
 
-    if (size > gl_debug_renderer.current_triangles_buffer_size)
+    if (size > gl_debug_renderer.current_buffer_size)
     {
       glBufferData(GL_ARRAY_BUFFER, (GLsizei)size, _renderer.triangles.data(), GL_STREAM_DRAW);
-      gl_debug_renderer.current_triangles_buffer_size = size;
+      gl_debug_renderer.current_buffer_size = size;
     }
     else
     {

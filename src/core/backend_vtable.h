@@ -34,7 +34,9 @@ typedef struct {
 
 	//Textures//
 	HRL_id(*RHI_CreateTexture)(const char* imageContent, const size_t imageSize);
+	HRL_id(*RHI_CreateTextureFromBitmap)(BitmapResult bitmapResult);
 	void(*RHI_DeleteTexture)(HRL_id id);
+	void(*RHI_GetTextureSize)(HRL_id id, int *width, int *height);
 
 	//Scenes//
 	void(*RHI_CreateScene)(HRL_id newSceneId, int renderOnScreen);

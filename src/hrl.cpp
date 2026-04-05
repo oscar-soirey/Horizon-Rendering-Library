@@ -21,8 +21,12 @@
 #include <glm/glm.hpp>
 #include <nlohmann/json.hpp>
 
+//pour le texte
+#define STB_TRUETYPE_IMPLEMENTATION
+#include <stb/stb_truetype.h>
 
-//vtable utilisée pour appeller les fonctions, ne doit jamais etre modifi� apres Init()
+
+//vtable utilisée pour appeller les fonctions, ne doit jamais etre modifié apres Init()
 static HRL_vtable g_Backend;
 
 
@@ -64,6 +68,14 @@ static std::unordered_map<HRL_id, HRL_Material*> materials_;
 //debugs triés par scenes
 static std::unordered_map<HRL_id, DebugRenderer> debug_renderers{};
 static float debug_line_thickness = 1.f;
+
+
+//texte
+typedef struct {
+	stbtt_fontinfo             info;
+	std::vector<unsigned char> ttf_buffer;
+}HRL_Font;
+static std::unordered_map<HRL_id, HRL_Font*> fonts_;
 
 
 //Utils Non-API Functions :
@@ -237,6 +249,12 @@ void HRL_EndFrame()
 
 		for (const auto& [id, viewport] : scene->viewports)
 		{
+			//camera can be nullptr, just continue if not initialized
+			if (!viewport->camera_)
+			{
+				continue;
+			}
+
 			g_Backend.RHI_BindViewport(viewport);
 
 			// --- Draw Sprites --- //
@@ -291,35 +309,36 @@ const char* HRL_GetLastError()
 
 
 //Meshes//
-HRL_id HRL_CreateMesh(HRL_id _sceneid, HRL_uint _type)
+HRL_id HRL_CreateMeshSprite(HRL_id _sceneid)
 {
 	auto it_scene = scenes_.find(_sceneid);
 	if (it_scene == scenes_.end())
 	{
 		return HRL_InvalidID;
 	}
+	auto* m = new HRL_Mesh();
+	m->type_ = HRL_Sprite;
+	//default values
+	m->material_ = HRL_InvalidID;
+	m->position_ = glm::vec3(0.f);
+	m->rotation_ = glm::vec3(0.f);
+	m->scale_ = glm::vec3(1.f);
 
-	if (_type == HRL_Sprite || _type == HRL_2D_Mesh || _type == HRL_3D_Mesh)
-	{
-		auto* m = new HRL_Mesh();
-		m->type_ = _type;
-		//default values
-		m->material_ = HRL_InvalidID;
-		m->position_ = glm::vec3(0.f);
-		m->rotation_ = glm::vec3(0.f);
-		m->scale_ = glm::vec3(1.f);
+	HRL_id newId = GenerateHRL_ID();
+	it_scene->second->meshes.emplace(newId, m);
+	meshes_.emplace(newId, m);
 
-		HRL_id newId = GenerateHRL_ID();
-		it_scene->second->meshes.emplace(newId, m);
-		meshes_.emplace(newId, m);
+	return newId;
+}
 
-		return newId;
-	}
-	else
-	{
-		lastErrorCode = "HRL_CreateMesh, type not supported";
-		return HRL_InvalidID;
-	}
+void HRL_SetSpritePivotPoint(HRL_id _meshid, float x, float y)
+{
+
+}
+
+void HRL_SetSpriteUV(HRL_id _meshid, float min_u, float min_v, float max_u, float max_v)
+{
+
 }
 
 void HRL_DeleteMesh(HRL_id _meshid)
@@ -541,6 +560,18 @@ void HRL_DeleteTexture(HRL_id _textureid)
 	g_Backend.RHI_DeleteTexture(_textureid);
 }
 
+void HRL_GetTextureSize(HRL_id _textureid, int *_width, int *_height)
+{
+	if (_width && _height)
+	{
+		g_Backend.RHI_GetTextureSize(_textureid, _width, _height);
+	}
+	else
+	{
+		lastErrorCode = "HRL_GetTextureSize: width or height are not a valid pointer";
+	}
+}
+
 void HRL_SetTextureMinFilter(HRL_uint _filter)
 {
 	textureMinFilter = _filter;
@@ -548,6 +579,33 @@ void HRL_SetTextureMinFilter(HRL_uint _filter)
 void HRL_SetTextureMagFilter(HRL_uint _filter)
 {
 	textureMagFilter = _filter;
+}
+
+HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
+	float _font_size, float _wrap_width,
+	float r, float g, float b,
+	float bg_r, float bg_g, float bg_b, float bg_a
+)
+{
+	auto it = fonts_.find(_fontid);
+	if (it == fonts_.end())
+	{
+		lastErrorCode = "HRL_CreateTextureFromText: invalid font ID";
+		return HRL_InvalidID;
+	}
+
+	BitmapResult bmp = GenerateBitmap(_text, &it->second->info, it->second->ttf_buffer,
+			_font_size, _wrap_width,
+			r, g, b,
+			bg_r, bg_g, bg_b, bg_a
+	);
+	if (bmp.pixels.empty())
+	{
+		lastErrorCode = "HRL_CreateTextureFromText: bitmap generation failed, pixels is empty";
+		return HRL_InvalidID;
+	}
+
+	return g_Backend.RHI_CreateTextureFromBitmap(bmp);
 }
 
 
@@ -789,15 +847,16 @@ HRL_id HRL_CreateViewport(HRL_id _sceneid, HRL_id _cameraid, float x, float y, f
 		return HRL_InvalidID;
 	}
 
+	HRL_Camera* cam=nullptr;
+
 	auto it = cameras_.find(_cameraid);
-	if (it == cameras_.end())
+	if (it != cameras_.end())
 	{
-		lastErrorCode = "HRL_CreateViewport error : invalid ID";
-		return HRL_InvalidID;
+		cam=it->second;
 	}
 
 	//camera valide
-	auto* v = new HRL_Viewport(it->second, x, y, _width, _height);
+	auto* v = new HRL_Viewport(cam, x, y, _width, _height);
 
 	HRL_id newId = GenerateHRL_ID();
 	it_scene->second->viewports.emplace(newId, v);
@@ -829,14 +888,15 @@ void HRL_SetViewportCamera(HRL_id _viewportid, HRL_id _camid)
 		return;
 	}
 
+	HRL_Camera* cam = nullptr;
+
 	auto cam_it = cameras_.find(_camid);
-	if (cam_it == cameras_.end())
+	if (cam_it != cameras_.end())
 	{
-		lastErrorCode = "HRL_CreateViewport error : invalid Camera ID";
-		return;
+		cam = cam_it->second;
 	}
 
-	viewport_it->second->camera_ = cam_it->second;
+	viewport_it->second->camera_ = cam;
 }
 
 void HRL_SetViewportRect(HRL_id _viewportid, float x, float y, float _width, float _height)
@@ -1154,4 +1214,42 @@ void HRL_DrawDebugPoint(HRL_id _sceneid, float a_x, float a_y, float a_z, float 
 	debug_renderers[_sceneid].lines.emplace_back(a_x,     a_y - h, a_z, r, g, b);
 	debug_renderers[_sceneid].lines.emplace_back(a_x,     a_y + h, a_z, r, g, b);
 
+}
+
+
+//Text//
+HRL_id HRL_CreateFont(const char *data, size_t _data_size)
+{
+	HRL_id newId = GenerateHRL_ID();
+	auto* font = new HRL_Font();
+
+	font->ttf_buffer.assign(data, data+_data_size);
+
+	int ok = stbtt_InitFont(
+		&font->info,
+		font->ttf_buffer.data(),
+		stbtt_GetFontOffsetForIndex(font->ttf_buffer.data(), 0)
+	);
+
+	if (!ok)
+	{
+		lastErrorCode = "HRL_CreateFont: failed to parse TTF data";
+		return HRL_InvalidID;
+	}
+
+	fonts_.emplace(newId, font);
+
+	return newId;
+}
+
+void HRL_DeleteFont(HRL_id _fontid)
+{
+	auto it = fonts_.find(_fontid);
+	if (it == fonts_.end())
+	{
+		lastErrorCode = "HRL_DeleteFont: invalid ID";
+		return;
+	}
+	delete it->second;
+	fonts_.erase(it);
 }

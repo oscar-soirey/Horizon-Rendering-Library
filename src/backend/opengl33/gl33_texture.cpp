@@ -61,6 +61,39 @@ int GL33_Texture::GL33_Create(const char* _imageContent, const size_t _imageSize
   }
 }
 
+int GL33_Texture::GL33_CreateFromBitmap(BitmapResult* bmp)
+{
+  width_  = bmp->width;
+  height_ = bmp->height;
+
+  // Créer la texture OpenGL
+  glGenTextures(1, &glID_);
+  glBindTexture(GL_TEXTURE_2D, glID_);
+
+  //flip vertical du bitmap avant envoi à OpenGL
+  std::vector<unsigned char> flipped(bmp->pixels.size());
+  for (int y = 0; y < bmp->height; y++) {
+    memcpy(
+      flipped.data() + y * bmp->width * 4,
+      bmp->pixels.data() + (bmp->height - 1 - y) * bmp->width * 4,
+      bmp->width * 4
+    );
+  }
+
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+      bmp->width, bmp->height,
+      0, GL_RGBA, GL_UNSIGNED_BYTE,
+      flipped.data()
+  );
+
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+  glBindTexture(GL_TEXTURE_2D, 0);
+
+  return 0;
+}
+
 GL33_Texture::~GL33_Texture()
 {
   glDeleteTextures(1, &glID_);

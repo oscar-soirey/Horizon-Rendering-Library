@@ -90,4 +90,13 @@ struct DebugRenderer {
   std::vector<DebugVertex> triangles;
 };
 
+
+//usefull for text rendering
+struct BitmapResult {
+  std::vector<unsigned char> pixels; // RGBA
+  int width;
+  int height;
+};
+
+
 #endif
