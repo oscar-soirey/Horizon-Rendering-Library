@@ -158,6 +158,8 @@ void HRL_Init(HRL_uint _api)
 	}
 	case HRL_D3D11 :
 	{
+		g_Backend = GetDirect3D11Backend();
+		g_Backend.RHI_Init();
 		break;
 	}
 	case HRL_D3D12 :
