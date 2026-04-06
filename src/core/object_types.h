@@ -19,6 +19,8 @@ typedef struct {
 struct HRL_Mesh {
   virtual ~HRL_Mesh()=default;
 
+  HRL_id scene_;
+
   HRL_uint type_;
 
   HRL_id material_=HRL_InvalidID;

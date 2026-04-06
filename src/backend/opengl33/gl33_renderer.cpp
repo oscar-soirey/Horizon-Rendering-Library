@@ -298,6 +298,58 @@ static GL33_Shader* currentShader;
 
 static unsigned int currentWidth, currentHeight;
 
+static glm::mat4 cached_proj_mat_;
+static glm::mat4 cached_view_mat_;
+
+//calculate matrices
+glm::mat4 CalculateProjectionMatrix()
+{
+  //taille absolue du viewport width et height (on prend en compte la taille de la fenetre et la taille relative du viewport HRL)
+  float viewportWidth  = (float)currentWidth * currentViewport->width_;
+  float viewportHeight = (float)currentHeight * currentViewport->height_;
+
+  //on evite la division par 0
+  if (viewportHeight < 1e-3f)
+  {
+    viewportHeight = 1.f;
+  }
+
+  //calcul du ratio largeur/hauteur du viewport
+  float aspect = viewportWidth / viewportHeight;
+
+  glm::mat4 proj;
+  if (currentCamera->type_ == HRL_Perspective)
+  {
+    proj = glm::perspective(glm::radians(currentCamera->value_), aspect, currentCamera->near_plane_, currentCamera->far_plane_);
+  }
+  else
+  {
+    //on calcule la taille en hauteur d'abord, puis on fait le calcul de la largeur en fonction de la hauteur et de l'aspect
+    float halfHeight = currentCamera->value_ * 0.5f;
+    float halfWidth  = halfHeight * aspect;
+    proj = glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight,
+                      currentCamera->near_plane_, currentCamera->far_plane_);
+  }
+  return proj;
+}
+glm::mat4 CalculateViewMatrix()
+{
+  //position et vue de la camera
+  glm::mat4 view = glm::lookAt(
+    currentCamera->position_,
+    currentCamera->position_ + GetForwardVector(currentCamera->rotation_),
+    GetUpVector(currentCamera->rotation_)
+  );
+  return view;
+}
+//called by API pipeline
+void GL33_ComputeFrameMatrices()
+{
+  cached_proj_mat_ = CalculateProjectionMatrix();
+  cached_view_mat_ = CalculateViewMatrix();
+}
+
+
 //stocke le nombre de texures bindées avant de draw.
 //permet de savoir jusqu'a ou unbind les slots gl
 static int textureSlotsBinded;
@@ -352,6 +404,7 @@ static void ApplyFallback(int index)
   glBindTexture(GL_TEXTURE_2D, textures_[fallback_hrl_id]->GetGL_ID());
 }
 
+
 void GL33_BindMaterial(HRL_Material* mat)
 {
   auto it = shaders_.find(mat->shader_);
@@ -365,43 +418,8 @@ void GL33_BindMaterial(HRL_Material* mat)
   currentShader = s;
   s->Use();
 
-  //!!!Centraliser tout ca pour le faire une seule fois par frame!!!
-
-  //taille absolue du viewport width et height (on prend en compte la taille de la fenetre et la taille relative du viewport HRL)
-  float viewportWidth  = (float)currentWidth * currentViewport->width_;
-  float viewportHeight = (float)currentHeight * currentViewport->height_;
-
-  //on evite la division par 0
-  if (viewportHeight < 1e-3f)
-  {
-    viewportHeight = 1.f;
-  }
-
-  //calcul du ratio largeur/hauteur du viewport
-  float aspect = viewportWidth / viewportHeight;
-
-  glm::mat4 proj;
-  if (currentCamera->type_ == HRL_Perspective)
-  {
-    proj = glm::perspective(glm::radians(currentCamera->value_), aspect, currentCamera->near_plane_, currentCamera->far_plane_);
-  }
-  else
-  {
-    //on calcule la taille en hauteur d'abord, puis on fait le calcul de la largeur en fonction de la hauteur et de l'aspect
-    float halfHeight = currentCamera->value_ * 0.5f;
-    float halfWidth  = halfHeight * aspect;
-    proj = glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight,
-                      currentCamera->near_plane_, currentCamera->far_plane_);
-  }
-  s->SetMat4("projection", proj);
-
-  //position et vue de la camera
-  glm::mat4 view = glm::lookAt(
-    currentCamera->position_,
-    currentCamera->position_ + GetForwardVector(currentCamera->rotation_),
-    GetUpVector(currentCamera->rotation_)
-  );
-  s->SetMat4("view", view);
+  s->SetMat4("projection", cached_proj_mat_);
+  s->SetMat4("view", cached_view_mat_);
 
   //on passe tous les uniforms donnés par l'utilisateur
   for (const auto& [name, value] : mat->intParams_)
@@ -716,6 +734,12 @@ void GL33_DeleteScene(HRL_id _sceneid)
     return;
   }
 
+  if (it->second->framebuffer_ != 0)
+  {
+    //scene is not rendered at screen
+    glDeleteTextures(1, &it->second->texture_);
+    glDeleteFramebuffers(1, &it->second->framebuffer_);
+  }
   delete it->second;
   gpu_scenes_.erase(it);
 }
@@ -742,14 +766,54 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
   it->second->height_ = _height;
 }
 
+
+//Matrices
+void GL33_GetProjectionMatrix(float *aa)
+{
+  glm::mat4 proj = cached_proj_mat_;
+  memcpy(aa, glm::value_ptr(proj), sizeof(float) * 16);
+}
+
+void GL33_GetViewMatrix(float *aa)
+{
+  glm::mat4 proj = cached_view_mat_;
+  memcpy(aa, glm::value_ptr(proj), sizeof(float) * 16);
+}
+
+void GL33_GetModelMatrix(HRL_Mesh* mesh, float *aa)
+{
+  glm::mat4 model = glm::mat4(1.f);
+
+  //aller à la position du mesh
+  model = glm::translate(model, mesh->position_);
+
+  //aller au pivot
+  model = glm::translate(model, mesh->pivot_point_);
+
+  //tourner
+  model = glm::rotate(model, mesh->rotation_.x, glm::vec3(1.f, 0.f, 0.f));
+  model = glm::rotate(model, mesh->rotation_.y, glm::vec3(0.f, 1.f, 0.f));
+  model = glm::rotate(model, mesh->rotation_.z, glm::vec3(0.f, 0.f, 1.f));
+
+  //revenir en arrière
+  model = glm::translate(model, -mesh->pivot_point_);
+
+  //scale
+  model = glm::scale(model, mesh->scale_);
+
+  memcpy(aa, glm::value_ptr(model), sizeof(float) * 16);
+}
+
+
+
+//Debug//
 struct GL33_DebugRenderer {
-  size_t current_buffer_size     = 0;
+  size_t current_buffer_size=0;
 };
 
 //passer a une map pour gerer toutes les scenes
 static GL33_DebugRenderer gl_debug_renderer{};
 
-//Debug//
 void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness)
 {
   auto it = shaders_.find(HRL_DebugShader);
@@ -763,43 +827,8 @@ void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness)
   currentShader = s;
   s->Use();
 
-  //!!!Centraliser tout ca pour le faire une seule fois par frame!!!
-
-  //taille absolue du viewport width et height (on prend en compte la taille de la fenetre et la taille relative du viewport HRL)
-  float viewportWidth  = (float)currentWidth * currentViewport->width_;
-  float viewportHeight = (float)currentHeight * currentViewport->height_;
-
-  //on evite la division par 0
-  if (viewportHeight < 1e-3f)
-  {
-    viewportHeight = 1.f;
-  }
-
-  //calcul du ratio largeur/hauteur du viewport
-  float aspect = viewportWidth / viewportHeight;
-
-  glm::mat4 proj;
-  if (currentCamera->type_ == HRL_Perspective)
-  {
-    proj = glm::perspective(glm::radians(currentCamera->value_), aspect, currentCamera->near_plane_, currentCamera->far_plane_);
-  }
-  else
-  {
-    //on calcule la taille en hauteur d'abord, puis on fait le calcul de la largeur en fonction de la hauteur et de l'aspect
-    float halfHeight = currentCamera->value_ * 0.5f;
-    float halfWidth  = halfHeight * aspect;
-    proj = glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight,
-                      currentCamera->near_plane_, currentCamera->far_plane_);
-  }
-  s->SetMat4("projection", proj);
-
-  //position et vue de la camera
-  glm::mat4 view = glm::lookAt(
-    currentCamera->position_,
-    currentCamera->position_ + GetForwardVector(currentCamera->rotation_),
-    GetUpVector(currentCamera->rotation_)
-  );
-  s->SetMat4("view", view);
+  s->SetMat4("projection", cached_proj_mat_);
+  s->SetMat4("view", cached_view_mat_);
 
   //bind vao and initialize opengl evironement
   glBindVertexArray(vao[Debug_Buffer]);

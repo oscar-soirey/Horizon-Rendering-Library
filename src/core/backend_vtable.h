@@ -21,6 +21,7 @@ typedef struct {
 
 	//Bind Viewport appeller avant les autres binds et draw car il d�finit la camera!
 	void(*RHI_BindViewport)(HRL_Viewport* viewport);
+	void(*RHI_ComputeFrameMatrices)();
 	void(*RHI_BindMaterial)(HRL_Material* mat);
 
 	//Draw
@@ -51,6 +52,11 @@ typedef struct {
 	//Shaders//
 	HRL_id(*RHI_CreateShader)(const char* vertContent, size_t vertSize, const char* fragContent, size_t fragSize);
 	void(*RHI_DeleteShader)(HRL_id id);
+
+	//Matrices//
+	void(*RHI_GetProjectionMatrix)(float* aa);
+	void(*RHI_GetViewMatrix)(float* aa);
+	void(*RHI_GetModelMatrix)(HRL_Mesh* mesh, float* aa);
 
 	//Debug//
 	void(*RHI_DrawDebug)(const DebugRenderer&, float line_thickness);

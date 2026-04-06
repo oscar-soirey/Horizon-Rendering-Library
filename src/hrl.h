@@ -376,11 +376,7 @@ HRL_API HRL_id HRL_CreateTexture(const char* _data, size_t _bufferSize);
  */
 HRL_API void HRL_DeleteTexture(HRL_id _textureid);
 
-/**
- * @brief Resizes an existing texture to new dimensions.
- * This operation may discard current texture content.
- */
-HRL_API void HRL_ResizeTexture(HRL_id _textureid, int width, int height);
+HRL_API void HRL_ReloadTexture(HRL_id _textureid, const char* _data, size_t _bufferSize);
 
 /**
  * @brief Retrieves the current dimensions of a texture in pixels.

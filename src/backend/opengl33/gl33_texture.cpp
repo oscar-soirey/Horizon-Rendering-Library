@@ -10,7 +10,6 @@
 #include <stb/stb_image.h>
 
 #include <string>
-#include <unordered_map>
 
 int GL33_Texture::GL33_Create(const char* _imageContent, const size_t _imageSize)
 {
@@ -77,7 +76,7 @@ int GL33_Texture::GL33_CreateFromBitmap(BitmapResult* bmp)
     );
   }
 
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
       bmp->width, bmp->height,
       0, GL_RGBA, GL_UNSIGNED_BYTE,
       flipped.data()
@@ -111,20 +110,10 @@ HRL_uint GL33_Texture::GetHeight() const
   return height_;
 }
 
-void GL33_Texture::Resize(HRL_uint width, HRL_uint height)
-{
-  width_ = width;
-  height_ = height;
-
-  glBindTexture(GL_TEXTURE_2D, glID_);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-  glBindTexture(GL_TEXTURE_2D, 0);
-}
-
 void GL33_Texture::SetMinFilter(HRL_uint filter)
 {
   glBindTexture(GL_TEXTURE_2D, glID_);
-  uint32_t param;
+  GLint param;
   switch (filter)
   {
     case HRL_Filter_Nearest: { param = GL_NEAREST; break; }
@@ -144,7 +133,7 @@ void GL33_Texture::SetMinFilter(HRL_uint filter)
 void GL33_Texture::SetMaxFilter(HRL_uint filter)
 {
   glBindTexture(GL_TEXTURE_2D, glID_);
-  uint32_t param;
+  GLint param;
   switch (filter)
   {
     case HRL_Filter_Nearest: { param = GL_NEAREST; break; }

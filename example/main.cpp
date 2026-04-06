@@ -277,11 +277,6 @@ int main()
   HRL_SetMeshScale(sprite2, 80, 80, 80);
 
 
-  //camera 0 (default)
-  HRL_SetCameraType(0, HRL_Perspective);
-  HRL_SetCameraPerspectiveFov(0, 40.f);
-  HRL_SetCameraFarPlane(0, 10000.f);
-
   //other camera and viewport
   HRL_id cam1 = HRL_CreateCamera(scene, HRL_Perspective);
   HRL_SetCameraPerspectiveFov(cam1, 90.f);
@@ -322,30 +317,52 @@ int main()
 
   //Text and font
   size_t fontSize;
-  std::string font = OpenFile("simsunb.ttf", &fontSize);
+  std::string font = OpenFile("JetBrainsMono.ttf", &fontSize);
   HRL_id font_id = HRL_CreateFont(font.c_str(), fontSize);
-  HRL_id text_texture = HRL_CreateTextureFromText("Hello World !", font_id, 100.f, 0.f,
-    1.f, 1.f, 1.f,
-    0.f, 0.f, 0.f, 0.f
-  );
-  HRL_id text_mat = HRL_CreateMaterial(HRL_SpriteShader);
-  HRL_MaterialSetTexture(text_mat, HRL_T_Albedo, text_texture);
+  HRL_id mat_fps = HRL_CreateMaterial(HRL_SpriteShader);
 
-  HRL_id text_sprite = HRL_CreateMeshSprite(scene);
-  HRL_SetMeshMaterial(text_sprite, text_mat);
-  HRL_SetMeshLocation(text_sprite, 1, 1, 1);
+  HRL_id sprite_fps = HRL_CreateMeshSprite(scene);
+  HRL_SetMeshMaterial(sprite_fps, mat_fps);
+  HRL_SetMeshLocation(sprite_fps, 1, 1, 1);
 
 
-  int w;
-  int h;
-  HRL_GetTextureSize(text_texture, &w, &h);
-  HRL_SetMeshScale(text_sprite, w/40, h/40, 1.f);
 
+  float proj[16];
 
+  double ticks=0.f;
+  int seconds=0;
+  int last_seconds=0;
+
+  HRL_id texture_fps = HRL_InvalidID;
 
   //boucle principale
   while (!glfwWindowShouldClose(win))
   {
+    //calculer le deltatime
+    CalculateDeltaTime();
+
+    ticks+=dt;
+    seconds = (int)ticks;
+    if (last_seconds != seconds)
+    {
+      if (texture_fps != HRL_InvalidID)
+        HRL_DeleteTexture(texture_fps);
+
+      char buf[256];
+      snprintf(buf, sizeof(buf), "FPS : %.f", 1/dt);
+      texture_fps = HRL_CreateTextureFromText(buf, font_id, 100.f, 0.f,
+          1.f, 1.f, 1.f,
+          0.f, 0.f, 0.f, 1.f
+      );
+      HRL_MaterialSetTexture(mat_fps, HRL_T_Albedo, texture_fps);
+
+      int w, h;
+      HRL_GetTextureSize(texture_fps, &w, &h);
+      HRL_SetMeshScale(sprite_fps, w/40, h/40, 1.f);
+
+      last_seconds = seconds;
+    }
+
     //efface la frame précedente
     HRL_BeginFrame();
     //dessine les objets à l'ecran
@@ -354,9 +371,6 @@ int main()
     //update classique glfw
     glfwSwapBuffers(win);
     glfwPollEvents();
-
-    //calculer le deltatime
-    CalculateDeltaTime();
 
     //printf("FPS : %f\n", 1/dt);
 
@@ -388,6 +402,13 @@ int main()
     if (glfwGetKey(win, GLFW_KEY_F3) == GLFW_PRESS)
       //activer l'anti-aliasing, 4x MSAA
       glfwWindowHint(GLFW_SAMPLES, 8);
+
+    if (glfwGetKey(win, GLFW_KEY_F4) == GLFW_PRESS)
+    {
+      HRL_GetModelMatrix(sprite_light, proj);
+      for (int col = 0; col < 4; col++)
+        printf("%f %f %f %f\n", proj[col*4+0], proj[col*4+1], proj[col*4+2], proj[col*4+3]);
+    }
   }
 
   //on libere les ressources HRL

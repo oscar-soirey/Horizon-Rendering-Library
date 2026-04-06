@@ -217,12 +217,12 @@ HRL_API const char* HRL_ErrorEnumToString(HRL_Error err);
  */
 HRL_API const char* HRL_SeverityEnumToString(HRL_Severity sev);
 
-typedef void (*HRL_ErrorCallback)(HRL_Error code, HRL_Severity severity, const char* detail);
 /**
  * @brief Registers a callback invoked whenever an error is raised internally.
  * Useful for integrating HRL errors into a custom logging or assertion system.
  * @param _callback Function pointer with signature: void(HRL_Error, HRL_Severity, const char*).
  */
+typedef void (*HRL_ErrorCallback)(HRL_Error code, HRL_Severity severity, const char* detail);
 HRL_API void HRL_RegisterErrorCallback(HRL_ErrorCallback _callback);
 
 
@@ -376,11 +376,7 @@ HRL_API HRL_id HRL_CreateTexture(const char* _data, size_t _bufferSize);
  */
 HRL_API void HRL_DeleteTexture(HRL_id _textureid);
 
-/**
- * @brief Resizes an existing texture to new dimensions.
- * This operation may discard current texture content.
- */
-HRL_API void HRL_ResizeTexture(HRL_id _textureid, int width, int height);
+HRL_API void HRL_ReloadTexture(HRL_id _textureid, const char* _data, size_t _bufferSize);
 
 /**
  * @brief Retrieves the current dimensions of a texture in pixels.

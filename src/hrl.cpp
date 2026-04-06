@@ -257,6 +257,7 @@ void HRL_EndFrame()
 			}
 
 			g_Backend.RHI_BindViewport(viewport);
+			g_Backend.RHI_ComputeFrameMatrices();
 
 			// --- Draw Sprites --- //
 			for (const auto& sprite : GetSortedSprites(scene))
@@ -364,6 +365,7 @@ HRL_id HRL_CreateMeshSprite(HRL_id _sceneid)
 		return HRL_InvalidID;
 	}
 	auto* m = new HRL_MeshSprite();
+	m->scene_ = _sceneid;
 	m->type_ = HRL_Sprite;
 
 	HRL_id newId = GenerateHRL_ID();
@@ -417,8 +419,15 @@ void HRL_DeleteMesh(HRL_id _meshid)
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteMesh: invalid ID");
 		return;
 	}
+
+	auto scene_it = scenes_.find(it->second->scene_);
+	if (scene_it != scenes_.end())
+	{
+		scene_it->second->meshes.erase(_meshid);
+	}
+
 	delete it->second;
-	meshes_.erase(_meshid);
+	meshes_.erase(it);
 }
 
 void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid)
@@ -502,11 +511,8 @@ HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_uint _type)
 
 		return newId;
 	}
-	else
-	{
-		SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_CreateLight: invalid light type");
-		return HRL_InvalidID;
-	}
+	SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_CreateLight: invalid light type");
+	return HRL_InvalidID;
 }
 
 void HRL_DeleteLight(HRL_id _lightid)
@@ -604,6 +610,7 @@ void HRL_DeleteTexture(HRL_id _textureid)
 	g_Backend.RHI_DeleteTexture(_textureid);
 }
 
+
 void HRL_GetTextureSize(HRL_id _textureid, int *_width, int *_height)
 {
 	if (_width && _height)
@@ -672,6 +679,32 @@ void HRL_DeleteScene(HRL_id _sceneid)
 		return;
 	}
 	g_Backend.RHI_DeleteScene(_sceneid);
+
+	//delete every objects that ows the scene
+	for (const auto& [id, mesh] : it->second->meshes)
+	{
+		delete mesh;
+	}
+	it->second->meshes.clear();
+
+	for (const auto& [id, light] : it->second->lights)
+	{
+		delete light;
+	}
+	it->second->lights.clear();
+
+	for (const auto& [id, viewport] : it->second->viewports)
+	{
+		delete viewport;
+	}
+	it->second->viewports.clear();
+
+	for (const auto& [id, camera] : it->second->cameras)
+	{
+		delete camera;
+	}
+	it->second->cameras.clear();
+
 	delete it->second;
 	scenes_.erase(it);
 }
@@ -1060,6 +1093,29 @@ void HRL_SetCameraRotation(HRL_id _camid, float pitch, float yaw, float roll)
 	it->second->rotation_ = glm::vec3(pitch, yaw, roll);
 }
 
+
+
+//MATRICES
+void HRL_GetProjectionMatrix(float *aa)
+{
+	g_Backend.RHI_GetProjectionMatrix(aa);
+}
+
+void HRL_GetViewMatrix(float *aa)
+{
+	g_Backend.RHI_GetViewMatrix(aa);
+}
+
+void HRL_GetModelMatrix(HRL_id _meshid, float *aa)
+{
+	auto it = meshes_.find(_meshid);
+	if (it == meshes_.end())
+	{
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetModelMatrix: Invalid ID");
+		return;
+	}
+	g_Backend.RHI_GetModelMatrix(it->second, aa);
+}
 
 //Debug
 

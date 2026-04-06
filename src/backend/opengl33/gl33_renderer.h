@@ -17,6 +17,7 @@ void GL33_ResetFramebuffer();
 void GL33_ClearScene();
 void GL33_BindScene(HRL_id _sceneid);
 void GL33_BindViewport(HRL_Viewport* viewport);
+void GL33_ComputeFrameMatrices();
 void GL33_BindMaterial(HRL_Material* mat);
 void GL33_DrawMesh(HRL_Mesh* mesh);
 
@@ -39,6 +40,11 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height);
 //Shader//
 HRL_id GL33_CreateShader(const char* _vertContent, size_t _vertSize, const char* _fragContent, size_t _fragSize);
 void GL33_DeleteShader(HRL_id _id);
+
+//Matrices
+void GL33_GetProjectionMatrix(float* aa);
+void GL33_GetViewMatrix(float* aa);
+void GL33_GetModelMatrix(HRL_Mesh* mesh, float* aa);
 
 //Debug//
 void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness);
