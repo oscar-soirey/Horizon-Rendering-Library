@@ -8,6 +8,13 @@
 
 typedef uint64_t HRL_BackendHandle;
 
+//Errors
+typedef struct {
+  HRL_Error code;
+  HRL_Severity severity;
+  std::string detail;
+}HRL_Interal_Error;
+
 //MESH
 struct HRL_Mesh {
   virtual ~HRL_Mesh()=default;

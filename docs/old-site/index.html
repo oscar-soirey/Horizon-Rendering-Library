@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HRL Engine Documentation</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+    :root {
+        --bg: #0e0e11;
+        --bg-alt: #16161c;
+        --text: #e6e6eb;
+        --muted: #a0a0b3;
+        --accent: #4fa3ff;
+        --border: #2a2a35;
+        --code-bg: #1b1b23;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header { background: linear-gradient(135deg, #11111a, #0b0b10); border-bottom: 1px solid var(--border); padding: 3rem 2rem; }
+    header h1 { margin: 0; font-size: 2.5rem; }
+    header p { max-width: 900px; color: var(--muted); margin-top: 1rem; }
+    main { max-width: 1100px; margin: 0 auto; padding: 3rem 2rem; }
+    section { margin-bottom: 4rem; }
+    h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1.5rem; }
+    h3 { margin-top: 2rem; }
+    hr { border: none; border-top: 1px solid var(--border); margin: 3rem 0; }
+    pre { background: var(--code-bg); padding: 1rem; overflow-x: auto; border-radius: 6px; border: 1px solid var(--border); }
+    code { font-family: Consolas, monospace; font-size: 0.95rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { padding: 0.75rem; border: 1px solid var(--border); text-align: left; }
+    th { background: var(--bg-alt); }
+    ul { padding-left: 1.5rem; }
+    footer { border-top: 1px solid var(--border); padding: 2rem; color: var(--muted); text-align: center; background: var(--bg-alt); }
+    nav { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 3rem; }
+    nav ul { list-style: none; padding: 0; margin: 0; columns: 2; }
+    nav li { margin-bottom: 0.5rem; }
+</style>
+</head>
+<body>
+
+<header>
+    <h1>HRL Engine</h1>
+    <p>High-quality multi-API rendering engine for professional C/C++ applications. Designed to be minimal, flexible, and future-proof.</p>
+</header>
+
+<main>
+
+<section>
+    <h2>Note</h2>
+    <p>This project was developed by a single passionate developer. I’ve tried to make everything work smoothly, but there may still be bugs.</p>
+    <p>If you encounter any issues or have suggestions, feel free to contact me at: <a href="mailto:oscarsoirey.contact@gmail.com">oscarsoirey.contact@gmail.com</a></p>
+</section>
+
+<hr>
+
+<section>
+    <h2>HRL Engine</h2>
+    <p>HRL is a high quality, multi-API rendering engine made for professional use. It supports OpenGL, Vulkan, DirectX, Metal, and modern consoles (NVN, GNM). It provides a simple C/C++ API to manage meshes, lights, textures, shaders, materials, viewports, and cameras.</p>
+</section>
+
+<section>
+    <h2>Version</h2>
+    <p>HRL is currently in pre-alpha version 0.1 and only has the OpenGL backend available at the moment.</p>
+</section>
+
+<section>
+    <h2>Table of Contents</h2>
+    <nav>
+        <ul>
+            <li><a href="#installation">Installation</a></li>
+            <li><a href="#initialization">Initialization</a></li>
+            <li><a href="#frame">Frame</a></li>
+            <li><a href="#window">Window</a></li>
+            <li><a href="#error-handling">Error Handling</a></li>
+            <li><a href="#meshes-sprites">Meshes & Sprites</a></li>
+            <li><a href="#lights">Lights</a></li>
+            <li><a href="#textures">Textures</a></li>
+            <li><a href="#shaders-materials">Shaders & Materials</a></li>
+            <li><a href="#post-process">Post-process</a></li>
+            <li><a href="#viewports">Viewports</a></li>
+            <li><a href="#cameras">Cameras</a></li>
+            <li><a href="#constants-ids">Constants & IDs</a></li>
+        </ul>
+    </nav>
+</section>
+
+<section id="installation">
+    <h2>Installation</h2>
+    <p>Include <code>hrl.h</code> in your file:</p>
+    <pre><code>#include "hrl.h"</code></pre>
+</section>
+
+<section id="initialization">
+    <h2>Initialization</h2>
+    <pre><code>void HRL_Init(HRL_uint api);
+// apis: HRL_OpenGL33, HRL_OpenGL45, HRL_Vulkan, HRL_DX11, HRL_DX12, HRL_Metal, HRL_NVN, HRL_GNM
+
+void HRL_InitContext(HRL_uint width, HRL_uint height, void* loader);
+// width / height: window or rendering context size
+// loader: function to retrieve API function pointers (e.g., wglGetProcAddress, vkGetInstanceProcAddr)
+
+void HRL_Shutdown();</code></pre>
+</section>
+
+<section id="frame">
+    <h2>Frame</h2>
+    <pre><code>void HRL_BeginFrame();
+// Refresh and clear the viewport (needs to be called before EndFrame)
+
+void HRL_EndFrame();
+// Render the scene</code></pre>
+</section>
+
+<section id="window">
+    <h2>Window</h2>
+    <pre><code>void HRL_WindowResizeCallback(int width, int height);
+// Call when the window is resized to update viewport and projection matrices</code></pre>
+</section>
+
+<section id="error-handling">
+    <h2>Error Handling</h2>
+    <pre><code>const char* HRL_GetLastError();
+// Returns the last error message as a string</code></pre>
+</section>
+
+<section id="meshes-sprites">
+    <h2>Meshes & Sprites</h2>
+
+    <h3>Meshes</h3>
+    <pre><code>HRL_id HRL_CreateMesh(HRL_uint type);
+void HRL_DeleteMesh(HRL_id meshid);
+void HRL_SetMeshMaterial(HRL_id meshid, HRL_id matid);
+void HRL_SetMeshLocation(HRL_id meshid, float x, float y, float z);
+void HRL_SetMeshRotation(HRL_id meshid, float yaw, float pitch, float roll);
+void HRL_SetMeshScale(HRL_id meshid, float x, float y, float z);</code></pre>
+    <p>Supported mesh types: <code>HRL_Sprite</code>, <code>HRL_2D_Mesh</code>, <code>HRL_3D_Mesh</code></p>
+</section>
+
+<section id="lights">
+    <h2>Lights</h2>
+    <pre><code>HRL_id HRL_CreateLight(HRL_uint type);
+void HRL_DeleteLight(HRL_id lightid);
+void HRL_SetLightColor(HRL_id lightid, float r, float g, float b);
+void HRL_SetLightIntensity(HRL_id lightid, float intensity);
+void HRL_SetLightAttenuation(HRL_id lightid, float attenuation);
+void HRL_SetLightLocation(HRL_id lightid, float x, float y, float z);
+void HRL_SetLightRotation(HRL_id lightid, float yaw, float pitch, float roll);</code></pre>
+<p>Supported light types: <code>HRL_PointLight</code>, <code>HRL_DirectionalLight</code>, <code>HRL_SpotLight</code></p>
+</section>
+
+<section id="textures">
+    <h2>Textures</h2>
+    <pre><code>HRL_id HRL_CreateTexture(HRL_uint type, const char* fileContent, size_t bufferSize);
+void HRL_DeleteTexture(HRL_id textureid);</code></pre>
+    <table>
+        <tr><th>Texture Type</th><th>Description</th></tr>
+        <tr><td>HRL_Tex_Albedo</td><td>Diffuse / albedo map</td></tr>
+        <tr><td>HRL_Tex_Normal</td><td>Normal map</td></tr>
+        <tr><td>HRL_Tex_Specular</td><td>Specular map</td></tr>
+        <tr><td>HRL_Tex_Roughness</td><td>Roughness map</td></tr>
+        <tr><td>HRL_Tex_Metalic</td><td>Metallic map</td></tr>
+        <tr><td>HRL_Tex_Alpha</td><td>Alpha / transparency map</td></tr>
+        <tr><td>HRL_Tex_ShadowMap</td><td>Shadow map</td></tr>
+        <tr><td>HRL_Tex_CubeMap</td><td>Cubemap / environment map</td></tr>
+    </table>
+    <p>Supported formats: PNG, JPEG, BMP, TGA, GIF, HDR, PSD.</p>
+</section>
+
+<section id="shaders-materials">
+    <h2>Shaders & Materials</h2>
+    <pre><code>HRL_id HRL_CreateShader(const char* vertContent, size_t vertSize, const char* fragContent, size_t fragSize);
+void HRL_DeleteShader(HRL_id shaderid);
+
+HRL_id HRL_CreateMaterial(HRL_id shaderid);
+void HRL_DeleteMaterial(HRL_id matid);
+
+void HRL_MaterialSetInt(HRL_id matid, const char* uniformName, int value);
+void HRL_MaterialSetBool(HRL_id matid, int value);
+void HRL_MaterialSetFloat(HRL_id matid, const char* uniformName, float value);
+void HRL_MaterialSetVec2(HRL_id matid, const char* uniformName, float x, float y);
+void HRL_MaterialSetVec3(HRL_id matid, const char* uniformName, float x, float y, float z);
+void HRL_MaterialSetVec4(HRL_id matid, const char* uniformName, float x, float y, float z, float w);
+void HRL_MaterialSetTexture(HRL_id matid, const char* uniformName, HRL_id textureid);</code></pre>
+</section>
+
+<section id="post-process">
+    <h2>Post-process</h2>
+    <pre><code>HRL_id HRL_CreatePostProcess(HRL_id matid);
+void HRL_DeletePostProcess(HRL_id postid);</code></pre>
+</section>
+
+<section id="viewports">
+    <h2>Viewports</h2>
+    <pre><code>HRL_id HRL_CreateWiewport(float x, float y, float width, float height);
+void HRL_DeleteViewport(HRL_id viewportid);
+void HRL_SetViewportRect(HRL_id viewportid, float x, float y, float width, float height);</code></pre>
+<p>Normalized coordinates [0,1]. Useful for split-screen or mini-maps.</p>
+</section>
+
+<section id="cameras">
+    <h2>Cameras</h2>
+    <pre><code>void HRL_SetCameraView(HRL_id viewportid, HRL_uint type);
+void HRL_SetCameraOrthoVertical(HRL_id viewportid, float height);
+void HRL_SetCameraPerspectiveFov(HRL_id viewportid, float fov);
+void HRL_SetCameraPosition(HRL_id viewportid, float x, float y, float z);
+void HRL_SetCameraRotation(HRL_id viewportid, float yaw, float pitch, float roll);</code></pre>
+<p>Camera types: <code>HRL_Ortho</code>, <code>HRL_Perspective</code>. Each viewport contains one camera.</p>
+</section>
+
+<section id="constants-ids">
+    <h2>Constants & IDs</h2>
+    <table>
+        <tr><th>Category</th><th>Constants / IDs</th></tr>
+        <tr><td>Boolean</td><td>HRL_True, HRL_False</td></tr>
+        <tr><td>Error</td><td>HRL_InvalidID</td></tr>
+        <tr><td>API</td><td>HRL_OpenGL33, HRL_OpenGL45, HRL_Vulkan, HRL_DX11, HRL_DX12, HRL_Metal, HRL_NVN, HRL_GNM</td></tr>
+        <tr><td>Lights</td><td>HRL_PointLight, HRL_DirectionalLight, HRL_SpotLight</td></tr>
+        <tr><td>Meshes</td><td>HRL_Sprite, HRL_2D_Mesh, HRL_3D_Mesh</td></tr>
+        <tr><td>Debug Geometry</td><td>HRL_DebugLine, HRL_DebugBox, HRL_DebugSphere</td></tr>
+        <tr><td>Textures</td><td>HRL_Tex_Albedo, HRL_Tex_Normal, HRL_Tex_Specular, HRL_Tex_Roughness, HRL_Tex_Metalic, HRL_Tex_Alpha, HRL_Tex_ShadowMap, HRL_Tex_CubeMap</td></tr>
+        <tr><td>Camera</td><td>HRL_Ortho, HRL_Perspective</td></tr>
+    </table>
+    <p>Every object is identified by a unique <code>HRL_id</code>. Default shaders and materials have reserved IDs. HRL is minimal, flexible, and easy to integrate into C/C++ projects.</p>
+</section>
+
+</main>
+
+<footer>
+    HRL Engine – Documentation · 0.1 Pre-Alpha · 2026 · Built by Oscar Soirey
+</footer>
+
+</body>
+</html>

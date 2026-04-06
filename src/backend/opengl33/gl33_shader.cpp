@@ -33,7 +33,7 @@ int GL33_Shader::GL33_Create(const char* _vertContent, size_t _vertSize, const c
   if (!success)
   {
     glGetShaderInfoLog(vertex, 512, nullptr, infoLog);
-    SetErrorCode("Vertex Compilation Failed: " + static_cast<std::string>(infoLog));
+    SetErrorCode(HRL_SHADER_COMPILE_FAIL, HRL_SEVERITY_FATAL, "Vertex Compilation Failed: " + static_cast<std::string>(infoLog));
     glDeleteShader(vertex);
     return -1;
   }
@@ -48,7 +48,7 @@ int GL33_Shader::GL33_Create(const char* _vertContent, size_t _vertSize, const c
   if (!success)
   {
     glGetShaderInfoLog(fragment, 512, nullptr, infoLog);
-    SetErrorCode("Fragment Compilation Failed: " + static_cast<std::string>(infoLog));
+    SetErrorCode(HRL_SHADER_COMPILE_FAIL, HRL_SEVERITY_FATAL, "Fragment Compilation Failed: " + static_cast<std::string>(infoLog));
     glDeleteShader(fragment);
     return -1;
   }
@@ -64,7 +64,7 @@ int GL33_Shader::GL33_Create(const char* _vertContent, size_t _vertSize, const c
   if (!success)
   {
     glGetProgramInfoLog(id, 512, nullptr, infoLog);
-    SetErrorCode("Program link Failed: " + static_cast<std::string>(infoLog));
+    SetErrorCode(HRL_SHADER_COMPILE_FAIL, HRL_SEVERITY_FATAL, "Program link Failed: " + static_cast<std::string>(infoLog));
     glDeleteProgram(id);
     return -1;
   }
@@ -74,24 +74,6 @@ int GL33_Shader::GL33_Create(const char* _vertContent, size_t _vertSize, const c
   glDeleteShader(fragment);
 
   glUseProgram(id);
-  /*
-  //On set tous les uniforms constants de texture (albedo -> 0, normal -> 1, etc...)
-  glUniform1i(FindUniformLocation("Albedo"), 0);
-  glUniform1i(FindUniformLocation("Normal"), 1);
-  glUniform1i(FindUniformLocation("Specular"), 2);
-  glUniform1i(FindUniformLocation("Roughness"), 3);
-  glUniform1i(FindUniformLocation("Metalic"), 4);
-  glUniform1i(FindUniformLocation("Alpha"), 5);
-  glUniform1i(FindUniformLocation("ShadowMap"), 6);
-  glUniform1i(FindUniformLocation("CubeMap"), 7);
-  glUniform1i(FindUniformLocation("TexCustom0"), 8);
-  glUniform1i(FindUniformLocation("TexCustom1"), 9);
-  glUniform1i(FindUniformLocation("TexCustom2"), 10);
-  glUniform1i(FindUniformLocation("TexCustom3"), 11);
-  glUniform1i(FindUniformLocation("TexCustom4"), 12);
-  glUniform1i(FindUniformLocation("TexCustom5"), 13);
-  glUniform1i(FindUniformLocation("TexCustom6"), 14);
-  */
 
 
   //Faire les bindings des ubo (obligatoire coté CPU avant opengl 4.2+)

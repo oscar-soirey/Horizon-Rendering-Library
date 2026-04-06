@@ -164,7 +164,7 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void* loader)
 
   if (!gladLoadGLLoader((GLADloadproc)loader))
   {
-    SetErrorCode("Failed to init GLAD, (loader error)");
+    SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_FATAL, "Failed to init GLAD, (loader error)");
     return;
   }
 
@@ -307,7 +307,7 @@ void GL33_BindScene(HRL_id _sceneid)
   auto it = gpu_scenes_.find(_sceneid);
   if (it == gpu_scenes_.end())
   {
-    SetErrorCode("Bind Scene error : scene id not valid");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33 Bind Scene error : scene id not valid");
     return;
   }
   currentScene = it->second;
@@ -357,7 +357,7 @@ void GL33_BindMaterial(HRL_Material* mat)
   auto it = shaders_.find(mat->shader_);
   if (it == shaders_.end())
   {
-    SetErrorCode("Bind material error : shader doesn't exists");
+    SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_FATAL, "Bind material error : shader doesn't exists");
     return;
   }
   auto* s = it->second;
@@ -596,7 +596,7 @@ void GL33_DeleteTexture(HRL_id _id)
   auto it = textures_.find(_id);
   if (it == textures_.end())
   {
-    SetErrorCode("DeleteTexture error : Texture ID doesn't exists");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteTexture error : Texture ID doesn't exists");
     return;
   }
   delete it->second;
@@ -608,7 +608,7 @@ void GL33_GetTextureSize(HRL_id id, int *width, int *height)
   auto it = textures_.find(id);
   if (it == textures_.end())
   {
-    SetErrorCode("GL33_GetTextureSize error : Texture ID doesn't exists");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_GetTextureSize error : Texture ID doesn't exists");
     return;
   }
   *width = (int)it->second->GetWidth();
@@ -620,7 +620,7 @@ void GL33_SetTextureMinFilter(HRL_id id, HRL_uint _filter)
   auto it = textures_.find(id);
   if (it == textures_.end())
   {
-    SetErrorCode("GL33_SetTextureMinFilter error : Texture ID doesn't exists");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMinFilter error : Texture ID doesn't exists");
     return;
   }
   it->second->SetMinFilter(_filter);
@@ -631,7 +631,7 @@ void GL33_SetTextureMaxFilter(HRL_id id, HRL_uint _filter)
   auto it = textures_.find(id);
   if (it == textures_.end())
   {
-    SetErrorCode("GL33_SetTextureMaxFilter error : Texture ID doesn't exists");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMaxFilter error : Texture ID doesn't exists");
     return;
   }
   it->second->SetMaxFilter(_filter);
@@ -662,7 +662,7 @@ void GL33_DeleteShader(HRL_id _id)
   auto it = shaders_.find(_id);
   if (it == shaders_.end())
   {
-    SetErrorCode("DeleteShader error : Shader ID doesn't exists");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteShader error : Shader ID doesn't exists");
     return;
   }
   else
@@ -712,7 +712,7 @@ void GL33_DeleteScene(HRL_id _sceneid)
   auto it = gpu_scenes_.find(_sceneid);
   if (it == gpu_scenes_.end())
   {
-    SetErrorCode("GL33_DeleteScene error : invalid scene id");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_DeleteScene error : invalid scene id");
     return;
   }
 
@@ -725,12 +725,12 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
   auto it = gpu_scenes_.find(_sceneid);
   if (it == gpu_scenes_.end())
   {
-    SetErrorCode("GL33_ResizeSceneTexture error : invalid scene id");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_ResizeSceneTexture error : invalid scene id");
     return;
   }
   if (it->second->framebuffer_ == 0)
   {
-    SetErrorCode("GL33_ResizeSceneTexture error : scene is render on the screen");
+    SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_WARNING, "GL33_ResizeSceneTexture error : scene is render on the screen");
     return;
   }
 
@@ -755,7 +755,7 @@ void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness)
   auto it = shaders_.find(HRL_DebugShader);
   if (it == shaders_.end())
   {
-    SetErrorCode("GL33_DrawDebug error : debug shader doesn't exists");
+    SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_FATAL, "GL33_DrawDebug error : debug shader doesn't exists");
     return;
   }
   auto* s = it->second;
@@ -859,7 +859,7 @@ unsigned int HRL_GL_GetTextureGL_ID(HRL_id _textureid)
   auto it = textures_.find(_textureid);
   if (it == textures_.end())
   {
-    SetErrorCode("HRL_GL_GetTextureGL_ID error : Texture ID doesn't exists");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetTextureGL_ID error : Texture ID doesn't exists");
     return GL_INVALID_VALUE;
   }
 
@@ -872,7 +872,7 @@ unsigned int HRL_GL_GetShaderGL_ID(HRL_id _shaderid)
   auto it = shaders_.find(_shaderid);
   if (it == shaders_.end())
   {
-    SetErrorCode("HRL_GL_GetShaderGL_ID error : Shader ID doesn't exists");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetShaderGL_ID error : Shader ID doesn't exists");
     return GL_INVALID_VALUE;
   }
 
@@ -884,7 +884,7 @@ unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid)
   auto it = gpu_scenes_.find(_sceneid);
   if (it == gpu_scenes_.end())
   {
-    SetErrorCode("HRL_GL_GetSceneTextureGL_ID : ");
+    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneTextureGL_ID : scene ID is not valid");
     return GL_INVALID_VALUE;
   }
 

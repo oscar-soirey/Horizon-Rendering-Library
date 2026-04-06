@@ -197,6 +197,15 @@ void DrawDebugExamples(HRL_id sceneId)
   HRL_DrawDebugPoint(sceneId, -1.f,  2.f, 0.f, 0.1f, 1.f, 1.f, 0.f); // jaune
 }
 
+void ErrorCallback(HRL_Error code, HRL_Severity severity, const char* detail)
+{
+  printf("error of type : %s, severity : %s, detail : %s\n", HRL_ErrorEnumToString(code), HRL_SeverityEnumToString(severity), detail);
+  if (severity >= HRL_SEVERITY_FATAL)
+  {
+    exit(code);
+  }
+}
+
 
 int main()
 {
@@ -223,6 +232,9 @@ int main()
 
   //désactiver la v-sync
   glfwSwapInterval(0);
+
+
+  HRL_RegisterErrorCallback(ErrorCallback);
 
 
   //on appelle initcontext avec le loader glfw (qui renvoie l'adresse opaque de la fenetre en gros)

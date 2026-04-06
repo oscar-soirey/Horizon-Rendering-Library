@@ -13,7 +13,7 @@
 
 #include <glm/glm.hpp>
 
-void SetErrorCode(const std::string& e);
+void SetErrorCode(HRL_Error e, HRL_Severity severity, const std::string& detail);
 
 HRL_id GenerateHRL_ID();
 

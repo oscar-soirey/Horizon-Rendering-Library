@@ -2,234 +2,1605 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>HRL Engine Documentation</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HRL — Horizon Rendering Library</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
 <style>
-    :root {
-        --bg: #0e0e11;
-        --bg-alt: #16161c;
-        --text: #e6e6eb;
-        --muted: #a0a0b3;
-        --accent: #4fa3ff;
-        --border: #2a2a35;
-        --code-bg: #1b1b23;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    header { background: linear-gradient(135deg, #11111a, #0b0b10); border-bottom: 1px solid var(--border); padding: 3rem 2rem; }
-    header h1 { margin: 0; font-size: 2.5rem; }
-    header p { max-width: 900px; color: var(--muted); margin-top: 1rem; }
-    main { max-width: 1100px; margin: 0 auto; padding: 3rem 2rem; }
-    section { margin-bottom: 4rem; }
-    h2 { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1.5rem; }
-    h3 { margin-top: 2rem; }
-    hr { border: none; border-top: 1px solid var(--border); margin: 3rem 0; }
-    pre { background: var(--code-bg); padding: 1rem; overflow-x: auto; border-radius: 6px; border: 1px solid var(--border); }
-    code { font-family: Consolas, monospace; font-size: 0.95rem; }
-    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-    th, td { padding: 0.75rem; border: 1px solid var(--border); text-align: left; }
-    th { background: var(--bg-alt); }
-    ul { padding-left: 1.5rem; }
-    footer { border-top: 1px solid var(--border); padding: 2rem; color: var(--muted); text-align: center; background: var(--bg-alt); }
-    nav { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 3rem; }
-    nav ul { list-style: none; padding: 0; margin: 0; columns: 2; }
-    nav li { margin-bottom: 0.5rem; }
+  :root {
+    --bg:        #0c0e12;
+    --bg-2:      #111318;
+    --bg-3:      #181b22;
+    --bg-4:      #1e2230;
+    --border:    #252a36;
+    --border-2:  #2e3447;
+    --accent:    #3b82f6;
+    --accent-2:  #60a5fa;
+    --accent-dim:#1d3a6e;
+    --accent-glow: rgba(59,130,246,0.15);
+    --text:      #e2e6f0;
+    --text-2:    #8b93a8;
+    --text-3:    #5a6278;
+    --green:     #34d399;
+    --orange:    #fb923c;
+    --purple:    #a78bfa;
+    --red:       #f87171;
+    --sidebar-w: 270px;
+    --header-h:  56px;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-head: 'Syne', sans-serif;
+    --font-body: 'DM Sans', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+
+  /* ── SCROLLBAR ── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--accent-dim); }
+
+  /* ── HEADER ── */
+  header {
+    position: fixed; top: 0; left: 0; right: 0; height: var(--header-h);
+    background: rgba(12,14,18,0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 24px;
+    z-index: 100;
+  }
+  .header-logo {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.1em;
+    color: var(--accent-2);
+    padding: 4px 10px;
+    border: 1px solid var(--accent-dim);
+    border-radius: 4px;
+    background: var(--accent-glow);
+    white-space: nowrap;
+  }
+  .header-title {
+    font-family: var(--font-head);
+    font-weight: 600;
+    font-size: 16px;
+    color: var(--text);
+    letter-spacing: 0.02em;
+  }
+  .header-version {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-3);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 2px 7px;
+  }
+  .header-spacer { flex: 1; }
+  .header-github {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-2);
+    text-decoration: none;
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    transition: all .2s;
+  }
+  .header-github:hover { color: var(--accent-2); border-color: var(--accent-dim); background: var(--accent-glow); }
+
+  /* ── LAYOUT ── */
+  .layout {
+    display: flex;
+    padding-top: var(--header-h);
+    min-height: 100vh;
+  }
+
+  /* ── SIDEBAR ── */
+  nav.sidebar {
+    position: fixed;
+    top: var(--header-h);
+    left: 0;
+    width: var(--sidebar-w);
+    height: calc(100vh - var(--header-h));
+    overflow-y: auto;
+    background: var(--bg-2);
+    border-right: 1px solid var(--border);
+    padding: 24px 0 40px;
+  }
+  .sidebar-section-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    padding: 18px 20px 6px;
+  }
+  .sidebar a {
+    display: block;
+    font-size: 13.5px;
+    color: var(--text-2);
+    text-decoration: none;
+    padding: 5px 20px;
+    border-left: 2px solid transparent;
+    transition: all .15s;
+    line-height: 1.5;
+  }
+  .sidebar a:hover { color: var(--text); background: var(--bg-3); }
+  .sidebar a.active { color: var(--accent-2); border-left-color: var(--accent); background: var(--accent-glow); }
+  .sidebar a.sub {
+    padding-left: 34px;
+    font-size: 12.5px;
+    color: var(--text-3);
+  }
+  .sidebar a.sub:hover { color: var(--text-2); }
+  .sidebar a.sub.active { color: var(--accent-2); }
+
+  /* ── CONTENT ── */
+  main {
+    margin-left: var(--sidebar-w);
+    flex: 1;
+    max-width: 900px;
+    padding: 48px 52px 100px;
+  }
+
+  /* ── SECTIONS ── */
+  .doc-section { margin-bottom: 72px; }
+
+  h1 {
+    font-family: var(--font-head);
+    font-size: 36px;
+    font-weight: 800;
+    color: var(--text);
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    margin-bottom: 6px;
+  }
+  h1 .accent { color: var(--accent-2); }
+  .doc-subtitle {
+    font-size: 16px;
+    color: var(--text-2);
+    font-weight: 300;
+    margin-bottom: 28px;
+  }
+
+  h2 {
+    font-family: var(--font-head);
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.01em;
+    margin: 48px 0 20px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  h2 .section-tag {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-glow);
+    border: 1px solid var(--accent-dim);
+    border-radius: 3px;
+    padding: 2px 7px;
+    margin-left: auto;
+  }
+
+  h3 {
+    font-family: var(--font-head);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 32px 0 12px;
+    letter-spacing: 0.01em;
+  }
+
+  p { color: var(--text-2); margin-bottom: 14px; line-height: 1.75; }
+  p strong { color: var(--text); font-weight: 500; }
+
+  /* ── INTRO CALLOUT ── */
+  .intro-callout {
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    padding: 18px 22px;
+    margin: 24px 0 36px;
+    color: var(--text-2);
+    font-size: 14.5px;
+    line-height: 1.8;
+  }
+  .intro-callout strong { color: var(--accent-2); }
+
+  /* ── FUNCTION CARDS ── */
+  .fn-card {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 16px;
+    overflow: hidden;
+    transition: border-color .2s;
+  }
+  .fn-card:hover { border-color: var(--border-2); }
+  .fn-card-header {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 14px 18px 12px;
+    background: var(--bg-3);
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+  }
+  .fn-card-header:hover { background: var(--bg-4); }
+  .fn-sig {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text);
+    flex: 1;
+    line-height: 1.6;
+  }
+  .fn-sig .ret { color: var(--purple); }
+  .fn-sig .name { color: var(--accent-2); font-weight: 600; }
+  .fn-sig .param-name { color: var(--orange); }
+  .fn-sig .param-type { color: var(--green); }
+  .fn-card-body {
+    padding: 14px 18px;
+    display: none;
+  }
+  .fn-card-body.open { display: block; }
+  .fn-card-body p { font-size: 13.5px; margin-bottom: 10px; }
+  .fn-card-body p:last-child { margin-bottom: 0; }
+
+  /* param table */
+  .param-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+  .param-table th {
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .param-table td {
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    color: var(--text-2);
+    line-height: 1.5;
+  }
+  .param-table tr:last-child td { border-bottom: none; }
+  .param-table td:first-child { font-family: var(--font-mono); color: var(--orange); font-size: 12px; }
+  .param-table td:nth-child(2) { font-family: var(--font-mono); color: var(--green); font-size: 12px; }
+
+  /* return tag */
+  .returns {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--text-2);
+  }
+  .returns .label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--purple);
+    background: rgba(167,139,250,0.1);
+    border: 1px solid rgba(167,139,250,0.25);
+    border-radius: 3px;
+    padding: 2px 7px;
+  }
+
+  /* chevron */
+  .chevron {
+    width: 16px; height: 16px;
+    color: var(--text-3);
+    flex-shrink: 0;
+    margin-top: 2px;
+    transition: transform .2s;
+  }
+  .chevron.open { transform: rotate(90deg); }
+
+  /* ── CODE BLOCKS ── */
+  pre {
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    margin: 12px 0 20px;
+  }
+  code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text);
+    line-height: 1.7;
+  }
+  p code, li code {
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-size: 12px;
+    color: var(--accent-2);
+  }
+  .kw  { color: var(--purple); }
+  .ty  { color: var(--green); }
+  .fn  { color: var(--accent-2); }
+  .cm  { color: var(--text-3); font-style: italic; }
+  .str { color: var(--orange); }
+  .num { color: #f9a8d4; }
+
+  /* ── INFO BOXES ── */
+  .info-box {
+    display: flex; gap: 12px; align-items: flex-start;
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 14px 16px;
+    margin: 16px 0;
+    font-size: 13.5px;
+    color: var(--text-2);
+    line-height: 1.65;
+  }
+  .info-box.warn { border-left: 3px solid var(--orange); }
+  .info-box.note { border-left: 3px solid var(--accent); }
+  .info-box.tip  { border-left: 3px solid var(--green); }
+  .info-box .icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+
+  /* ── TABLE ── */
+  .doc-table { width: 100%; border-collapse: collapse; margin: 16px 0 24px; font-size: 13.5px; }
+  .doc-table th {
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-3);
+  }
+  .doc-table td {
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-2);
+    vertical-align: top;
+  }
+  .doc-table tr:hover td { background: var(--bg-3); }
+  .doc-table td:first-child { font-family: var(--font-mono); font-size: 12.5px; color: var(--accent-2); }
+
+  /* ── DIVIDER ── */
+  .section-divider {
+    height: 1px;
+    background: linear-gradient(to right, var(--border), transparent);
+    margin: 48px 0;
+  }
+
+  /* ── BADGES ── */
+  .badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 3px;
+    margin-right: 4px;
+  }
+  .badge-deprecated { background: rgba(248,113,113,0.12); color: var(--red); border: 1px solid rgba(248,113,113,0.3); }
+  .badge-reserved   { background: rgba(167,139,250,0.12); color: var(--purple); border: 1px solid rgba(167,139,250,0.3); }
 </style>
 </head>
 <body>
 
+<!-- HEADER -->
 <header>
-    <h1>HRL Engine</h1>
-    <p>High-quality multi-API rendering engine for professional C/C++ applications. Designed to be minimal, flexible, and future-proof.</p>
+  <span class="header-logo">HRL</span>
+  <span class="header-title">Horizon Rendering Library</span>
+  <span class="header-version">v0.3</span>
+  <div class="header-spacer"></div>
+  <a class="header-github" href="https://github.com/oscar-soirey/Horizon-Rendering-Library" target="_blank">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+    GitHub
+  </a>
 </header>
 
+<!-- LAYOUT -->
+<div class="layout">
+
+<!-- SIDEBAR -->
+<nav class="sidebar" id="sidebar">
+  <div class="sidebar-section-label">Getting Started</div>
+  <a href="#introduction">Introduction</a>
+  <a href="#philosophy">Object Model</a>
+  <a href="#lifecycle">Lifecycle</a>
+  <a href="#backends">Backends</a>
+
+  <div class="sidebar-section-label">API Reference</div>
+  <a href="#init">Initialization</a>
+  <a class="sub" href="#init-fn">HRL_Init</a>
+  <a class="sub" href="#initcontext-fn">HRL_InitContext</a>
+  <a class="sub" href="#shutdown-fn">HRL_Shutdown</a>
+  <a class="sub" href="#frame-fn">Frame Functions</a>
+  <a class="sub" href="#resize-fn">Window Resize</a>
+
+  <a href="#errors">Error Handling</a>
+  <a class="sub" href="#getlasterror-fn">HRL_GetLastError</a>
+  <a class="sub" href="#errorcb-fn">Error Callback</a>
+  <a class="sub" href="#enumstr-fn">Enum → String</a>
+
+  <a href="#scenes">Scenes</a>
+  <a class="sub" href="#createscene-fn">HRL_CreateScene</a>
+  <a class="sub" href="#deletescene-fn">HRL_DeleteScene</a>
+  <a class="sub" href="#resizescene-fn">HRL_ResizeSceneTexture</a>
+  <a class="sub" href="#colorpick-fn">Color Picking</a>
+
+  <a href="#meshes">Meshes &amp; Sprites</a>
+  <a class="sub" href="#createmesh-fn">HRL_CreateMesh</a>
+  <a class="sub" href="#createmeshfile-fn">HRL_CreateMeshFromFile</a>
+  <a class="sub" href="#createsprite-fn">HRL_CreateMeshSprite</a>
+  <a class="sub" href="#deletemesh-fn">HRL_DeleteMesh</a>
+  <a class="sub" href="#meshmat-fn">Set Material</a>
+  <a class="sub" href="#meshtransform-fn">Transforms</a>
+  <a class="sub" href="#spriteregion-fn">Sprite Region</a>
+  <a class="sub" href="#spritepivot-fn">Pivot Point</a>
+  <a class="sub" href="#spritedraworder-fn">Draw Order</a>
+
+  <a href="#lights">Lights</a>
+  <a class="sub" href="#createlight-fn">HRL_CreateLight</a>
+  <a class="sub" href="#deletelight-fn">HRL_DeleteLight</a>
+  <a class="sub" href="#lightprops-fn">Properties</a>
+  <a class="sub" href="#lighttransform-fn">Transform</a>
+
+  <a href="#textures">Textures</a>
+  <a class="sub" href="#createtex-fn">HRL_CreateTexture</a>
+  <a class="sub" href="#deletetex-fn">HRL_DeleteTexture</a>
+  <a class="sub" href="#resizetex-fn">Resize / Size</a>
+  <a class="sub" href="#texfilter-fn">Filters</a>
+  <a class="sub" href="#textex-fn">From Text</a>
+
+  <a href="#fonts">Fonts</a>
+  <a class="sub" href="#createfont-fn">HRL_CreateFont</a>
+  <a class="sub" href="#deletefont-fn">HRL_DeleteFont</a>
+
+  <a href="#shaders">Shaders</a>
+  <a class="sub" href="#createshader-fn">HRL_CreateShader</a>
+  <a class="sub" href="#deleteshader-fn">HRL_DeleteShader</a>
+  <a class="sub" href="#defaultshaders">Default Shaders</a>
+
+  <a href="#materials">Materials</a>
+  <a class="sub" href="#createmat-fn">HRL_CreateMaterial</a>
+  <a class="sub" href="#deletemat-fn">HRL_DeleteMaterial</a>
+  <a class="sub" href="#matset-fn">Set Uniforms</a>
+
+  <a href="#postprocess">Post Process</a>
+  <a class="sub" href="#createpp-fn">HRL_CreatePostProcess</a>
+  <a class="sub" href="#deletepp-fn">HRL_DeletePostProcess</a>
+
+  <a href="#viewports">Viewports</a>
+  <a class="sub" href="#createvp-fn">HRL_CreateViewport</a>
+  <a class="sub" href="#deletevp-fn">HRL_DeleteViewport</a>
+  <a class="sub" href="#vpconfig-fn">Configuration</a>
+
+  <a href="#cameras">Cameras</a>
+  <a class="sub" href="#createcam-fn">HRL_CreateCamera</a>
+  <a class="sub" href="#deletecam-fn">HRL_DeleteCamera</a>
+  <a class="sub" href="#camtype-fn">Projection</a>
+  <a class="sub" href="#camtransform-fn">Transform</a>
+  <a class="sub" href="#camplanes-fn">Clip Planes</a>
+
+  <a href="#matrices">Matrices</a>
+  <a class="sub" href="#getmatrices-fn">Get Matrices</a>
+
+  <a href="#debugviews">Debug Views</a>
+  <a class="sub" href="#debugmode-fn">Scene Debug Mode</a>
+
+  <a href="#debuggeo">Debug Geometry</a>
+  <a class="sub" href="#debugseg-fn">Segment</a>
+  <a class="sub" href="#debugpoly-fn">Polygon</a>
+  <a class="sub" href="#debugcircle-fn">Circle</a>
+  <a class="sub" href="#debugcapsule-fn">Capsule</a>
+  <a class="sub" href="#debugpoint-fn">Point</a>
+
+  <a href="#utility">Utility</a>
+  <a class="sub" href="#screenshot-fn">Screenshot</a>
+  <a class="sub" href="#aa-fn">Antialiasing</a>
+
+  <div class="sidebar-section-label">Macros</div>
+  <a href="#macros">HRL_CheckErrors</a>
+</nav>
+
+<!-- MAIN CONTENT -->
 <main>
 
-<section>
-    <h2>Note</h2>
-    <p>This project was developed by a single passionate developer. I’ve tried to make everything work smoothly, but there may still be bugs.</p>
-    <p>If you encounter any issues or have suggestions, feel free to contact me at: <a href="mailto:oscarsoirey.contact@gmail.com">oscarsoirey.contact@gmail.com</a></p>
-</section>
+  <!-- INTRODUCTION -->
+  <div class="doc-section" id="introduction">
+    <h1><span class="accent">HRL</span> — Horizon Rendering Library</h1>
+    <div class="doc-subtitle">A lightweight, explicit C/C++ rendering abstraction — version 0.3</div>
 
-<hr>
+    <div class="intro-callout">
+      HRL is a rendering library that wraps multiple graphics backends — OpenGL, Vulkan, Direct3D, Metal and more —
+      behind a single, stable C API. It is designed for developers who want direct, predictable control over the
+      GPU without the overhead of a full engine. Every resource is <strong>explicitly created and explicitly
+      destroyed</strong>. There are no hidden allocations, no background asset loaders, and no garbage collection.
+    </div>
 
-<section>
-    <h2>HRL Engine</h2>
-    <p>HRL is a high quality, multi-API rendering engine made for professional use. It supports OpenGL, Vulkan, DirectX, Metal, and modern consoles (NVN, GNM). It provides a simple C/C++ API to manage meshes, lights, textures, shaders, materials, viewports, and cameras.</p>
-</section>
+    <p>HRL is suitable for game engines, real-time simulations, tooling, and any application that needs a
+    thin but capable rendering layer. The API is C-compatible and can be consumed from C, C++, or any
+    language with a C FFI.</p>
 
-<section>
-    <h2>Version</h2>
-    <p>HRL is currently in pre-alpha version 0.1 and only has the OpenGL backend available at the moment.</p>
-</section>
+    <p>On Windows, HRL can be compiled as a static library or a DLL. Use <code>HRL_BUILD_DLL</code> when
+    building the library, <code>HRL_NO_DLL</code> for static linkage, or leave both undefined to import from a DLL.</p>
+  </div>
 
-<section>
-    <h2>Table of Contents</h2>
-    <nav>
-        <ul>
-            <li><a href="#installation">Installation</a></li>
-            <li><a href="#initialization">Initialization</a></li>
-            <li><a href="#frame">Frame</a></li>
-            <li><a href="#window">Window</a></li>
-            <li><a href="#error-handling">Error Handling</a></li>
-            <li><a href="#meshes-sprites">Meshes & Sprites</a></li>
-            <li><a href="#lights">Lights</a></li>
-            <li><a href="#textures">Textures</a></li>
-            <li><a href="#shaders-materials">Shaders & Materials</a></li>
-            <li><a href="#post-process">Post-process</a></li>
-            <li><a href="#viewports">Viewports</a></li>
-            <li><a href="#cameras">Cameras</a></li>
-            <li><a href="#constants-ids">Constants & IDs</a></li>
-        </ul>
-    </nav>
-</section>
+  <!-- OBJECT MODEL -->
+  <div class="doc-section" id="philosophy">
+    <h2>Object Model <span class="section-tag">Core Concept</span></h2>
 
-<section id="installation">
-    <h2>Installation</h2>
-    <p>Include <code>hrl.h</code> in your file:</p>
-    <pre><code>#include "hrl.h"</code></pre>
-</section>
+    <p>HRL follows a strictly <strong>explicit ownership model</strong>. Nothing exists unless you created it.
+    Every <code>HRL_Create*</code> call allocates a GPU resource and returns an <code>HRL_id</code> handle.
+    Every <code>HRL_Delete*</code> call releases it. There is no reference counting and no deferred cleanup.</p>
 
-<section id="initialization">
-    <h2>Initialization</h2>
-    <pre><code>void HRL_Init(HRL_uint api);
-// apis: HRL_OpenGL33, HRL_OpenGL45, HRL_Vulkan, HRL_DX11, HRL_DX12, HRL_Metal, HRL_NVN, HRL_GNM
+    <div class="info-box warn">
+      <span class="icon">⚠</span>
+      <span>Always verify that a returned <code>HRL_id</code> is not <code>HRL_InvalidID</code> before using it.
+      Passing an invalid ID to any function will result in an <code>HRL_INVALID_ID</code> error being recorded.</span>
+    </div>
 
-void HRL_InitContext(HRL_uint width, HRL_uint height, void* loader);
-// width / height: window or rendering context size
-// loader: function to retrieve API function pointers (e.g., wglGetProcAddress, vkGetInstanceProcAddr)
+    <p>The table below shows how objects depend on one another. A child object must always be created after
+    its parent, and destroyed before it.</p>
 
-void HRL_Shutdown();</code></pre>
-</section>
-
-<section id="frame">
-    <h2>Frame</h2>
-    <pre><code>void HRL_BeginFrame();
-// Refresh and clear the viewport (needs to be called before EndFrame)
-
-void HRL_EndFrame();
-// Render the scene</code></pre>
-</section>
-
-<section id="window">
-    <h2>Window</h2>
-    <pre><code>void HRL_WindowResizeCallback(int width, int height);
-// Call when the window is resized to update viewport and projection matrices</code></pre>
-</section>
-
-<section id="error-handling">
-    <h2>Error Handling</h2>
-    <pre><code>const char* HRL_GetLastError();
-// Returns the last error message as a string</code></pre>
-</section>
-
-<section id="meshes-sprites">
-    <h2>Meshes & Sprites</h2>
-
-    <h3>Meshes</h3>
-    <pre><code>HRL_id HRL_CreateMesh(HRL_uint type);
-void HRL_DeleteMesh(HRL_id meshid);
-void HRL_SetMeshMaterial(HRL_id meshid, HRL_id matid);
-void HRL_SetMeshLocation(HRL_id meshid, float x, float y, float z);
-void HRL_SetMeshRotation(HRL_id meshid, float yaw, float pitch, float roll);
-void HRL_SetMeshScale(HRL_id meshid, float x, float y, float z);</code></pre>
-    <p>Supported mesh types: <code>HRL_Sprite</code>, <code>HRL_2D_Mesh</code>, <code>HRL_3D_Mesh</code></p>
-</section>
-
-<section id="lights">
-    <h2>Lights</h2>
-    <pre><code>HRL_id HRL_CreateLight(HRL_uint type);
-void HRL_DeleteLight(HRL_id lightid);
-void HRL_SetLightColor(HRL_id lightid, float r, float g, float b);
-void HRL_SetLightIntensity(HRL_id lightid, float intensity);
-void HRL_SetLightAttenuation(HRL_id lightid, float attenuation);
-void HRL_SetLightLocation(HRL_id lightid, float x, float y, float z);
-void HRL_SetLightRotation(HRL_id lightid, float yaw, float pitch, float roll);</code></pre>
-<p>Supported light types: <code>HRL_PointLight</code>, <code>HRL_DirectionalLight</code>, <code>HRL_SpotLight</code></p>
-</section>
-
-<section id="textures">
-    <h2>Textures</h2>
-    <pre><code>HRL_id HRL_CreateTexture(HRL_uint type, const char* fileContent, size_t bufferSize);
-void HRL_DeleteTexture(HRL_id textureid);</code></pre>
-    <table>
-        <tr><th>Texture Type</th><th>Description</th></tr>
-        <tr><td>HRL_Tex_Albedo</td><td>Diffuse / albedo map</td></tr>
-        <tr><td>HRL_Tex_Normal</td><td>Normal map</td></tr>
-        <tr><td>HRL_Tex_Specular</td><td>Specular map</td></tr>
-        <tr><td>HRL_Tex_Roughness</td><td>Roughness map</td></tr>
-        <tr><td>HRL_Tex_Metalic</td><td>Metallic map</td></tr>
-        <tr><td>HRL_Tex_Alpha</td><td>Alpha / transparency map</td></tr>
-        <tr><td>HRL_Tex_ShadowMap</td><td>Shadow map</td></tr>
-        <tr><td>HRL_Tex_CubeMap</td><td>Cubemap / environment map</td></tr>
+    <table class="doc-table">
+      <thead><tr><th>Object</th><th>Created by</th><th>Requires</th></tr></thead>
+      <tbody>
+        <tr><td>Scene</td><td>HRL_CreateScene</td><td>—</td></tr>
+        <tr><td>Camera</td><td>HRL_CreateCamera</td><td>Scene</td></tr>
+        <tr><td>Viewport</td><td>HRL_CreateViewport</td><td>Scene, Camera</td></tr>
+        <tr><td>Shader</td><td>HRL_CreateShader</td><td>—</td></tr>
+        <tr><td>Material</td><td>HRL_CreateMaterial</td><td>Shader</td></tr>
+        <tr><td>Texture</td><td>HRL_CreateTexture</td><td>—</td></tr>
+        <tr><td>Font</td><td>HRL_CreateFont</td><td>—</td></tr>
+        <tr><td>Mesh / Sprite</td><td>HRL_CreateMesh / HRL_CreateMeshSprite</td><td>Scene, Material</td></tr>
+        <tr><td>Light</td><td>HRL_CreateLight</td><td>Scene</td></tr>
+        <tr><td>Post Process</td><td>HRL_CreatePostProcess</td><td>Scene, Material</td></tr>
+      </tbody>
     </table>
-    <p>Supported formats: PNG, JPEG, BMP, TGA, GIF, HDR, PSD.</p>
-</section>
+  </div>
 
-<section id="shaders-materials">
-    <h2>Shaders & Materials</h2>
-    <pre><code>HRL_id HRL_CreateShader(const char* vertContent, size_t vertSize, const char* fragContent, size_t fragSize);
-void HRL_DeleteShader(HRL_id shaderid);
+  <!-- LIFECYCLE -->
+  <div class="doc-section" id="lifecycle">
+    <h2>Application Lifecycle <span class="section-tag">Getting Started</span></h2>
+    <p>A standard HRL application follows this initialization and teardown order:</p>
+<pre><code><span class="cm">// 1. Select backend and create context</span>
+<span class="fn">HRL_Init</span>(<span class="ty">HRL_OpenGL45</span>);
+<span class="fn">HRL_InitContext</span>(<span class="num">1280</span>, <span class="num">720</span>, glfwGetProcAddress);
 
-HRL_id HRL_CreateMaterial(HRL_id shaderid);
-void HRL_DeleteMaterial(HRL_id matid);
+<span class="cm">// 2. Create all resources</span>
+<span class="ty">HRL_id</span> scene    = <span class="fn">HRL_CreateScene</span>(<span class="ty">HRL_True</span>);
+<span class="ty">HRL_id</span> cam      = <span class="fn">HRL_CreateCamera</span>(scene, <span class="ty">HRL_Perspective</span>);
+<span class="ty">HRL_id</span> vp       = <span class="fn">HRL_CreateViewport</span>(scene, cam, <span class="num">0</span>, <span class="num">0</span>, <span class="num">1</span>, <span class="num">1</span>);
+<span class="ty">HRL_id</span> shader   = <span class="fn">HRL_CreateShader</span>(vert, vert_sz, frag, frag_sz);
+<span class="ty">HRL_id</span> mat      = <span class="fn">HRL_CreateMaterial</span>(shader);
+<span class="ty">HRL_id</span> tex      = <span class="fn">HRL_CreateTexture</span>(png_data, png_sz);
+<span class="fn">HRL_MaterialSetTexture</span>(mat, <span class="str">"u_Albedo"</span>, tex);
+<span class="ty">HRL_id</span> mesh     = <span class="fn">HRL_CreateMeshFromFile</span>(scene, <span class="ty">HRL_3D_Mesh</span>, obj, obj_sz);
+<span class="fn">HRL_SetMeshMaterial</span>(mesh, mat);
 
-void HRL_MaterialSetInt(HRL_id matid, const char* uniformName, int value);
-void HRL_MaterialSetBool(HRL_id matid, int value);
-void HRL_MaterialSetFloat(HRL_id matid, const char* uniformName, float value);
-void HRL_MaterialSetVec2(HRL_id matid, const char* uniformName, float x, float y);
-void HRL_MaterialSetVec3(HRL_id matid, const char* uniformName, float x, float y, float z);
-void HRL_MaterialSetVec4(HRL_id matid, const char* uniformName, float x, float y, float z, float w);
-void HRL_MaterialSetTexture(HRL_id matid, const char* uniformName, HRL_id textureid);</code></pre>
-</section>
+<span class="cm">// 3. Render loop</span>
+<span class="kw">while</span> (!glfwWindowShouldClose(window)) {
+    <span class="fn">HRL_BeginFrame</span>();
+    <span class="cm">// update transforms, uniforms …</span>
+    <span class="fn">HRL_EndFrame</span>();
+    glfwSwapBuffers(window);
+}
 
-<section id="post-process">
-    <h2>Post-process</h2>
-    <pre><code>HRL_id HRL_CreatePostProcess(HRL_id matid);
-void HRL_DeletePostProcess(HRL_id postid);</code></pre>
-</section>
+<span class="cm">// 4. Cleanup — reverse dependency order</span>
+<span class="fn">HRL_DeleteMesh</span>(mesh);
+<span class="fn">HRL_DeleteMaterial</span>(mat);   <span class="fn">HRL_DeleteTexture</span>(tex);
+<span class="fn">HRL_DeleteShader</span>(shader);  <span class="fn">HRL_DeleteCamera</span>(cam);
+<span class="fn">HRL_DeleteViewport</span>(vp);    <span class="fn">HRL_DeleteScene</span>(scene);
+<span class="fn">HRL_Shutdown</span>();</code></pre>
+  </div>
 
-<section id="viewports">
-    <h2>Viewports</h2>
-    <pre><code>HRL_id HRL_CreateWiewport(float x, float y, float width, float height);
-void HRL_DeleteViewport(HRL_id viewportid);
-void HRL_SetViewportRect(HRL_id viewportid, float x, float y, float width, float height);</code></pre>
-<p>Normalized coordinates [0,1]. Useful for split-screen or mini-maps.</p>
-</section>
-
-<section id="cameras">
-    <h2>Cameras</h2>
-    <pre><code>void HRL_SetCameraView(HRL_id viewportid, HRL_uint type);
-void HRL_SetCameraOrthoVertical(HRL_id viewportid, float height);
-void HRL_SetCameraPerspectiveFov(HRL_id viewportid, float fov);
-void HRL_SetCameraPosition(HRL_id viewportid, float x, float y, float z);
-void HRL_SetCameraRotation(HRL_id viewportid, float yaw, float pitch, float roll);</code></pre>
-<p>Camera types: <code>HRL_Ortho</code>, <code>HRL_Perspective</code>. Each viewport contains one camera.</p>
-</section>
-
-<section id="constants-ids">
-    <h2>Constants & IDs</h2>
-    <table>
-        <tr><th>Category</th><th>Constants / IDs</th></tr>
-        <tr><td>Boolean</td><td>HRL_True, HRL_False</td></tr>
-        <tr><td>Error</td><td>HRL_InvalidID</td></tr>
-        <tr><td>API</td><td>HRL_OpenGL33, HRL_OpenGL45, HRL_Vulkan, HRL_DX11, HRL_DX12, HRL_Metal, HRL_NVN, HRL_GNM</td></tr>
-        <tr><td>Lights</td><td>HRL_PointLight, HRL_DirectionalLight, HRL_SpotLight</td></tr>
-        <tr><td>Meshes</td><td>HRL_Sprite, HRL_2D_Mesh, HRL_3D_Mesh</td></tr>
-        <tr><td>Debug Geometry</td><td>HRL_DebugLine, HRL_DebugBox, HRL_DebugSphere</td></tr>
-        <tr><td>Textures</td><td>HRL_Tex_Albedo, HRL_Tex_Normal, HRL_Tex_Specular, HRL_Tex_Roughness, HRL_Tex_Metalic, HRL_Tex_Alpha, HRL_Tex_ShadowMap, HRL_Tex_CubeMap</td></tr>
-        <tr><td>Camera</td><td>HRL_Ortho, HRL_Perspective</td></tr>
+  <!-- BACKENDS -->
+  <div class="doc-section" id="backends">
+    <h2>Supported Backends <span class="section-tag">Reference</span></h2>
+    <table class="doc-table">
+      <thead><tr><th>Constant</th><th>Backend</th></tr></thead>
+      <tbody>
+        <tr><td>HRL_OpenGL33</td><td>OpenGL 3.3</td></tr>
+        <tr><td>HRL_OpenGL45</td><td>OpenGL 4.5</td></tr>
+        <tr><td>HRL_Vulkan</td><td>Vulkan</td></tr>
+        <tr><td>HRL_D3D11</td><td>Direct3D 11</td></tr>
+        <tr><td>HRL_D3D12</td><td>Direct3D 12</td></tr>
+        <tr><td>HRL_Metal</td><td>Metal (Apple)</td></tr>
+        <tr><td>HRL_NVN</td><td>NVN (Nintendo Switch)</td></tr>
+        <tr><td>HRL_GNM</td><td>GNM (PlayStation)</td></tr>
+      </tbody>
     </table>
-    <p>Every object is identified by a unique <code>HRL_id</code>. Default shaders and materials have reserved IDs. HRL is minimal, flexible, and easy to integrate into C/C++ projects.</p>
-</section>
+  </div>
+
+  <div class="section-divider"></div>
+
+  <!-- INITIALIZATION -->
+  <div class="doc-section" id="init">
+    <h2>Initialization <span class="section-tag">API</span></h2>
+
+    <div id="init-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_Init</span>(<span class="param-type">HRL_uint</span> <span class="param-name">_api</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Selects the graphics backend to use. Must be the very first HRL call before any other function.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody><tr><td>_api</td><td>HRL_uint</td><td>One of the HRL backend constants, e.g. <code>HRL_OpenGL45</code>, <code>HRL_Vulkan</code>.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="initcontext-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_InitContext</span>(<span class="param-type">HRL_uint</span> <span class="param-name">_width</span>, <span class="param-type">HRL_uint</span> <span class="param-name">_height</span>, <span class="param-type">void*</span> <span class="param-name">_loader</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Creates and initializes the rendering context for the current window. Call once after <code>HRL_Init</code>.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>_width</td><td>HRL_uint</td><td>Initial framebuffer width in pixels.</td></tr>
+              <tr><td>_height</td><td>HRL_uint</td><td>Initial framebuffer height in pixels.</td></tr>
+              <tr><td>_loader</td><td>void*</td><td>Platform function loader pointer (e.g. <code>glfwGetProcAddress</code> for OpenGL).</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="shutdown-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_Shutdown</span>()</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Releases all internal HRL resources and shuts down the rendering context. Call after destroying all user-created objects and before closing the application window.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="frame-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_BeginFrame</span>() &nbsp;/&nbsp; <span class="ret">void</span> <span class="name">HRL_EndFrame</span>()</div>
+        </div>
+        <div class="fn-card-body">
+          <p><code>HRL_BeginFrame</code> — Clears per-frame internal state and begins GPU command recording. Must be called at the start of every render iteration.</p>
+          <p><code>HRL_EndFrame</code> — Flushes all buffered draw commands and submits them to the GPU. Call at the end of your render loop, before your windowing layer's buffer swap.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="resize-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_WindowResizeCallback</span>(<span class="param-type">int</span> <span class="param-name">_width</span>, <span class="param-type">int</span> <span class="param-name">_height</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Notifies HRL that the window has been resized. Plug this directly into your windowing system's resize callback so that framebuffer dimensions stay in sync.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>_width</td><td>int</td><td>New framebuffer width in pixels.</td></tr>
+              <tr><td>_height</td><td>int</td><td>New framebuffer height in pixels.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ERROR HANDLING -->
+  <div class="doc-section" id="errors">
+    <h2>Error Handling <span class="section-tag">API</span></h2>
+    <p>HRL uses an internal error queue. Errors do not throw exceptions. After any call that may fail, poll <code>HRL_GetLastError</code> or register a callback to receive errors as they occur.</p>
+
+    <div id="getlasterror-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_Error</span> <span class="name">HRL_GetLastError</span>(<span class="param-type">const char**</span> <span class="param-name">_detail</span>, <span class="param-type">HRL_Severity*</span> <span class="param-name">_severity</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Retrieves and clears the last recorded error. Returns <code>HRL_NO_ERROR</code> if no error has occurred.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>_detail</td><td>const char**</td><td>Output pointer set to a human-readable error description string.</td></tr>
+              <tr><td>_severity</td><td>HRL_Severity*</td><td>Output set to the severity level of the error.</td></tr>
+            </tbody>
+          </table>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_Error</code> — the error code enum value.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="errorcb-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_RegisterErrorCallback</span>(<span class="param-type">HRL_ErrorCallback</span> <span class="param-name">_callback</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Registers a function to be called every time HRL records an error. Useful for integrating with a custom logging or assertion system.</p>
+          <p>Callback signature: <code>void callback(HRL_Error code, HRL_Severity severity, const char* detail)</code></p>
+        </div>
+      </div>
+    </div>
+
+    <div id="enumstr-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">const char*</span> <span class="name">HRL_ErrorEnumToString</span> / <span class="name">HRL_SeverityEnumToString</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p>Converts an <code>HRL_Error</code> or <code>HRL_Severity</code> enum value to its string representation, e.g. <code>"HRL_INVALID_ID"</code> or <code>"HRL_SEVERITY_FATAL"</code>. Returns a static string literal; do not free.</p>
+        </div>
+      </div>
+    </div>
+
+    <h3>Error Codes</h3>
+    <table class="doc-table">
+      <thead><tr><th>Code</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>HRL_NO_ERROR</td><td>No error has occurred.</td></tr>
+        <tr><td>HRL_INVALID_ID</td><td>A provided HRL_id was invalid or HRL_InvalidID.</td></tr>
+        <tr><td>HRL_INVALID_ENUM</td><td>An unrecognized enum constant was passed.</td></tr>
+        <tr><td>HRL_INVALID_VALUE</td><td>A parameter value was out of its valid range.</td></tr>
+        <tr><td>HRL_INVALID_OPERATION</td><td>The call is not valid in the current state.</td></tr>
+        <tr><td>HRL_INVALID_BACKEND_OPERATION</td><td>The backend rejected the operation.</td></tr>
+        <tr><td>HRL_SHADER_COMPILE_FAIL</td><td>Shader compilation or linking failed.</td></tr>
+        <tr><td>HRL_OUT_OF_MEMORY</td><td>GPU or system memory exhausted.</td></tr>
+        <tr><td>HRL_INVALID_FILE_FORMAT</td><td>The provided file buffer is malformed or unsupported.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- SCENES -->
+  <div class="doc-section" id="scenes">
+    <h2>Scenes <span class="section-tag">API</span></h2>
+    <p>A scene is the root container for all renderable objects, lights, cameras, and post-process passes. You need at least one scene to produce any output.</p>
+
+    <div id="createscene-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateScene</span>(<span class="param-type">int</span> <span class="param-name">_renderOnScreen</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Creates a new scene. Pass <code>HRL_True</code> to render directly to the screen. Pass <code>HRL_False</code> to render into an off-screen texture buffer, useful for render-to-texture or multi-pass pipelines. Off-screen scenes default to 480×480; call <code>HRL_ResizeSceneTexture</code> to change this.</p>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new scene, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="deletescene-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DeleteScene</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Destroys a scene and frees its GPU resources. All objects that belong to the scene (meshes, lights, cameras) must be deleted before calling this.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="resizescene-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_ResizeSceneTexture</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>, <span class="param-type">int</span> <span class="param-name">_width</span>, <span class="param-type">int</span> <span class="param-name">_height</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Resizes the off-screen render texture associated with a scene. Has no effect if the scene was created with <code>_renderOnScreen = HRL_True</code>.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="colorpick-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_EnableColorPickingBuffer</span>(<span class="param-type">HRL_id</span> <span class="param-name">_scene</span>, <span class="param-type">HRL_uint</span> <span class="param-name">_enable</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Enables or disables the GPU-side color picking render target. When active, each object is rendered into a secondary buffer with a unique color ID, allowing CPU-side object picking by reading back pixel values.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody><tr><td>_enable</td><td>HRL_uint</td><td><code>HRL_True</code> to enable, <code>HRL_False</code> to disable.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MESHES -->
+  <div class="doc-section" id="meshes">
+    <h2>Meshes &amp; Sprites <span class="section-tag">API</span></h2>
+    <p>Meshes are the primary renderable objects. A mesh must have a material assigned before it will render correctly. Sprites are camera-facing textured quads suited for 2D content and billboards.</p>
+
+    <div id="createmesh-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateMesh</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>, <span class="param-type">HRL_uint</span> <span class="param-name">_type</span>, <span class="param-type">float*</span> <span class="param-name">_vertices</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Creates a mesh from a raw vertex buffer in the given scene.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>_type</td><td>HRL_uint</td><td><code>HRL_2D_Mesh</code>, <code>HRL_3D_Mesh</code>, or <code>HRL_3D_SkeletalMesh</code>.</td></tr>
+              <tr><td>_vertices</td><td>float*</td><td>Pointer to the raw vertex data buffer.</td></tr>
+            </tbody>
+          </table>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new mesh, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="createmeshfile-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateMeshFromFile</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>, <span class="param-type">HRL_uint</span> <span class="param-name">_type</span>, <span class="param-type">const char*</span> <span class="param-name">_data</span>, <span class="param-type">size_t</span> <span class="param-name">_bufferSize</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Creates a mesh by parsing a 3D file from a memory buffer. Supported formats: <code>.fbx</code>, <code>.obj</code>. The buffer must contain raw file contents opened in binary mode.</p>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new mesh, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="createsprite-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateMeshSprite</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Creates a sprite in the given scene. A sprite is a camera-facing textured quad. Use <code>HRL_SetSpriteRegion</code> to display a sub-region of an atlas texture, and <code>HRL_SetMeshMaterial</code> to assign its material.</p>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new sprite, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="deletemesh-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DeleteMesh</span>(<span class="param-type">HRL_id</span> <span class="param-name">_meshid</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Destroys a mesh and frees its associated GPU vertex and index buffers.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="meshmat-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_SetMeshMaterial</span>(<span class="param-type">HRL_id</span> <span class="param-name">_meshid</span>, <span class="param-type">HRL_id</span> <span class="param-name">_matid</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Assigns a material to a mesh. The material controls how the mesh is shaded during rendering. A mesh without a material will not render correctly.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="meshtransform-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_SetMeshLocation</span> &nbsp;/&nbsp; <span class="name">HRL_SetMeshRotation</span> &nbsp;/&nbsp; <span class="name">HRL_SetMeshScale</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p><code>HRL_SetMeshLocation(id, x, y, z)</code> — Sets the world-space position of a mesh.</p>
+          <p><code>HRL_SetMeshRotation(id, pitch, yaw, roll)</code> — Sets the orientation using Euler angles in degrees. Pitch = X axis, Yaw = Y axis, Roll = Z axis.</p>
+          <p><code>HRL_SetMeshScale(id, x, y, z)</code> — Sets the scale along each local axis.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="spriteregion-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_SetSpriteRegion</span>(<span class="param-type">HRL_id</span> <span class="param-name">_meshid</span>, <span class="param-type">float</span> <span class="param-name">min_u</span>, <span class="param-type">float</span> <span class="param-name">min_v</span>, <span class="param-type">float</span> <span class="param-name">max_u</span>, <span class="param-type">float</span> <span class="param-name">max_v</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Defines the UV sub-region of the texture displayed on a sprite. Useful for sprite atlases. All coordinates are normalized [0..1]. <code>(min_u, min_v)</code> is the top-left corner; <code>(max_u, max_v)</code> is the bottom-right corner.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="spritepivot-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_SetMeshPivotPoint</span>(<span class="param-type">HRL_id</span> <span class="param-name">_meshid</span>, <span class="param-type">float</span> <span class="param-name">x</span>, <span class="param-type">float</span> <span class="param-name">y</span>, <span class="param-type">float</span> <span class="param-name">z</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Sets the pivot (local origin) point of a mesh or sprite. Coordinates are normalized relative to the object: <code>(0,0,0)</code> is center, <code>(-0.5,-0.5,0)</code> is top-left, <code>(0.5,0.5,0)</code> is bottom-right. Affects how translation and rotation are applied.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="spritedraworder-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_SetSpriteDrawOrder</span>(<span class="param-type">HRL_id</span> <span class="param-name">_meshid</span>, <span class="param-type">float</span> <span class="param-name">_draworder</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Controls the rendering order when two or more sprites share the same Z depth. Higher values are rendered on top. Has no effect on 3D meshes.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LIGHTS -->
+  <div class="doc-section" id="lights">
+    <h2>Lights <span class="section-tag">API</span></h2>
+
+    <div id="createlight-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateLight</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>, <span class="param-type">HRL_uint</span> <span class="param-name">_type</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Creates a light source in the given scene.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody><tr><td>_type</td><td>HRL_uint</td><td><code>HRL_PointLight</code>, <code>HRL_DirectionalLight</code>, or <code>HRL_SpotLight</code>.</td></tr></tbody>
+          </table>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new light, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="deletelight-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DeleteLight</span>(<span class="param-type">HRL_id</span> <span class="param-name">_lightid</span>)</div>
+        </div>
+        <div class="fn-card-body"><p>Destroys a light and removes it from its scene.</p></div>
+      </div>
+    </div>
+
+    <div id="lightprops-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_SetLightColor</span> &nbsp;/&nbsp; <span class="name">HRL_SetLightIntensity</span> &nbsp;/&nbsp; <span class="name">HRL_SetLightAttenuation</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p><code>HRL_SetLightColor(id, r, g, b)</code> — Sets the RGB color emitted by the light. Values are typically [0..1] but may exceed 1 for HDR workflows.</p>
+          <p><code>HRL_SetLightIntensity(id, i)</code> — Sets the brightness multiplier. <code>1.0</code> is the default.</p>
+          <p><code>HRL_SetLightAttenuation(id, a)</code> — Sets the falloff coefficient, controlling how quickly the light fades over distance.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="lighttransform-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_SetLightLocation</span> &nbsp;/&nbsp; <span class="name">HRL_SetLightRotation</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p><code>HRL_SetLightLocation(id, x, y, z)</code> — Sets the world-space position. Relevant for point lights and spot lights.</p>
+          <p><code>HRL_SetLightRotation(id, pitch, yaw, roll)</code> — Sets orientation via Euler angles in degrees. Primarily used for directional and spot lights.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TEXTURES -->
+  <div class="doc-section" id="textures">
+    <h2>Textures <span class="section-tag">API</span></h2>
+
+    <div id="createtex-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateTexture</span>(<span class="param-type">const char*</span> <span class="param-name">_data</span>, <span class="param-type">size_t</span> <span class="param-name">_bufferSize</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Creates a GPU texture from a raw file buffer. The buffer must be the raw binary file contents. Supported formats: <code>png</code>, <code>jpeg</code>, <code>jpg</code>, <code>bmp</code>, <code>tga</code>, <code>gif</code> (first frame), <code>hdr</code>, <code>psd</code> (partial support).</p>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new texture, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="deletetex-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DeleteTexture</span>(<span class="param-type">HRL_id</span> <span class="param-name">_textureid</span>)</div>
+        </div>
+        <div class="fn-card-body"><p>Destroys a texture and frees its GPU memory.</p></div>
+      </div>
+    </div>
+
+    <div id="resizetex-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_ResizeTexture</span> &nbsp;/&nbsp; <span class="name">HRL_GetTextureSize</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p><code>HRL_ResizeTexture(id, width, height)</code> — Reallocates the texture at new dimensions. May discard current content.</p>
+          <p><code>HRL_GetTextureSize(id, &amp;width, &amp;height)</code> — Writes the current texture dimensions in pixels into the output pointers.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="texfilter-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_SetTextureMinFilter</span> &nbsp;/&nbsp; <span class="name">HRL_SetTextureMagFilter</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p><strong>Min filter</strong> — applied when the texture appears smaller on screen than its native resolution. <strong>Mag filter</strong> — applied when it appears larger.</p>
+          <p>Filter constants: <code>HRL_Filter_Nearest</code>, <code>HRL_Filter_Linear</code>, <code>HRL_Filter_Bilinear</code>, <code>HRL_Filter_Trilinear</code>, <code>HRL_Filter_Anisotropic</code>, <code>HRL_Filter_Supersampling</code>.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="textex-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateTextureFromText</span>(...)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Rasterizes a UTF-8 string into a new GPU texture using a loaded font.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>_text</td><td>const char*</td><td>Null-terminated UTF-8 string to render.</td></tr>
+              <tr><td>_fontid</td><td>HRL_id</td><td>Font created with <code>HRL_CreateFont</code>.</td></tr>
+              <tr><td>_font_size</td><td>float</td><td>Glyph height in pixels.</td></tr>
+              <tr><td>_wrap_width</td><td>float</td><td>Pixel width before line wrapping. Pass <code>0</code> to disable.</td></tr>
+              <tr><td>r, g, b</td><td>float</td><td>Text foreground color in [0..1].</td></tr>
+              <tr><td>bg_r,g,b,a</td><td>float</td><td>Background color. Set <code>bg_a = 0</code> for transparent.</td></tr>
+            </tbody>
+          </table>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new texture, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FONTS -->
+  <div class="doc-section" id="fonts">
+    <h2>Fonts <span class="section-tag">API</span></h2>
+
+    <div id="createfont-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateFont</span>(<span class="param-type">const char*</span> <span class="param-name">data</span>, <span class="param-type">size_t</span> <span class="param-name">_data_size</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Loads a TrueType font (<code>.ttf</code>) from a memory buffer. The font handle is required by <code>HRL_CreateTextureFromText</code>.</p>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new font, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="deletefont-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DeleteFont</span>(<span class="param-type">HRL_id</span> <span class="param-name">_fontid</span>)</div>
+        </div>
+        <div class="fn-card-body"><p>Destroys a font and frees all memory associated with it.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SHADERS -->
+  <div class="doc-section" id="shaders">
+    <h2>Shaders <span class="section-tag">API</span></h2>
+
+    <div id="createshader-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateShader</span>(<span class="param-type">const char*</span> <span class="param-name">_vertData</span>, <span class="param-type">size_t</span> <span class="param-name">_vertSize</span>, <span class="param-type">const char*</span> <span class="param-name">_fragData</span>, <span class="param-type">size_t</span> <span class="param-name">_fragSize</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Compiles and links a GPU shader program from GLSL vertex and fragment source buffers. On compilation failure, an <code>HRL_SHADER_COMPILE_FAIL</code> error is recorded.</p>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the compiled shader, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="deleteshader-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DeleteShader</span>(<span class="param-type">HRL_id</span> <span class="param-name">_shaderid</span>)</div>
+        </div>
+        <div class="fn-card-body"><p>Destroys a shader program and frees its GPU resources. Materials that use this shader should be deleted first.</p></div>
+      </div>
+    </div>
+
+    <div id="defaultshaders">
+      <h3>Built-in Default Shaders</h3>
+      <p>HRL reserves the following IDs for its internal default shaders. These can be passed to <code>HRL_CreateMaterial</code> directly without compiling a custom shader.</p>
+      <table class="doc-table">
+        <thead><tr><th>Constant</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td>HRL_SpriteShader</td><td>Default shader for sprite meshes.</td></tr>
+          <tr><td>HRL_Mesh2DShader</td><td>Default shader for 2D meshes.</td></tr>
+          <tr><td>HRL_Mesh3DShader</td><td>Default shader for 3D meshes.</td></tr>
+          <tr><td>HRL_DebugShader</td><td>Default shader for debug geometry.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- MATERIALS -->
+  <div class="doc-section" id="materials">
+    <h2>Materials <span class="section-tag">API</span></h2>
+    <p>A material is an instance of a shader with a set of bound uniform values. The same shader can back many distinct materials with different textures or parameters.</p>
+
+    <div id="createmat-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateMaterial</span>(<span class="param-type">HRL_id</span> <span class="param-name">_shaderid</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Creates a material instance backed by the given shader. Uniform values are initially unset.</p>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new material, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="deletemat-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DeleteMaterial</span>(<span class="param-type">HRL_id</span> <span class="param-name">_matid</span>)</div>
+        </div>
+        <div class="fn-card-body"><p>Destroys a material and its stored uniform data.</p></div>
+      </div>
+    </div>
+
+    <div id="matset-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_MaterialSet*</span> — Uniform Setters</div>
+        </div>
+        <div class="fn-card-body">
+          <p>All setters take an <code>HRL_id</code> material and a <code>const char* _uniformName</code> matching the name declared in the shader source.</p>
+          <table class="param-table">
+            <thead><tr><th>Function</th><th>Uniform type</th><th>Value params</th></tr></thead>
+            <tbody>
+              <tr><td>HRL_MaterialSetInt</td><td>int</td><td><code>int a</code></td></tr>
+              <tr><td>HRL_MaterialSetBool</td><td>bool (int)</td><td><code>int a</code> — 0 or 1</td></tr>
+              <tr><td>HRL_MaterialSetFloat</td><td>float</td><td><code>float a</code></td></tr>
+              <tr><td>HRL_MaterialSetVec2</td><td>vec2</td><td><code>float x, y</code></td></tr>
+              <tr><td>HRL_MaterialSetVec3</td><td>vec3</td><td><code>float x, y, z</code></td></tr>
+              <tr><td>HRL_MaterialSetVec4</td><td>vec4</td><td><code>float x, y, z, w</code></td></tr>
+              <tr><td>HRL_MaterialSetTexture</td><td>sampler2D</td><td><code>HRL_id _textureid</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- POST PROCESS -->
+  <div class="doc-section" id="postprocess">
+    <h2>Post Processing <span class="section-tag">API</span></h2>
+
+    <div id="createpp-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreatePostProcess</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>, <span class="param-type">HRL_id</span> <span class="param-name">_matid</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Attaches a full-screen post-process pass to a scene using a custom material as the screen-space shader. Multiple passes can be attached; they execute in creation order after the scene is rendered.</p>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new post-process object, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="deletepp-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DeletePostProcess</span>(<span class="param-type">HRL_id</span> <span class="param-name">_postid</span>)</div>
+        </div>
+        <div class="fn-card-body"><p>Removes and destroys a post-process pass from its scene.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEWPORTS -->
+  <div class="doc-section" id="viewports">
+    <h2>Viewports <span class="section-tag">API</span></h2>
+    <p>A viewport maps a camera's rendered output onto a rectangular region of the screen. Creating multiple viewports for the same scene enables split-screen or picture-in-picture setups.</p>
+
+    <div class="info-box note">
+      <span class="icon">ℹ</span>
+      <span>Viewport coordinates are normalized [0..1]. The origin <code>(0,0)</code> is the top-left corner of the screen; <code>(1,1)</code> is the bottom-right.</span>
+    </div>
+
+    <div id="createvp-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateViewport</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>, <span class="param-type">HRL_id</span> <span class="param-name">_cameraid</span>, <span class="param-type">float</span> <span class="param-name">x</span>, <span class="param-type">float</span> <span class="param-name">y</span>, <span class="param-type">float</span> <span class="param-name">_width</span>, <span class="param-type">float</span> <span class="param-name">_height</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Creates a viewport bound to a scene and a camera. Pass <code>HRL_InvalidID</code> as <code>_cameraid</code> to leave the viewport unassigned initially.</p>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new viewport, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="deletevp-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DeleteViewport</span>(<span class="param-type">HRL_id</span> <span class="param-name">_viewportid</span>)</div>
+        </div>
+        <div class="fn-card-body"><p>Destroys a viewport. The associated scene and camera are not affected.</p></div>
+      </div>
+    </div>
+
+    <div id="vpconfig-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_SetViewportCamera</span> &nbsp;/&nbsp; <span class="name">HRL_SetViewportRect</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p><code>HRL_SetViewportCamera(vpid, camid)</code> — Reassigns the camera used by a viewport. Pass <code>HRL_InvalidID</code> to detach.</p>
+          <p><code>HRL_SetViewportRect(vpid, x, y, w, h)</code> — Updates the normalized screen rectangle of a viewport at runtime.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CAMERAS -->
+  <div class="doc-section" id="cameras">
+    <h2>Cameras <span class="section-tag">API</span></h2>
+
+    <div id="createcam-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">HRL_CreateCamera</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>, <span class="param-type">HRL_uint</span> <span class="param-name">_type</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Creates a camera in the given scene. The camera defines the point of view; it must be assigned to a viewport to produce visible output.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody><tr><td>_type</td><td>HRL_uint</td><td><code>HRL_Ortho</code> or <code>HRL_Perspective</code>. Defaults to <code>HRL_Ortho</code>.</td></tr></tbody>
+          </table>
+          <div class="returns"><span class="label">Returns</span> <code>HRL_id</code> of the new camera, or <code>HRL_InvalidID</code> on failure.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="deletecam-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DeleteCamera</span>(<span class="param-type">HRL_id</span> <span class="param-name">_camid</span>)</div>
+        </div>
+        <div class="fn-card-body"><p>Destroys a camera. Any viewport referencing this camera should be updated or deleted first.</p></div>
+      </div>
+    </div>
+
+    <div id="camtype-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_SetCameraType</span> &nbsp;/&nbsp; <span class="name">HRL_SetCameraPerspectiveFov</span> &nbsp;/&nbsp; <span class="name">HRL_SetCameraOrthoVertical</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p><code>HRL_SetCameraType(id, type)</code> — Switches projection type at runtime. <code>HRL_Ortho</code> or <code>HRL_Perspective</code>.</p>
+          <p><code>HRL_SetCameraPerspectiveFov(id, fov)</code> — Sets the vertical field of view in degrees for a perspective camera.</p>
+          <p><code>HRL_SetCameraOrthoVertical(id, height)</code> — Sets the visible world-space height for an orthographic camera.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="camtransform-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_SetCameraPosition</span> &nbsp;/&nbsp; <span class="name">HRL_SetCameraRotation</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p><code>HRL_SetCameraPosition(id, x, y, z)</code> — Sets the world-space position of the camera.</p>
+          <p><code>HRL_SetCameraRotation(id, pitch, yaw, roll)</code> — Sets the orientation via Euler angles in degrees. Axis mapping: Pitch = X, Yaw = Y, Roll = Z.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="camplanes-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_SetCameraNearPlane</span> &nbsp;/&nbsp; <span class="name">HRL_SetCameraFarPlane</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p>Sets the near and far clipping plane distances. Objects outside this range will not be rendered. For perspective cameras, a near plane that is too close to zero will cause depth precision issues.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MATRICES -->
+  <div class="doc-section" id="matrices">
+    <h2>Matrices <span class="section-tag">API</span></h2>
+
+    <div id="getmatrices-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="name">HRL_GetProjectionMatrix</span> &nbsp;/&nbsp; <span class="name">HRL_GetViewMatrix</span> &nbsp;/&nbsp; <span class="name">HRL_GetModelMatrix</span></div>
+        </div>
+        <div class="fn-card-body">
+          <p>Writes the current projection, view, or model matrix into a caller-allocated <code>float[16]</code> array. All matrices are <strong>column-major</strong> and contiguous in memory.</p>
+          <p><code>HRL_GetModelMatrix(meshid, float* aa)</code> — Returns the model matrix for a specific mesh, composed of its location, rotation, and scale.</p>
+          <div class="info-box note">
+            <span class="icon">ℹ</span>
+            <span>These functions are intended for custom rendering passes or physics integration where direct matrix access is needed.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DEBUG VIEWS -->
+  <div class="doc-section" id="debugviews">
+    <h2>Debug Views <span class="section-tag">API</span></h2>
+
+    <div id="debugmode-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DrawSceneAsDebugMode</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>, <span class="param-type">HRL_uint</span> <span class="param-name">mode</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Overrides the scene's shading with a diagnostic visualization. Call once per frame to keep the mode active.</p>
+          <table class="param-table">
+            <thead><tr><th>Constant</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>HRL_DebugViewNone</td><td>HRL_uint</td><td>Disables debug mode; renders normally.</td></tr>
+              <tr><td>HRL_DebugViewNormal</td><td>HRL_uint</td><td>Visualizes surface normals as RGB colors.</td></tr>
+              <tr><td>HRL_DebugViewLights</td><td>HRL_uint</td><td>Visualizes light contribution only.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DEBUG GEOMETRY -->
+  <div class="doc-section" id="debuggeo">
+    <h2>Debug Geometry <span class="section-tag">API</span></h2>
+    <p>All debug draw calls are immediate-mode. They must be called every frame to remain visible. They do not persist between frames.</p>
+
+    <div class="fn-card">
+      <div class="fn-card-header" onclick="toggle(this)">
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+        <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_SetDebugLineThickness</span>(<span class="param-type">float</span> <span class="param-name">a</span>)</div>
+      </div>
+      <div class="fn-card-body">
+        <p>Sets the global line thickness used by all subsequent debug draw calls. The visual result depends on the backend's line rendering support.</p>
+      </div>
+    </div>
+
+    <div id="debugseg-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DrawDebugSegment</span>(<span class="param-name">sceneid</span>, <span class="param-name">ax, ay, az</span>, <span class="param-name">bx, by, bz</span>, <span class="param-name">r, g, b</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Draws a line segment from world-space point A to point B in the given color.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="debugpoly-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DrawDebugPolygon</span>(...)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Draws an arbitrary polygon. Vertices are provided as three separate arrays of X, Y, and Z coordinates of length <code>vertices_count</code>.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>_mode</td><td>HRL_uint</td><td><code>HRL_DebugHollow</code> for an outline, <code>HRL_DebugSolid</code> for a filled polygon.</td></tr>
+              <tr><td>vertices_count</td><td>int</td><td>Number of vertices in the polygon.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="debugcircle-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DrawDebugCircle</span>(...)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Draws a circle centered at a world-space position. <code>segments</code> controls the polygon approximation quality. Use <code>HRL_DebugHollow</code> for outline, <code>HRL_DebugSolid</code> for filled.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="debugcapsule-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DrawDebugCapsule</span>(...)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Draws a capsule (cylinder with hemispherical caps) between two world-space points A and B. Commonly used to visualize physics character controllers and collision volumes.</p>
+          <table class="param-table">
+            <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>A (ax, ay, az)</td><td>float</td><td>Bottom hemisphere center.</td></tr>
+              <tr><td>B (bx, by, bz)</td><td>float</td><td>Top hemisphere center.</td></tr>
+              <tr><td>_mode</td><td>HRL_uint</td><td><code>HRL_DebugHollow</code> or <code>HRL_DebugSolid</code>.</td></tr>
+              <tr><td>segments</td><td>int</td><td>Approximation quality.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="debugpoint-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_DrawDebugPoint</span>(<span class="param-name">sceneid</span>, <span class="param-name">ax, ay, az</span>, <span class="param-name">size</span>, <span class="param-name">r, g, b</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Draws a screen-space square at a world-space position. <code>size</code> is the point diameter in pixels.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- UTILITY -->
+  <div class="doc-section" id="utility">
+    <h2>Utility <span class="section-tag">API</span></h2>
+
+    <div id="screenshot-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_TakeScreenshot</span>(<span class="param-type">HRL_id</span> <span class="param-name">_sceneid</span>, <span class="param-type">const char*</span> <span class="param-name">_target_path</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Captures the rendered output of a scene and writes it as a <code>.png</code> file to the given absolute path. The capture is performed at the end of the current frame.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="aa-fn">
+      <div class="fn-card">
+        <div class="fn-card-header" onclick="toggle(this)">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_SetAntialiasingMode</span>(<span class="param-type">HRL_uint</span> <span class="param-name">_mode</span>)</div>
+        </div>
+        <div class="fn-card-body">
+          <p>Enables or changes the global anti-aliasing mode. Pass one of the <code>HRL_Filter_*</code> constants. Not all modes are supported by every backend; unsupported modes will record an <code>HRL_INVALID_ENUM</code> error.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MACROS -->
+  <div class="doc-section" id="macros">
+    <h2>Utility Macros <span class="section-tag">Reference</span></h2>
+
+    <div class="fn-card">
+      <div class="fn-card-header" onclick="toggle(this)">
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+        <div class="fn-sig"><span class="name">HRL_CheckErrors</span>()</div>
+      </div>
+      <div class="fn-card-body">
+        <p>Polls the last HRL error and prints it to <code>stdout</code> if one is present. Output includes the error code, severity, detail string, and the source file and line number where the macro was called.</p>
+        <p>Suitable for debug builds. Wrap in <code>#ifdef _DEBUG</code> to strip from release.</p>
+<pre><code><span class="cm">// Example output:</span>
+<span class="cm">// [HRL] 4097:2 | Invalid mesh ID provided | main.cpp:42</span>
+
+<span class="fn">HRL_CheckErrors</span>();</code></pre>
+      </div>
+    </div>
+  </div>
 
 </main>
+</div>
 
-<footer>
-    HRL Engine – Documentation · 0.1 Pre-Alpha · 2026 · Built by Oscar Soirey
-</footer>
+<script>
+  function toggle(header) {
+    const body = header.nextElementSibling;
+    const chevron = header.querySelector('.chevron');
+    const isOpen = body.classList.contains('open');
+    body.classList.toggle('open', !isOpen);
+    chevron.classList.toggle('open', !isOpen);
+  }
 
+  // Active sidebar link on scroll
+  const sections = document.querySelectorAll('[id]');
+  const links = document.querySelectorAll('.sidebar a');
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        links.forEach(l => l.classList.remove('active'));
+        const active = document.querySelector(`.sidebar a[href="#${entry.target.id}"]`);
+        if (active) active.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-20% 0px -75% 0px' });
+  sections.forEach(s => observer.observe(s));
+</script>
 </body>
 </html>

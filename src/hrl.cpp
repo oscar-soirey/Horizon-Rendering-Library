@@ -26,12 +26,13 @@
 #include <stb/stb_truetype.h>
 
 
-//vtable utilisée pour appeller les fonctions, ne doit jamais etre modifié apres Init()
+//vtable utilisée pour appeller les fonctions, ne doit jamais etre modifiée apres Init()
 static HRL_vtable g_Backend;
 
 
 //erreurs//
-std::string lastErrorCode;
+HRL_Interal_Error lastError{};
+HRL_ErrorCallback error_callback_;
 
 
 //variables window//
@@ -263,8 +264,7 @@ void HRL_EndFrame()
 				auto mat_it = materials_.find(sprite->material_);
 				if (mat_it == materials_.end())
 				{
-					//si on trouve pas le material, on passe l'iteration de la boucle
-					lastErrorCode = "Tried to draw mesh : material not found";
+					SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_EndFrame: tried to draw mesh, material not found");
 					continue;
 				}
 				g_Backend.RHI_BindMaterial(mat_it->second);
@@ -295,16 +295,62 @@ void HRL_WindowResizeCallback(int _width, int _height)
 }
 
 
-const char* HRL_GetLastError()
+HRL_Error HRL_GetLastError(const char** _detail, HRL_Severity* _severity)
 {
-	if (lastErrorCode.empty())
-	{
-		return "";
-	}
 	//on stocke dans une var statique pour eviter un use after free
-	static std::string err;
-	err = "HRL Error : " + lastErrorCode;
-	return err.c_str();
+	static std::string detail;
+	detail = lastError.detail;
+	*_detail = detail.c_str();
+	*_severity = lastError.severity;
+	return lastError.code;
+}
+
+constexpr const char* errors_str[]={
+	"HRL_NO_ERROR",
+	"HRL_INVALID_ID",
+	"HRL_INVALID_ENUM",
+	"HRL_INVALID_VALUE",
+	"HRL_INVALID_OPERATION",
+	"HRL_INVALID_BACKEND_OPERATION",
+	"HRL_SHADER_COMPILE_FAIL",
+	"HRL_OUT_OF_MEMORY",
+	"HRL_INVALID_FILE_FORMAT"
+};
+constexpr int HRL_ERROR_BASE = 0x0070;
+constexpr int HRL_ERROR_COUNT = sizeof(errors_str) / sizeof(errors_str[0]);
+
+const char* HRL_ErrorEnumToString(HRL_Error err)
+{
+	int index = static_cast<int>(err) - HRL_ERROR_BASE;
+
+	if (index < 0 || index >= HRL_ERROR_COUNT)
+		return "UNKNOWN_ERROR";
+
+	return errors_str[index];
+}
+
+constexpr const char* severity_str[]={
+	"HRL_SEVERITY_WEAK_WARNING",
+	"HRL_SEVERITY_WARNING",
+	"HRL_SEVERITY_ERROR",
+	"HRL_SEVERITY_FATAL"
+};
+constexpr int HRL_SEVERITY_BASE = 0x0080;
+constexpr int HRL_SEVERITY_COUNT = sizeof(severity_str) / sizeof(severity_str[0]);
+
+const char* HRL_SeverityEnumToString(HRL_Severity sev)
+{
+	int index = static_cast<int>(sev) - HRL_SEVERITY_BASE;
+
+	if (index < 0 || index >= HRL_SEVERITY_COUNT)
+		return "UNKNOWN_SEVERITY";
+
+	return severity_str[index];
+}
+
+void HRL_RegisterErrorCallback(HRL_ErrorCallback _callback)
+{
+	error_callback_ = _callback;
 }
 
 
@@ -314,6 +360,7 @@ HRL_id HRL_CreateMeshSprite(HRL_id _sceneid)
 	auto it_scene = scenes_.find(_sceneid);
 	if (it_scene == scenes_.end())
 	{
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateMeshSprite: invalid scene ID");
 		return HRL_InvalidID;
 	}
 	auto* m = new HRL_MeshSprite();
@@ -331,7 +378,7 @@ void HRL_SetMeshPivotPoint(HRL_id _meshid, float x, float y, float z)
 	auto it = meshes_.find(_meshid);
 	if (it == meshes_.end())
 	{
-		lastErrorCode = "HRL_SetMeshPivotPoint, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshPivotPoint: invalid ID");
 		return;
 	}
 	it->second->pivot_point_ = {x, y, z};
@@ -341,19 +388,19 @@ void HRL_SetSpriteRegion(HRL_id _meshid, float min_u, float min_v, float max_u, 
 {
 	if (min_u > max_u || min_v > max_v)
 	{
-		lastErrorCode = "HRL_SetSpriteRegion, minimun cannot be greater than maximum";
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetSpriteRegion: minimum cannot be greater than maximum");
 		return;
 	}
 	auto it = meshes_.find(_meshid);
 	if (it == meshes_.end())
 	{
-		lastErrorCode = "HRL_SetSpriteRegion, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetSpriteRegion: invalid ID");
 		return;
 	}
 	auto* mesh = dynamic_cast<HRL_MeshSprite*>(it->second);
 	if (!mesh)
 	{
-		lastErrorCode = "HRL_SetSpriteRegion: trying to set region on a non-sprite mesh";
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetSpriteRegion: trying to set region on a non-sprite mesh");
 		return;
 	}
 	mesh->region_[0] = min_u;
@@ -367,14 +414,11 @@ void HRL_DeleteMesh(HRL_id _meshid)
 	auto it = meshes_.find(_meshid);
 	if (it == meshes_.end())
 	{
-		lastErrorCode = "HRL_DeleteMesh, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteMesh: invalid ID");
 		return;
 	}
-	else
-	{
-		delete it->second;
-		meshes_.erase(_meshid);
-	}
+	delete it->second;
+	meshes_.erase(_meshid);
 }
 
 void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid)
@@ -382,12 +426,10 @@ void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid)
 	auto it = meshes_.find(_meshid);
 	if (it == meshes_.end())
 	{
-		lastErrorCode = "HRL_SetMeshMaterial, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshMaterial: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->material_ = _matid;
-	}
+	it->second->material_ = _matid;
 }
 
 void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
@@ -395,12 +437,10 @@ void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
 	auto it = meshes_.find(_meshid);
 	if (it == meshes_.end())
 	{
-		lastErrorCode = "HRL_SetMeshLocation, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshLocation: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->position_ = glm::vec3(x, y, z);
-	}
+	it->second->position_ = glm::vec3(x, y, z);
 }
 
 void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll)
@@ -408,13 +448,11 @@ void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll)
 	auto it = meshes_.find(_meshid);
 	if (it == meshes_.end())
 	{
-		lastErrorCode = "HRL_SetMeshRotation, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshRotation: invalid ID");
+		return;
 	}
-	else
-	{
-		//glm attend : X-pitch, Y-yaw, Z-roll.
-		it->second->rotation_ = glm::vec3(pitch, yaw, roll);
-	}
+	//glm attend : X-pitch, Y-yaw, Z-roll.
+	it->second->rotation_ = glm::vec3(pitch, yaw, roll);
 }
 
 void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z)
@@ -422,12 +460,10 @@ void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z)
 	auto it = meshes_.find(_meshid);
 	if (it == meshes_.end())
 	{
-		lastErrorCode = "HRL_SetMeshScale, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshScale: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->scale_ = glm::vec3(x, y, z);
-	}
+	it->second->scale_ = glm::vec3(x, y, z);
 }
 
 void HRL_SetSpriteDrawOrder(HRL_id _meshid, float _draworder)
@@ -435,12 +471,10 @@ void HRL_SetSpriteDrawOrder(HRL_id _meshid, float _draworder)
 	auto it = meshes_.find(_meshid);
 	if (it == meshes_.end())
 	{
-		lastErrorCode = "HRL_SetSpriteDrawOrder, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetSpriteDrawOrder: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->draw_order_ = _draworder;
-	}
+	it->second->draw_order_ = _draworder;
 }
 
 
@@ -451,6 +485,7 @@ HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_uint _type)
 	auto it_scene = scenes_.find(_sceneid);
 	if (it_scene == scenes_.end())
 	{
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateLight: invalid scene ID");
 		return HRL_InvalidID;
 	}
 
@@ -469,7 +504,7 @@ HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_uint _type)
 	}
 	else
 	{
-		lastErrorCode = "HRL_CreateLight error : invalid type";
+		SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_CreateLight: invalid light type");
 		return HRL_InvalidID;
 	}
 }
@@ -479,15 +514,13 @@ void HRL_DeleteLight(HRL_id _lightid)
 	auto it = lights_.find(_lightid);
 	if (it == lights_.end())
 	{
-		lastErrorCode = "HRL_DeleteLight error : invalid id";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteLight: invalid ID");
+		return;
 	}
-	else
-	{
-		delete it->second;
-		lights_.erase(it);
+	delete it->second;
+	lights_.erase(it);
 
-		g_Backend.RHI_UpdateLights(GetLightsVector());
-	}
+	g_Backend.RHI_UpdateLights(GetLightsVector());
 }
 
 void HRL_SetLightColor(HRL_id _lightid, float x, float y, float z)
@@ -495,15 +528,13 @@ void HRL_SetLightColor(HRL_id _lightid, float x, float y, float z)
 	auto it = lights_.find(_lightid);
 	if (it == lights_.end())
 	{
-		lastErrorCode = "HRL_SetLightColor error : invalid id";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightColor: invalid ID");
+		return;
 	}
-	else
-	{
-		//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
-		it->second->color_ = glm::vec4(x, y, z, 0.f);
+	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
+	it->second->color_ = glm::vec4(x, y, z, 0.f);
 
-		g_Backend.RHI_UpdateLights(GetLightsVector());
-	}
+	g_Backend.RHI_UpdateLights(GetLightsVector());
 }
 
 void HRL_SetLightIntensity(HRL_id _lightid, float i)
@@ -511,14 +542,12 @@ void HRL_SetLightIntensity(HRL_id _lightid, float i)
 	auto it = lights_.find(_lightid);
 	if (it == lights_.end())
 	{
-		lastErrorCode = "HRL_SetLightIntensity error : invalid id";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightIntensity: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->intensity_ = i;
+	it->second->intensity_ = i;
 
-		g_Backend.RHI_UpdateLights(GetLightsVector());
-	}
+	g_Backend.RHI_UpdateLights(GetLightsVector());
 }
 
 void HRL_SetLightAttenuation(HRL_id _lightid, float a)
@@ -526,14 +555,12 @@ void HRL_SetLightAttenuation(HRL_id _lightid, float a)
 	auto it = lights_.find(_lightid);
 	if (it == lights_.end())
 	{
-		lastErrorCode = "HRL_SetLightAttenuation error : invalid id";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightAttenuation: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->attenuation_ = a;
+	it->second->attenuation_ = a;
 
-		g_Backend.RHI_UpdateLights(GetLightsVector());
-	}
+	g_Backend.RHI_UpdateLights(GetLightsVector());
 }
 
 void HRL_SetLightLocation(HRL_id _lightid, float x, float y, float z)
@@ -541,15 +568,13 @@ void HRL_SetLightLocation(HRL_id _lightid, float x, float y, float z)
 	auto it = lights_.find(_lightid);
 	if (it == lights_.end())
 	{
-		lastErrorCode = "HRL_SetLightLocation error : invalid id";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightLocation: invalid ID");
+		return;
 	}
-	else
-	{
-		//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
-		it->second->position_ = glm::vec4(x, y, z, 0.f);
+	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
+	it->second->position_ = glm::vec4(x, y, z, 0.f);
 
-		g_Backend.RHI_UpdateLights(GetLightsVector());
-	}
+	g_Backend.RHI_UpdateLights(GetLightsVector());
 }
 
 void HRL_SetLightRotation(HRL_id _lightid, float pitch, float yaw, float roll)
@@ -557,15 +582,13 @@ void HRL_SetLightRotation(HRL_id _lightid, float pitch, float yaw, float roll)
 	auto it = lights_.find(_lightid);
 	if (it == lights_.end())
 	{
-		lastErrorCode = "HRL_SetLightRotation error : invalid id";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightRotation: invalid ID");
+		return;
 	}
-	else
-	{
-		//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
-		it->second->rotation_ = glm::vec4(pitch, yaw, roll, 0.f);
+	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
+	it->second->rotation_ = glm::vec4(pitch, yaw, roll, 0.f);
 
-		g_Backend.RHI_UpdateLights(GetLightsVector());
-	}
+	g_Backend.RHI_UpdateLights(GetLightsVector());
 }
 
 
@@ -589,7 +612,7 @@ void HRL_GetTextureSize(HRL_id _textureid, int *_width, int *_height)
 	}
 	else
 	{
-		lastErrorCode = "HRL_GetTextureSize: width or height are not a valid pointer";
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_GetTextureSize: width or height are not a valid pointer");
 	}
 }
 
@@ -611,7 +634,7 @@ HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
 	auto it = fonts_.find(_fontid);
 	if (it == fonts_.end())
 	{
-		lastErrorCode = "HRL_CreateTextureFromText: invalid font ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateTextureFromText: invalid font ID");
 		return HRL_InvalidID;
 	}
 
@@ -622,7 +645,7 @@ HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
 	);
 	if (bmp.pixels.empty())
 	{
-		lastErrorCode = "HRL_CreateTextureFromText: bitmap generation failed, pixels is empty";
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_CreateTextureFromText: bitmap generation failed, pixels is empty");
 		return HRL_InvalidID;
 	}
 
@@ -645,7 +668,7 @@ void HRL_DeleteScene(HRL_id _sceneid)
 	auto it = scenes_.find(_sceneid);
 	if (it == scenes_.end())
 	{
-		lastErrorCode = "HRL_DeleteScene error : invalid scene ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteScene: invalid scene ID");
 		return;
 	}
 	g_Backend.RHI_DeleteScene(_sceneid);
@@ -671,14 +694,14 @@ HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid)
 	auto it_scene = scenes_.find(_sceneid);
 	if (it_scene == scenes_.end())
 	{
-		lastErrorCode = "HRL_CreatePostProcess error : invalid scene ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreatePostProcess: invalid scene ID");
 		return HRL_InvalidID;
 	}
 
 	auto it = materials_.find(_matid);
 	if (it == materials_.end())
 	{
-		lastErrorCode = "HRL_CreatePostProcess error : invalid material ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreatePostProcess: invalid material ID");
 		return HRL_InvalidID;
 	}
 
@@ -697,13 +720,11 @@ void HRL_DeletePostProcess(HRL_id _postid)
 	auto it = post_processes_.find(_postid);
 	if (it == post_processes_.end())
 	{
-		lastErrorCode = "HRL_DeletePostProcess error : invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeletePostProcess: invalid ID");
+		return;
 	}
-	else
-	{
-		delete it->second;
-		post_processes_.erase(it);
-	}
+	delete it->second;
+	post_processes_.erase(it);
 }
 
 
@@ -737,13 +758,11 @@ void HRL_DeleteMaterial(HRL_id _matid)
 	auto it = materials_.find(_matid);
 	if (it == materials_.end())
 	{
-		lastErrorCode = "HRL_DeleteMaterial, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteMaterial: invalid ID");
+		return;
 	}
-	else
-	{
-		delete it->second;
-		materials_.erase(it);
-	}
+	delete it->second;
+	materials_.erase(it);
 }
 
 void HRL_MaterialSetInt(HRL_id _matid, const char* _uniformName, int a)
@@ -751,26 +770,23 @@ void HRL_MaterialSetInt(HRL_id _matid, const char* _uniformName, int a)
 	auto it = materials_.find(_matid);
 	if (it == materials_.end())
 	{
-		lastErrorCode = "HRL_MaterialSetInt, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetInt: invalid ID");
+		return;
 	}
-	else
-	{
-		//si la clée n'existe pas, elle est créée
-		it->second->intParams_[_uniformName] = a;
-	}
+	//si la clée n'existe pas, elle est créée
+	it->second->intParams_[_uniformName] = a;
 }
 
 void HRL_MaterialSetTexture(HRL_id _matid, const char* _uniformName, HRL_id _textureid)
 {
-	//on v�rifie que le mat existe
 	auto it_mat = materials_.find(_matid);
 	if (it_mat == materials_.end())
 	{
-		lastErrorCode = "HRL_MaterialSetTexture, invalid material ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetTexture: invalid material ID");
 		return;
 	}
 
-	//on v�rifie que la texture existe au moment de RHI_BindMaterial, car ici on a pas acces aux textures
+	//on vérifie que la texture existe au moment de RHI_BindMaterial, car ici on a pas acces aux textures
 	it_mat->second->textureParams_[_uniformName] = _textureid;
 }
 
@@ -779,12 +795,10 @@ void HRL_MaterialSetBool(HRL_id _matid, const char* _uniformName, int a)
 	auto it = materials_.find(_matid);
 	if (it == materials_.end())
 	{
-		lastErrorCode = "HRL_MaterialSetBool, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetBool: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->intParams_[_uniformName] = a;
-	}
+	it->second->intParams_[_uniformName] = a;
 }
 
 void HRL_MaterialSetFloat(HRL_id _matid, const char* _uniformName, float a)
@@ -792,12 +806,10 @@ void HRL_MaterialSetFloat(HRL_id _matid, const char* _uniformName, float a)
 	auto it = materials_.find(_matid);
 	if (it == materials_.end())
 	{
-		lastErrorCode = "HRL_MaterialSetFloat, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetFloat: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->floatParams_[_uniformName] = a;
-	}
+	it->second->floatParams_[_uniformName] = a;
 }
 
 void HRL_MaterialSetVec2(HRL_id _matid, const char* _uniformName, float x, float y)
@@ -805,12 +817,10 @@ void HRL_MaterialSetVec2(HRL_id _matid, const char* _uniformName, float x, float
 	auto it = materials_.find(_matid);
 	if (it == materials_.end())
 	{
-		lastErrorCode = "HRL_MaterialSetVec2, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec2: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->vec2Params_[_uniformName] = glm::vec2(x, y);
-	}
+	it->second->vec2Params_[_uniformName] = glm::vec2(x, y);
 }
 
 void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float x, float y, float z)
@@ -818,12 +828,10 @@ void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float x, float
 	auto it = materials_.find(_matid);
 	if (it == materials_.end())
 	{
-		lastErrorCode = "HRL_MaterialSetVec3, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec3: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->vec3Params_[_uniformName] = glm::vec3(x, y, z);
-	}
+	it->second->vec3Params_[_uniformName] = glm::vec3(x, y, z);
 }
 
 void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float y, float z, float w)
@@ -831,31 +839,11 @@ void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float
 	auto it = materials_.find(_matid);
 	if (it == materials_.end())
 	{
-		lastErrorCode = "HRL_MaterialSetVec4, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec4: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->vec4Params_[_uniformName] = glm::vec4(x, y, z, w);
-	}
+	it->second->vec4Params_[_uniformName] = glm::vec4(x, y, z, w);
 }
-
-HRL_id HRL_CreateMaterialFromJson(const char *_jsonData, size_t _jsonSize)
-{
-	nlohmann::json jfile = nlohmann::json::parse(_jsonData);
-	if (!jfile.contains("surface") || !jfile.contains("shader"))
-	{
-		lastErrorCode = "HRL_CreateMaterialFromJson : file doesn't contains at least 'surface' or 'shader' key";
-		return HRL_InvalidID;
-	}
-
-	HRL_id matID = HRL_CreateMaterial(HRL_SpriteShader);
-	for (const auto& [key, value] : jfile["surface"].items())
-	{
-		//HRL_MaterialSetTexture(matID, key, )
-	}
-	return matID;
-}
-
 
 
 
@@ -864,7 +852,7 @@ HRL_id HRL_CreateViewport(HRL_id _sceneid, HRL_id _cameraid, float x, float y, f
 	auto it_scene = scenes_.find(_sceneid);
 	if (it_scene == scenes_.end())
 	{
-		lastErrorCode = "HRL_CreateViewport error : invalid scene ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateViewport: invalid scene ID");
 		return HRL_InvalidID;
 	}
 
@@ -891,13 +879,11 @@ void HRL_DeleteViewport(HRL_id _viewportid)
 	auto it = viewports_.find(_viewportid);
 	if (it == viewports_.end())
 	{
-		lastErrorCode = "HRL_DeleteViewport, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteViewport: invalid ID");
+		return;
 	}
-	else
-	{
-		delete it->second;
-		viewports_.erase(it);
-	}
+	delete it->second;
+	viewports_.erase(it);
 }
 
 void HRL_SetViewportCamera(HRL_id _viewportid, HRL_id _camid)
@@ -905,7 +891,7 @@ void HRL_SetViewportCamera(HRL_id _viewportid, HRL_id _camid)
 	auto viewport_it = viewports_.find(_viewportid);
 	if (viewport_it == viewports_.end())
 	{
-		lastErrorCode = "HRL_SetViewportCamera error : invalid Viewport ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetViewportCamera: invalid viewport ID");
 		return;
 	}
 
@@ -925,15 +911,13 @@ void HRL_SetViewportRect(HRL_id _viewportid, float x, float y, float _width, flo
 	auto it = viewports_.find(_viewportid);
 	if (it == viewports_.end())
 	{
-		lastErrorCode = "HRL_SetViewportRect, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetViewportRect: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->x_ = x;
-		it->second->y_ = y;
-		it->second->width_= _width;
-		it->second->height_= _height;
-	}
+	it->second->x_ = x;
+	it->second->y_ = y;
+	it->second->width_= _width;
+	it->second->height_= _height;
 }
 
 
@@ -943,7 +927,7 @@ HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_uint _type)
 	auto it_scene = scenes_.find(_sceneid);
 	if (it_scene == scenes_.end())
 	{
-		lastErrorCode = "HRL_CreateCamera error : invalid scene ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateCamera: invalid scene ID");
 		return HRL_InvalidID;
 	}
 
@@ -967,6 +951,7 @@ HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_uint _type)
 	}
 	else
 	{
+		SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_CreateCamera: invalid camera type");
 		return HRL_InvalidID;
 	}
 }
@@ -976,13 +961,11 @@ void HRL_DeleteCamera(HRL_id _camid)
 	auto it = cameras_.find(_camid);
 	if (it == cameras_.end())
 	{
-		lastErrorCode = "HRL_DeleteCamera error : invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteCamera: invalid ID");
+		return;
 	}
-	else
-	{
-		delete it->second;
-		cameras_.erase(it);
-	}
+	delete it->second;
+	cameras_.erase(it);
 }
 
 
@@ -991,12 +974,10 @@ void HRL_SetCameraType(HRL_id _camid, HRL_uint _type)
 	auto it = cameras_.find(_camid);
 	if (it == cameras_.end())
 	{
-		lastErrorCode = "HRL_SetCameraView, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraType: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->type_ = _type;
-	}
+	it->second->type_ = _type;
 }
 
 void HRL_SetCameraOrthoVertical(HRL_id _camid, float _height)
@@ -1004,18 +985,16 @@ void HRL_SetCameraOrthoVertical(HRL_id _camid, float _height)
 	auto it = cameras_.find(_camid);
 	if (it == cameras_.end())
 	{
-		lastErrorCode = "HRL_SetCameraOrthoVertical, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraOrthoVertical: invalid ID");
+		return;
+	}
+	if (it->second->type_ == HRL_Ortho)
+	{
+		it->second->value_ = _height;
 	}
 	else
 	{
-		if (it->second->type_ == HRL_Ortho)
-		{
-			it->second->value_ = _height;
-		}
-		else
-		{
-			lastErrorCode = "(weak warning) : HRL_SetCameraOrthoVertical, camera is not of type Ortho";
-		}
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_WARNING, "HRL_SetCameraOrthoVertical: camera is not of type Ortho");
 	}
 }
 
@@ -1024,18 +1003,16 @@ void HRL_SetCameraPerspectiveFov(HRL_id _camid, float _fov)
 	auto it = cameras_.find(_camid);
 	if (it == cameras_.end())
 	{
-		lastErrorCode = "HRL_SetCameraPerspectiveFov, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraPerspectiveFov: invalid ID");
+		return;
+	}
+	if (it->second->type_ == HRL_Perspective)
+	{
+		it->second->value_ = _fov;
 	}
 	else
 	{
-		if (it->second->type_ == HRL_Perspective)
-		{
-			it->second->value_ = _fov;
-		}
-		else
-		{
-			lastErrorCode = "(weak warning) : HRL_SetCameraPerspectiveFov, camera is not of type Perspective";
-		}
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_WARNING, "HRL_SetCameraPerspectiveFov: camera is not of type Perspective");
 	}
 }
 
@@ -1044,12 +1021,10 @@ void HRL_SetCameraNearPlane(HRL_id _camid, float _nearPlane)
 	auto it = cameras_.find(_camid);
 	if (it == cameras_.end())
 	{
-		lastErrorCode = "HRL_SetCameraNearPlane, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraNearPlane: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->near_plane_ = _nearPlane;
-	}
+	it->second->near_plane_ = _nearPlane;
 }
 
 void HRL_SetCameraFarPlane(HRL_id _camid, float _farPlane)
@@ -1057,12 +1032,10 @@ void HRL_SetCameraFarPlane(HRL_id _camid, float _farPlane)
 	auto it = cameras_.find(_camid);
 	if (it == cameras_.end())
 	{
-		lastErrorCode = "HRL_SetCameraFarPlane, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraFarPlane: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->far_plane_ = _farPlane;
-	}
+	it->second->far_plane_ = _farPlane;
 }
 
 void HRL_SetCameraPosition(HRL_id _camid, float x, float y, float z)
@@ -1070,12 +1043,10 @@ void HRL_SetCameraPosition(HRL_id _camid, float x, float y, float z)
 	auto it = cameras_.find(_camid);
 	if (it == cameras_.end())
 	{
-		lastErrorCode = "HRL_SetCameraPosition, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraPosition: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->position_ = glm::vec3(x, y, z);
-	}
+	it->second->position_ = glm::vec3(x, y, z);
 }
 
 void HRL_SetCameraRotation(HRL_id _camid, float pitch, float yaw, float roll)
@@ -1083,12 +1054,10 @@ void HRL_SetCameraRotation(HRL_id _camid, float pitch, float yaw, float roll)
 	auto it = cameras_.find(_camid);
 	if (it == cameras_.end())
 	{
-		lastErrorCode = "HRL_SetCameraRotation, invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraRotation: invalid ID");
+		return;
 	}
-	else
-	{
-		it->second->rotation_ = glm::vec3(pitch, yaw, roll);
-	}
+	it->second->rotation_ = glm::vec3(pitch, yaw, roll);
 }
 
 
@@ -1104,11 +1073,9 @@ void HRL_DrawDebugSegment(HRL_id _sceneid, float a_x, float a_y, float a_z, floa
 	auto it = scenes_.find(_sceneid);
 	if (it == scenes_.end())
 	{
-		SetErrorCode("HRL_DebugDrawSegment, sceneid is not valid");
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugSegment: invalid scene ID");
 		return;
 	}
-
-	//scene id is valid
 
 	debug_renderers[_sceneid].lines.emplace_back(a_x, a_y, a_z, r, g, b);
 	debug_renderers[_sceneid].lines.emplace_back(b_x, b_y, b_z, r, g, b);
@@ -1119,11 +1086,9 @@ void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode, const float *vertices
 	auto it = scenes_.find(_sceneid);
 	if (it == scenes_.end())
 	{
-		SetErrorCode("HRL_DebugDrawSegment, sceneid is not valid");
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugPolygon: invalid scene ID");
 		return;
 	}
-
-	//scene id is valid
 
 	if (_mode == HRL_DebugSolid)
 	{
@@ -1149,12 +1114,16 @@ void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode, const float *vertices
 		debug_renderers[_sceneid].lines.emplace_back(vertices_x[vertices_count-1], vertices_y[vertices_count-1], vertices_z[vertices_count-1], r, g, b);
 		debug_renderers[_sceneid].lines.emplace_back(vertices_x[0], vertices_y[0], vertices_z[0], r, g, b);
 	}
+	else
+	{
+		SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_DrawDebugPolygon: invalid mode, expected HRL_DebugSolid or HRL_DebugHollow");
+	}
 }
 
 void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode, float center_x, float center_y, float center_z, float radius, int segments, float r, float g, float b)
 {
 	auto it = scenes_.find(_sceneid);
-	if (it == scenes_.end()) { SetErrorCode("HRL_DrawDebugCircle, sceneid is not valid"); return; }
+	if (it == scenes_.end()) { SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugCircle: invalid scene ID"); return; }
 
 	int seg = segments;
 	auto* vx = (float*)alloca(seg * sizeof(float));
@@ -1175,7 +1144,7 @@ void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode, float center_x, float 
 void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode, float a_x, float a_y, float a_z, float b_x, float b_y, float b_z, float radius, int segments, float r, float g, float b)
 {
 	auto it = scenes_.find(_sceneid);
-	if (it == scenes_.end()) { SetErrorCode("HRL_DrawDebugCapsule, sceneid is not valid"); return; }
+	if (it == scenes_.end()) { SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugCapsule: invalid scene ID"); return; }
 
 	int half_seg = segments / 2;
 
@@ -1225,7 +1194,7 @@ void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode, float a_x, float a_y,
 void HRL_DrawDebugPoint(HRL_id _sceneid, float a_x, float a_y, float a_z, float size, float r, float g, float b)
 {
 	auto it = scenes_.find(_sceneid);
-	if (it == scenes_.end()) { SetErrorCode("HRL_DrawDebugPoint, sceneid is not valid"); return; }
+	if (it == scenes_.end()) { SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugPoint: invalid scene ID"); return; }
 
 	float h = size * 0.5f;
 
@@ -1253,7 +1222,8 @@ HRL_id HRL_CreateFont(const char *data, size_t _data_size)
 
 	if (!ok)
 	{
-		lastErrorCode = "HRL_CreateFont: failed to parse TTF data";
+		SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, "HRL_CreateFont: failed to parse TTF data");
+		delete font;
 		return HRL_InvalidID;
 	}
 
@@ -1267,7 +1237,7 @@ void HRL_DeleteFont(HRL_id _fontid)
 	auto it = fonts_.find(_fontid);
 	if (it == fonts_.end())
 	{
-		lastErrorCode = "HRL_DeleteFont: invalid ID";
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteFont: invalid ID");
 		return;
 	}
 	delete it->second;

@@ -47,18 +47,15 @@ int GL33_Texture::GL33_Create(const char* _imageContent, const size_t _imageSize
 
     return 0;
   }
-  else
-  {
-    SetErrorCode("Texture failed to load");
+  SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "Texture failed to load");
 
-    //on libere la memoire allouée par opengl, stb et la texture elle meme
-    glDeleteTextures(1, &glID_);
+  //on libere la memoire allouée par opengl, stb et la texture elle meme
+  glDeleteTextures(1, &glID_);
 
-    //on libere la mémoire allouée par stb (normalement c'est pas nécéssaire mais on le fait quand meme)
-    stbi_image_free(data);
+  //on libere la mémoire allouée par stb (normalement c'est pas nécéssaire mais on le fait quand meme)
+  stbi_image_free(data);
 
-    return -1;
-  }
+  return -1;
 }
 
 int GL33_Texture::GL33_CreateFromBitmap(BitmapResult* bmp)

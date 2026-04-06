@@ -6,10 +6,17 @@
 
 
 //on récupere la variable d'erreur déclarée dans hrl.cpp
-extern std::string lastErrorCode;
-void SetErrorCode(const std::string& e)
+extern HRL_Interal_Error lastError;
+extern HRL_ErrorCallback error_callback_;
+void SetErrorCode(HRL_Error e, HRL_Severity severity, const std::string& detail)
 {
-	lastErrorCode = e;
+	lastError.code = e;
+	lastError.severity = severity;
+	lastError.detail = detail;
+	if (error_callback_)
+	{
+		error_callback_(e, severity, detail.c_str());
+	}
 }
 
 
