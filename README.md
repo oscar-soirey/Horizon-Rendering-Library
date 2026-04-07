@@ -1,5 +1,3 @@
-![](docs/assets/logo.png)
-
 # Horizon Rendering Library
 
 > **Version** `0.3` — A lightweight, explicit rendering abstraction layer.
