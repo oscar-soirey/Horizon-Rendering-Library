@@ -309,8 +309,8 @@ int main()
   HRL_SetSpriteRegion(sprite_light, 0.5f, 0.5f, 1.f, 1.f);
   //HRL_SetMeshPivotPoint(sprite_light, 0.f,0.f,0.f);
 
-  HRL_SetTextureMinFilter(ptTex, HRL_Filter_Nearest);
-  HRL_SetTextureMagFilter(ptTex, HRL_Filter_Nearest);
+  HRL_SetTextureMinFilter(ptTex, HRL_Filter_Trilinear);
+  HRL_SetTextureMagFilter(ptTex, HRL_Filter_Trilinear);
 
   float light_rotation_z=0.f;
 
@@ -319,11 +319,21 @@ int main()
   size_t fontSize;
   std::string font = OpenFile("JetBrainsMono.ttf", &fontSize);
   HRL_id font_id = HRL_CreateFont(font.c_str(), fontSize);
-  HRL_id mat_fps = HRL_CreateMaterial(HRL_SpriteShader);
+
+  size_t vert_size;
+  std::string vert_data = OpenFile("vert.glsl", &vert_size);
+  size_t frag_size;
+  std::string frag_data = OpenFile("frag.glsl", &frag_size);
+  HRL_id custom_shader = HRL_CreateShader(vert_data.c_str(), vert_size, frag_data.c_str(), frag_size);
+  HRL_id mat_fps = HRL_CreateMaterial(custom_shader);
 
   HRL_id sprite_fps = HRL_CreateMeshSprite(scene);
   HRL_SetMeshMaterial(sprite_fps, mat_fps);
   HRL_SetMeshLocation(sprite_fps, 1, 1, 1);
+
+
+  HRL_id post_mat = HRL_CreateMaterial(HRL_DefaultPostProcessShader);
+  HRL_id post = HRL_CreatePostProcess(scene, post_mat, 0);
 
 
 

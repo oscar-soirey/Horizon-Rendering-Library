@@ -253,9 +253,20 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void* loader)
     (const char*)res_debug_vert_glsl,
     res_debug_vert_glsl_len,
     (const char*)res_debug_frag_glsl,
-    res_debug_frag_glsl_len);
-
+    res_debug_frag_glsl_len
+  );
   shaders_.emplace(HRL_DebugShader, debugShader);
+
+
+  //Create default post process shader
+  auto* defaultPostProcessShader = new GL33_Shader();
+  defaultPostProcessShader->GL33_Create(
+    (const char*)res_post_vert_glsl,
+    res_post_vert_glsl_len,
+    (const char*)res_post_frag_glsl,
+    res_post_frag_glsl_len
+  );
+  shaders_.emplace(HRL_DefaultPostProcessShader, defaultPostProcessShader);
 
 
 
@@ -767,6 +778,18 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
 }
 
 
+//Post Process//
+void GL33_CreatePostProcess(HRL_id mat, int priority)
+{
+
+}
+
+void GL33_DeletePostProcess(HRL_id post)
+{
+
+}
+
+
 //Matrices
 void GL33_GetProjectionMatrix(float *aa)
 {
@@ -875,8 +898,28 @@ void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness)
 
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)_renderer.triangles.size());
   }
+}
 
 
+//Requests//
+int GL33_IsValidTexture(HRL_id tex)
+{
+  auto it = textures_.find(tex);
+  if (it == textures_.end())
+  {
+    return 0;
+  }
+  return 1;
+}
+
+int GL33_IsValidShader(HRL_id shader)
+{
+  auto it = shaders_.find(shader);
+  if (it == shaders_.end())
+  {
+    return 0;
+  }
+  return 1;
 }
 
 
@@ -918,26 +961,4 @@ unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid)
   }
 
   return it->second->texture_;
-}
-
-
-//Requests//
-int GL33_IsValidTexture(HRL_id tex)
-{
-  auto it = textures_.find(tex);
-  if (it == textures_.end())
-  {
-    return 0;
-  }
-  return 1;
-}
-
-int GL33_IsValidShader(HRL_id shader)
-{
-  auto it = shaders_.find(shader);
-  if (it == shaders_.end())
-  {
-    return 0;
-  }
-  return 1;
 }

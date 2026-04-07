@@ -58,6 +58,10 @@ typedef struct {
 	void(*RHI_GetViewMatrix)(float* aa);
 	void(*RHI_GetModelMatrix)(HRL_Mesh* mesh, float* aa);
 
+	//Post Process//
+	void(*RHI_CreatePostProcess)(HRL_id material, int priority);
+	void(*RHI_DeletePostProcess)(HRL_id post);
+
 	//Debug//
 	void(*RHI_DrawDebug)(const DebugRenderer&, float line_thickness);
 

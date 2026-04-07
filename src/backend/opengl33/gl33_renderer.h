@@ -41,6 +41,10 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height);
 HRL_id GL33_CreateShader(const char* _vertContent, size_t _vertSize, const char* _fragContent, size_t _fragSize);
 void GL33_DeleteShader(HRL_id _id);
 
+//Post Process//
+void GL33_CreatePostProcess(HRL_id mat, int priority);
+void GL33_DeletePostProcess(HRL_id post);
+
 //Matrices
 void GL33_GetProjectionMatrix(float* aa);
 void GL33_GetViewMatrix(float* aa);

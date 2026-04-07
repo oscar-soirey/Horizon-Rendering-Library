@@ -669,7 +669,16 @@ HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
 
 void HRL_ClearScreen()
 {
-	SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_FATAL, "Clear screen is not implemented");
+	for (const auto& s : scenes_)
+	{
+		if (!s.second)
+		{
+			SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_ClearScreen: tried to clear an invalid scene object");
+			return;
+		}
+		g_Backend.RHI_BindScene(s.first);
+		g_Backend.RHI_ResetFramebuffer();
+	}
 }
 
 
@@ -735,7 +744,7 @@ void HRL_EnableColorPickingBuffer(HRL_id _sceneid, int _enable)
 
 
 //Post Process//
-HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid)
+HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid, int priority)
 {
 	auto it_scene = scenes_.find(_sceneid);
 	if (it_scene == scenes_.end())
@@ -753,8 +762,11 @@ HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid)
 
 	auto p = new HRL_PostProcess();
 	p->material_ = _matid;
+	p->priority = priority;
 
 	HRL_id newId = GenerateHRL_ID();
+
+	g_Backend.RHI_CreatePostProcess(_matid, priority);
 
 	it_scene->second->post_processes.emplace(newId, p);
 	post_processes_.emplace(newId, p);
@@ -769,6 +781,7 @@ void HRL_DeletePostProcess(HRL_id _postid)
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeletePostProcess: invalid ID");
 		return;
 	}
+	g_Backend.RHI_DeletePostProcess(_postid);
 	delete it->second;
 	post_processes_.erase(it);
 }

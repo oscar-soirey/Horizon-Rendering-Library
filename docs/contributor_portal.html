@@ -7,6 +7,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+
+  <link rel="icon" href="assets/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
 </head>
 <body>
 
@@ -72,26 +77,6 @@
     no assumptions about the underlying API and will never attempt to recover from a
     missing or broken RHI implementation.</span>
   </div>
-
-  <h3>Architecture at a glance</h3>
-  <p>
-    HRL is compiled as a <strong>shared DLL</strong> (<code>hrl.dll</code>) and linked against
-    by both the engine (<code>engine.dll</code>) and the editor (<code>editor.exe</code>).
-    This single-DLL design ensures that GPU context, VAOs, VBOs, shader programs and
-    framebuffer state are owned by exactly one module, eliminating the duplicate-state
-    class of bugs that arises when a static library is linked into multiple translation units.
-  </p>
-
-  <table class="doc-table">
-    <thead>
-      <tr><th>Module</th><th>Role</th><th>Links against</th></tr>
-    </thead>
-    <tbody>
-      <tr><td>hrl.dll</td><td>Rendering backend — owns all GPU objects</td><td>glfw, glad, glm</td></tr>
-      <tr><td>engine.dll</td><td>Engine runtime — actors, physics, input</td><td>hrl.dll</td></tr>
-      <tr><td>editor.exe</td><td>ImGui editor shell</td><td>engine.dll, hrl.dll</td></tr>
-    </tbody>
-  </table>
 </section>
 
 <!-- ══════════════════════════════════════════
@@ -161,7 +146,7 @@
     Before compiling for the first time — or after modifying any <code>CMakeLists.txt</code> —
     run the generation script from the <strong>root of the project</strong>:
   </p>
-  <pre><code><span class="cm"># Run once before your first build, and after any CMakeLists change</span>
+  <pre><code><span class="cm"># Run once before your first build</span>
 generate-cmake-project.bat</code></pre>
 
   <div class="info-box note">
@@ -177,7 +162,7 @@ generate-cmake-project.bat</code></pre>
 
   <p>
     This invokes <code>cmake --build</code> on the pre-generated tree.
-    Output binaries (<code>hrl.dll</code>, import libraries and test executables)
+    Output binaries (<code>hrldll.dll</code>, import libraries and test executables)
     are placed in <code>build/bin/</code>.
   </p>
 
@@ -726,13 +711,6 @@ generate-cmake-project.bat</code></pre>
     <code>HRL_id</code> values that materials reference by ID.
   </p>
 
-  <div class="info-box warn">
-    <span class="icon">⚠️</span>
-    <span>All shaders must target <strong>GLSL 330 core</strong> to match the OpenGL 3.3
-    Core Profile requirement. Using compatibility-profile extensions or
-    ARB suffixed functions is forbidden.</span>
-  </div>
-
   <h3>Expected default shaders</h3>
   <table class="doc-table">
     <thead><tr><th>Shader</th><th>Purpose</th></tr></thead>
@@ -811,16 +789,9 @@ generate-cmake-project.bat</code></pre>
   <p>
     The debug renderer is an immediate-mode overlay that draws colored lines and filled
     triangles each frame without persistent scene objects. 
-    All primitives submitted during a frame are batched into a shared VBO and flushed
+    All primitives submitted during a frame are flushed
     in a single draw call at the end of the frame.
   </p>
-
-  <div class="info-box note">
-    <span class="icon">ℹ️</span>
-    <span>The debug VAO and VBO are shared between the line and triangle sub-renderers.
-    A single <code>current_buffer_size</code> tracker must be maintained across both
-    primitive types to avoid overwriting live data in the VBO.</span>
-  </div>
 
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">

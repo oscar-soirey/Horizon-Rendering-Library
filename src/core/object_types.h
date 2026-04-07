@@ -56,6 +56,7 @@ typedef struct {
 //POST PROCESS
 typedef struct {
   HRL_id material_;
+  int priority;
 }HRL_PostProcess;
 
 //MATERIAL

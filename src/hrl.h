@@ -141,6 +141,7 @@ typedef enum {
 #define HRL_Mesh2DShader								(UINT32_MAX - 1)
 #define HRL_Mesh3DShader								(UINT32_MAX - 2)
 #define HRL_DebugShader									(UINT32_MAX - 3)
+#define HRL_DefaultPostProcessShader		(UINT32_MAX - 4)
 
 
 #ifdef __cplusplus
@@ -468,7 +469,7 @@ HRL_API void HRL_EnableColorPickingBuffer(HRL_id _scene, HRL_uint _enable);
  * @param _matid Material containing the full-screen shader to apply.
  * @return HRL_id of the new post-process object, or HRL_InvalidID on failure.
  */
-HRL_API HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid);
+HRL_API HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid, int priority);
 
 /**
  * @brief Removes and destroys a post-process pass.
@@ -476,7 +477,7 @@ HRL_API HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid);
  */
 HRL_API void HRL_DeletePostProcess(HRL_id _postid);
 
-	HRL_API int HRL_IsValidPostProcess(HRL_id _id);
+HRL_API int HRL_IsValidPostProcess(HRL_id _id);
 
 
 /* ============================================================================
