@@ -43,5 +43,8 @@ HRL_vtable GetOpenGL33Backend()
 
 	vtable.RHI_DrawDebug = GL33_DrawDebug;
 
+	vtable.RHI_IsValidTexture = GL33_IsValidTexture;
+	vtable.RHI_IsValidShader = GL33_IsValidShader;
+
 	return vtable;
 }

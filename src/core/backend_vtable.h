@@ -60,6 +60,10 @@ typedef struct {
 
 	//Debug//
 	void(*RHI_DrawDebug)(const DebugRenderer&, float line_thickness);
+
+	//Requests
+	int(*RHI_IsValidTexture)(HRL_id tex);
+	int(*RHI_IsValidShader)(HRL_id shader);
 }HRL_vtable;
 
 #endif

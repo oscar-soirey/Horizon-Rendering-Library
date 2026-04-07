@@ -28,7 +28,7 @@
 #define Sprite_Buffer   0
 #define Mesh2D_Buffer   1
 #define Mesh3D_Buffer   2
-#define Debug_Buffer   2
+#define Debug_Buffer    2
 
 
 //ordre d'importance du batching :
@@ -918,4 +918,26 @@ unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid)
   }
 
   return it->second->texture_;
+}
+
+
+//Requests//
+int GL33_IsValidTexture(HRL_id tex)
+{
+  auto it = textures_.find(tex);
+  if (it == textures_.end())
+  {
+    return 0;
+  }
+  return 1;
+}
+
+int GL33_IsValidShader(HRL_id shader)
+{
+  auto it = shaders_.find(shader);
+  if (it == shaders_.end())
+  {
+    return 0;
+  }
+  return 1;
 }

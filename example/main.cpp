@@ -273,7 +273,7 @@ int main()
   HRL_id ptMat = HRL_CreateMaterial(HRL_SpriteShader);
   HRL_MaterialSetTexture(ptMat, HRL_T_Albedo, ptTex);
   HRL_id sprite2 = HRL_CreateMeshSprite(scene);
-  //HRL_SetMeshMaterial(sprite2, ptMat);
+  HRL_SetMeshMaterial(sprite2, ptMat);
   HRL_SetMeshScale(sprite2, 80, 80, 80);
 
 
@@ -345,7 +345,7 @@ int main()
     seconds = (int)ticks;
     if (last_seconds != seconds)
     {
-      if (texture_fps != HRL_InvalidID)
+      if (HRL_IsValidTexture(texture_fps))
         HRL_DeleteTexture(texture_fps);
 
       char buf[256];
@@ -411,7 +411,8 @@ int main()
     }
     if (glfwGetKey(win, GLFW_KEY_F5) == GLFW_PRESS)
     {
-      HRL_DeleteMaterial(ptMat);
+      if (HRL_IsValidMesh(sprite2))
+        HRL_DeleteMesh(sprite2);
     }
   }
 

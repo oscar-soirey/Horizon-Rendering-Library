@@ -275,6 +275,8 @@ HRL_API HRL_id HRL_CreateMeshFromFile(HRL_id _sceneid, HRL_uint _type, const cha
  */
 HRL_API void HRL_DeleteMesh(HRL_id _meshid);
 
+	HRL_API int HRL_IsValidMesh(HRL_id _id);
+
 /**
  * @brief Assigns a material to a mesh, controlling how it is shaded.
  * @param _meshid ID of the target mesh.
@@ -324,6 +326,8 @@ HRL_API HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_uint _type);
  * @param _lightid ID of the light to delete.
  */
 HRL_API void HRL_DeleteLight(HRL_id _lightid);
+
+	HRL_API int HRL_IsValidLight(HRL_id _id);
 
 /**
  * @brief Sets the RGB color emitted by a light.
@@ -376,6 +380,8 @@ HRL_API HRL_id HRL_CreateTexture(const char* _data, size_t _bufferSize);
  */
 HRL_API void HRL_DeleteTexture(HRL_id _textureid);
 
+	HRL_API int HRL_IsValidTexture(HRL_id _id);
+
 HRL_API void HRL_ReloadTexture(HRL_id _textureid, const char* _data, size_t _bufferSize);
 
 /**
@@ -418,6 +424,9 @@ HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
  *  SCENES
  * ============================================================================ */
 
+	//Clear screen space
+	HRL_API void HRL_ClearScreen();
+
 /**
  * @brief Creates a new scene that acts as a container for meshes, lights and cameras.
  * @param _renderOnScreen If HRL_True, the scene renders directly to the screen.
@@ -431,6 +440,8 @@ HRL_API HRL_id HRL_CreateScene(int _renderOnScreen);
  * @param _sceneid ID of the scene to delete.
  */
 HRL_API void HRL_DeleteScene(HRL_id _sceneid);
+
+	HRL_API int HRL_IsValidScene(HRL_id _id);
 
 /**
  * @brief Resizes the off-screen render texture of a scene.
@@ -465,6 +476,8 @@ HRL_API HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid);
  */
 HRL_API void HRL_DeletePostProcess(HRL_id _postid);
 
+	HRL_API int HRL_IsValidPostProcess(HRL_id _id);
+
 
 /* ============================================================================
  *  SHADERS
@@ -486,6 +499,8 @@ HRL_API HRL_id HRL_CreateShader(const char* _vertData, size_t _vertSize, const c
  */
 HRL_API void HRL_DeleteShader(HRL_id _shaderid);
 
+	HRL_API int HRL_IsValidShader(HRL_id _id);
+
 
 /* ============================================================================
  *  MATERIALS
@@ -504,6 +519,8 @@ HRL_API HRL_id HRL_CreateMaterial(HRL_id _shaderid);
  * @param _matid ID of the material to delete.
  */
 HRL_API void HRL_DeleteMaterial(HRL_id _matid);
+
+	HRL_API int HRL_IsValidMaterial(HRL_id _id);
 
 /**
  * @brief Sets an integer uniform on a material.
@@ -560,6 +577,8 @@ HRL_API HRL_id HRL_CreateViewport(HRL_id _sceneid, HRL_id _cameraid, float x, fl
  */
 HRL_API void HRL_DeleteViewport(HRL_id _viewportid);
 
+	HRL_API int HRL_IsValidViewport(HRL_id _id);
+
 /**
  * @brief Reassigns the camera used by a viewport.
  * @param _camid New camera ID, or HRL_InvalidID to detach.
@@ -589,6 +608,8 @@ HRL_API HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_uint _type);
  * @param _camid ID of the camera to delete.
  */
 HRL_API void HRL_DeleteCamera(HRL_id _camid);
+
+	HRL_API int HRL_IsValidCamera(HRL_id _id);
 
 /**
  * @brief Changes the projection type of an existing camera at runtime.
@@ -775,6 +796,8 @@ HRL_API HRL_id HRL_CreateFont(const char* data, size_t _data_size);
  * @param _fontid ID of the font to delete.
  */
 HRL_API void HRL_DeleteFont(HRL_id _fontid);
+
+	HRL_API int HRL_IsValidFont(HRL_id _id);
 
 
 #ifdef __cplusplus

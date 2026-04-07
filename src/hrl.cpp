@@ -45,6 +45,14 @@ HRL_uint textureMinFilter = HRL_Filter_Linear;
 HRL_uint textureMagFilter = HRL_Filter_Linear;
 
 
+
+//texte - structure backend API only, pas besoin d'y acceder avec le backend
+typedef struct {
+	stbtt_fontinfo             info;
+	std::vector<unsigned char> ttf_buffer;
+}HRL_Font;
+
+
 //objects//
 typedef struct {
 	std::unordered_map<HRL_id, HRL_Mesh*> meshes;
@@ -64,19 +72,12 @@ static std::unordered_map<HRL_id, HRL_PostProcess*> post_processes_;
 
 //ressources globales
 static std::unordered_map<HRL_id, HRL_Material*> materials_;
+static std::unordered_map<HRL_id, HRL_Font*> fonts_;
 
 
 //debugs triés par scenes
 static std::unordered_map<HRL_id, DebugRenderer> debug_renderers{};
 static float debug_line_thickness = 1.f;
-
-
-//texte
-typedef struct {
-	stbtt_fontinfo             info;
-	std::vector<unsigned char> ttf_buffer;
-}HRL_Font;
-static std::unordered_map<HRL_id, HRL_Font*> fonts_;
 
 
 //Utils Non-API Functions :
@@ -245,6 +246,12 @@ void HRL_EndFrame()
 	//appels à RHI_DrawMesh, HRI_BindMaterial, etc...
 	for (const auto& [scene_id, scene] : scenes_)
 	{
+		if (!scene)
+		{
+			SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_EndFrame: Tried to bind an invalid scene");
+			continue;
+		}
+
 		g_Backend.RHI_BindScene(scene_id);
 		g_Backend.RHI_ClearScene();
 
@@ -660,6 +667,13 @@ HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
 }
 
 
+void HRL_ClearScreen()
+{
+	SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_FATAL, "Clear screen is not implemented");
+}
+
+
+
 //Scenes//
 HRL_id HRL_CreateScene(int _renderOnScreen)
 {
@@ -678,36 +692,35 @@ void HRL_DeleteScene(HRL_id _sceneid)
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteScene: invalid scene ID");
 		return;
 	}
-	g_Backend.RHI_DeleteScene(_sceneid);
 
 	//delete every objects that ows the scene
 	for (const auto& [id, mesh] : it->second->meshes)
 	{
-		delete mesh;
+		HRL_DeleteMesh(id);
 	}
-	it->second->meshes.clear();
 
 	for (const auto& [id, light] : it->second->lights)
 	{
-		delete light;
+		HRL_DeleteLight(id);
 	}
-	it->second->lights.clear();
 
 	for (const auto& [id, viewport] : it->second->viewports)
 	{
-		delete viewport;
+		HRL_DeleteViewport(id);
 	}
-	it->second->viewports.clear();
 
 	for (const auto& [id, camera] : it->second->cameras)
 	{
-		delete camera;
+		HRL_DeleteCamera(id);
 	}
-	it->second->cameras.clear();
 
 	delete it->second;
+
+	g_Backend.RHI_DeleteScene(_sceneid);
+
 	scenes_.erase(it);
 }
+
 
 void HRL_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
 {
@@ -1298,4 +1311,101 @@ void HRL_DeleteFont(HRL_id _fontid)
 	}
 	delete it->second;
 	fonts_.erase(it);
+}
+
+
+
+
+
+//Is Valid Functions
+int HRL_IsValidMesh(HRL_id _id)
+{
+	auto it = meshes_.find(_id);
+	if (it == meshes_.end())
+	{
+		return 0;
+	}
+	return 1;
+}
+
+int HRL_IsValidLight(HRL_id _id)
+{
+	auto it = lights_.find(_id);
+	if (it == lights_.end())
+	{
+		return 0;
+	}
+	return 1;
+}
+
+int HRL_IsValidTexture(HRL_id _id)
+{
+	//Backend request
+	return g_Backend.RHI_IsValidTexture(_id);
+}
+
+int HRL_IsValidScene(HRL_id _id)
+{
+	auto it = scenes_.find(_id);
+	if (it == scenes_.end())
+	{
+		return 0;
+	}
+	return 1;
+}
+
+int HRL_IsValidPostProcess(HRL_id _id)
+{
+	auto it = post_processes_.find(_id);
+	if (it == post_processes_.end())
+	{
+		return 0;
+	}
+	return 1;
+}
+
+int HRL_IsValidShader(HRL_id _id)
+{
+	//Backend request
+	return g_Backend.RHI_IsValidShader(_id);
+}
+
+int HRL_IsValidMaterial(HRL_id _id)
+{
+	auto it = materials_.find(_id);
+	if (it == materials_.end())
+	{
+		return 0;
+	}
+	return 1;
+}
+
+int HRL_IsValidViewport(HRL_id _id)
+{
+	auto it = viewports_.find(_id);
+	if (it == viewports_.end())
+	{
+		return 0;
+	}
+	return 1;
+}
+
+int HRL_IsValidCamera(HRL_id _id)
+{
+	auto it = cameras_.find(_id);
+	if (it == cameras_.end())
+	{
+		return 0;
+	}
+	return 1;
+}
+
+int HRL_IsValidFont(HRL_id _id)
+{
+	auto it = fonts_.find(_id);
+	if (it == fonts_.end())
+	{
+		return 0;
+	}
+	return 1;
 }

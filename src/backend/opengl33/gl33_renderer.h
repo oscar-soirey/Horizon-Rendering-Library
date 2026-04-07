@@ -49,4 +49,8 @@ void GL33_GetModelMatrix(HRL_Mesh* mesh, float* aa);
 //Debug//
 void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness);
 
+//Requests//
+int GL33_IsValidTexture(HRL_id tex);
+int GL33_IsValidShader(HRL_id shader);
+
 #endif
