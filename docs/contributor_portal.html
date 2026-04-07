@@ -24,12 +24,12 @@
   </a>
 </header>
 
-
 <div class="layout">
 
 <nav class="sidebar">
   <div class="sidebar-section-label">Backend</div>
   <a href="#overview">Overview</a>
+  <a href="#compile">Compile HRL</a>
   <a href="#init">Initialization</a>
   <a href="#frame">Frame Flow</a>
   <a href="#viewport">Viewport & Camera</a>
@@ -45,51 +45,186 @@
 
 <main>
 
-<!-- OVERVIEW -->
-
+<!-- ══════════════════════════════════════════
+     OVERVIEW
+══════════════════════════════════════════ -->
 <section id="overview" class="doc-section">
-  <h1>Contributor Portal</h1>
-  <p class="doc-subtitle">
-    Backend implementation guide for HRL
-  </p>
+  <h1>Contributor <span class="accent">Portal</span></h1>
+  <p class="doc-subtitle">Backend implementation guide for HRL</p>
 
   <div class="intro-callout">
-    <strong>HRL is a fully graphics‑API‑agnostic engine.</strong><br>
+    <strong>HRL is a fully graphics‑API‑agnostic rendering library.</strong><br>
     All GPU logic lives exclusively inside the backend through a strict RHI contract.
     The HRL core never includes or exposes native APIs such as OpenGL, Vulkan, DirectX or Metal.
+    The currently maintained backend targets <strong>OpenGL 3.3 Core Profile</strong>.
   </div>
 
   <p>
-    As a backend contributor, you are expected to implement
-    <strong>every RHI function</strong>.
-    Missing or partially implemented functions result in an invalid backend.
+    As a backend contributor, you are expected to implement <strong>every RHI function</strong>.
+    Missing or partially implemented functions result in an invalid backend that will either
+    crash at runtime or silently corrupt GPU state.
   </p>
 
   <div class="info-box warn">
     <span class="icon">⚠️</span>
-    The backend is responsible for most of the engine behavior:
-    resource lifetime, GPU state, pipelines, framebuffers and synchronization.
+    <span>The backend is solely responsible for resource lifetime, GPU state machines, pipeline
+    objects, framebuffer management and draw-call synchronization. The HRL core makes
+    no assumptions about the underlying API and will never attempt to recover from a
+    missing or broken RHI implementation.</span>
+  </div>
+
+  <h3>Architecture at a glance</h3>
+  <p>
+    HRL is compiled as a <strong>shared DLL</strong> (<code>hrl.dll</code>) and linked against
+    by both the engine (<code>engine.dll</code>) and the editor (<code>editor.exe</code>).
+    This single-DLL design ensures that GPU context, VAOs, VBOs, shader programs and
+    framebuffer state are owned by exactly one module, eliminating the duplicate-state
+    class of bugs that arises when a static library is linked into multiple translation units.
+  </p>
+
+  <table class="doc-table">
+    <thead>
+      <tr><th>Module</th><th>Role</th><th>Links against</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>hrl.dll</td><td>Rendering backend — owns all GPU objects</td><td>glfw, glad, glm</td></tr>
+      <tr><td>engine.dll</td><td>Engine runtime — actors, physics, input</td><td>hrl.dll</td></tr>
+      <tr><td>editor.exe</td><td>ImGui editor shell</td><td>engine.dll, hrl.dll</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ══════════════════════════════════════════
+     COMPILE HRL
+══════════════════════════════════════════ -->
+<section id="compile" class="doc-section">
+  <h2>Compile HRL <span class="section-tag">COMPILATION</span></h2>
+
+  <p>
+    HRL uses <strong>CMake</strong> as its build system and is officially supported with
+    <strong>MinGW-w64 (GCC for Windows)</strong> as the compiler toolchain.
+    Building with another compiler (MSVC, Clang, etc.) is not tested and may introduce
+    <strong>undefined behaviour</strong> due to ABI differences, non-standard pragma handling
+    and DLL export semantics that the build is specifically tuned for.
+  </p>
+
+  <div class="info-box warn">
+    <span class="icon">⚠️</span>
+    <span>Compiling HRL with a toolchain other than MinGW-w64 is <strong>unsupported</strong>.
+    Subtle UB, ODR violations and GPU state corruption may occur silently at runtime.
+    In particular, mixing MSVC-compiled and MinGW-compiled translation units across DLL
+    boundaries is undefined behaviour in C++.</span>
+  </div>
+
+  <h3>1 — Install MinGW-w64</h3>
+  <p>
+    The recommended distribution is <strong>WinLibs</strong>, which ships a clean, standalone
+    MinGW-w64 bundle with no installer side effects.
+  </p>
+
+  <table class="doc-table">
+    <thead><tr><th>Step</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Download</td>
+        <td>Go to <code>winlibs.com</code> and download the latest <strong>UCRT, POSIX</strong>
+        release (choose the <code>x86_64</code> zip).</td>
+      </tr>
+      <tr>
+        <td>Extract</td>
+        <td>Extract the archive to a stable path, e.g. <code>C:\mingw64</code>.
+        Avoid paths with spaces.</td>
+      </tr>
+      <tr>
+        <td>PATH</td>
+        <td>Add <code>C:\mingw64\bin</code> to your system <code>PATH</code> via
+        <em>System Properties → Environment Variables → Path → Edit</em>.</td>
+      </tr>
+      <tr>
+        <td>Verify</td>
+        <td>Open a new terminal and run <code>gcc --version</code>.
+        You should see a GCC 13+ line referencing <em>MinGW-w64</em>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>2 — Install CMake</h3>
+  <p>
+    Download the latest <strong>CMake</strong> Windows installer from
+    <code>cmake.org/download</code>. During installation, select
+    <em>"Add CMake to the system PATH for all users"</em>.
+    Verify with <code>cmake --version</code> (3.22+ required).
+  </p>
+
+  <h3>3 — Generate the CMake project</h3>
+  <p>
+    Before compiling for the first time — or after modifying any <code>CMakeLists.txt</code> —
+    run the generation script from the <strong>root of the project</strong>:
+  </p>
+  <pre><code><span class="cm"># Run once before your first build, and after any CMakeLists change</span>
+generate-cmake-project.bat</code></pre>
+
+  <div class="info-box note">
+    <span class="icon">ℹ️</span>
+    <span>This script invokes CMake with the correct <code>MinGW Makefiles</code> generator
+    and writes the build tree into the <code>build/</code> directory. You do <strong>not</strong>
+    need to re-run it on every compilation — only when the CMake configuration changes.</span>
+  </div>
+
+  <h3>4 — Build</h3>
+  <p>Once the project has been generated, compile from the <strong>root of the project</strong>:</p>
+  <pre><code>build.bat</code></pre>
+
+  <p>
+    This invokes <code>cmake --build</code> on the pre-generated tree.
+    Output binaries (<code>hrl.dll</code>, import libraries and test executables)
+    are placed in <code>build/bin/</code>.
+  </p>
+
+  <div class="info-box tip">
+    <span class="icon">✅</span>
+    <span>A clean full build workflow always follows the same order:
+    <code>generate-cmake-project.bat</code> → <code>build.bat</code>.
+    For incremental builds, <code>build.bat</code> alone is sufficient.</span>
   </div>
 </section>
 
-<!-- INIT -->
-
+<!-- ══════════════════════════════════════════
+     INIT
+══════════════════════════════════════════ -->
 <section id="init" class="doc-section">
   <h2>Initialization <span class="section-tag">RHI</span></h2>
 
+  <p>
+    The three initialization functions must be called in strict order during engine startup.
+    They set up the graphics API loader, allocate GPU-side resources that depend on the
+    swapchain dimensions, and register the global backend state used by all subsequent RHI calls.
+  </p>
+
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_Init</span>()</div>
     </div>
     <div class="fn-card-body">
-      <p>Initializes global backend state and loads the graphics API.</p>
+      <p>
+        Initializes global backend state and loads the graphics API. This is the very first
+        RHI call made by the engine. At this stage, no window or GPU context exists yet —
+        the function only prepares internal tables, default values and any pre-context state
+        the backend requires (e.g. function-pointer stubs, debug layer toggles).
+      </p>
+      <div class="info-box note">
+        <span class="icon">ℹ️</span>
+        <span>Do <strong>not</strong> issue any OpenGL calls inside <code>RHI_Init</code>.
+        The context is not yet current. GPU resource allocation belongs in
+        <code>RHI_InitContext</code>.</span>
+      </div>
     </div>
   </div>
 
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig">
         <span class="ret">void</span> <span class="name">RHI_InitContext</span>(
         <span class="param-type">HRL_uint</span> <span class="param-name">width</span>,
@@ -98,55 +233,111 @@
       </div>
     </div>
     <div class="fn-card-body">
-      <p>Initializes the rendering context and swapchain‑dependent resources.</p>
+      <p>
+        Initializes the rendering context and all swapchain-dependent resources. Called
+        immediately after the platform window and its OpenGL context have been created by GLFW.
+        This is where the backend should load API function pointers via the provided
+        <code>loader</code> (e.g. <code>glfwGetProcAddress</code>), compile default shader
+        programs, create shared VAOs/VBOs for the debug renderer, allocate the color-picking
+        framebuffer, and set the initial viewport.
+      </p>
+      <table class="param-table">
+        <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td>width</td><td>HRL_uint</td><td>Initial framebuffer width in pixels</td></tr>
+          <tr><td>height</td><td>HRL_uint</td><td>Initial framebuffer height in pixels</td></tr>
+          <tr><td>loader</td><td>void*</td><td>Platform proc-address loader (cast from <code>GLADloadproc</code>)</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_Shutdown</span>()</div>
     </div>
     <div class="fn-card-body">
-      <p>Releases all backend resources and shuts down the graphics API.</p>
+      <p>
+        Releases all backend-owned GPU objects and shuts down the graphics API. Must be
+        called before the GLFW window is destroyed. This includes deleting every shader
+        program, VAO, VBO, texture, and framebuffer created during the lifetime of the
+        backend. Failure to release resources before context destruction results in
+        driver-side leaks and may cause crashes on subsequent launches in debug drivers.
+      </p>
     </div>
   </div>
 </section>
 
-<!-- FRAME -->
-
+<!-- ══════════════════════════════════════════
+     FRAME FLOW
+══════════════════════════════════════════ -->
 <section id="frame" class="doc-section">
   <h2>Frame Flow <span class="section-tag">Frame</span></h2>
 
+  <p>
+    HRL follows a deterministic per-frame order. The backend must correctly implement
+    the two frame-boundary functions so the engine can safely issue draw calls between them.
+    The expected call sequence per frame is:
+  </p>
+
+  <pre><code><span class="cm">// Engine-side frame loop (simplified)</span>
+<span class="fn">RHI_BeginFrame</span>();
+<span class="fn">RHI_BindViewport</span>(&amp;viewport);
+<span class="fn">RHI_ComputeFrameMatrices</span>();
+<span class="fn">RHI_UpdateLights</span>(lights);
+<span class="cm">// ... scene draw calls ...</span>
+<span class="fn">RHI_DrawDebug</span>(...);
+<span class="fn">RHI_ResetFramebuffer</span>();
+<span class="cm">// ImGui render pass follows</span></code></pre>
+
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_BeginFrame</span>()</div>
     </div>
     <div class="fn-card-body">
-      <p>Marks the beginning of a new GPU frame.</p>
+      <p>
+        Marks the beginning of a new GPU frame. The backend should clear per-frame
+        counters (draw calls, triangle count), reset any transient state from the
+        previous frame, and prepare the debug renderer's CPU-side primitive buffers
+        for re-filling. Does <strong>not</strong> clear the framebuffer — scene clearing
+        is the responsibility of <code>RHI_ClearScene</code>.
+      </p>
     </div>
   </div>
 
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_ResetFramebuffer</span>()</div>
     </div>
     <div class="fn-card-body">
-      <p>Resets framebuffer bindings to a known default state.</p>
+      <p>
+        Resets framebuffer bindings to the default backbuffer (<code>GL_FRAMEBUFFER</code>
+        target 0). Must be called after all scene passes and before the ImGui render pass,
+        which expects to draw directly to the default framebuffer. Failure to call this
+        will cause ImGui to render into the scene FBO instead of the screen.
+      </p>
     </div>
   </div>
 </section>
 
-<!-- VIEWPORT -->
-
+<!-- ══════════════════════════════════════════
+     VIEWPORT & CAMERA
+══════════════════════════════════════════ -->
 <section id="viewport" class="doc-section">
   <h2>Viewport & Camera <span class="section-tag">View</span></h2>
 
+  <p>
+    Viewport binding and matrix computation are separated so the backend can cache
+    camera-derived matrices for the full duration of a frame without recomputing them
+    per draw call.
+  </p>
+
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig">
         <span class="ret">void</span> <span class="name">RHI_BindViewport</span>(
         <span class="param-type">HRL_Viewport*</span> <span class="param-name">viewport</span>)
@@ -154,81 +345,138 @@
     </div>
     <div class="fn-card-body">
       <p>
-        Binds the active viewport and camera.
-        Must be called before any draw calls.
+        Stores a pointer to the active viewport descriptor and calls
+        <code>glViewport</code> with its dimensions. The viewport struct carries the
+        attached camera's position, orientation, field of view and near/far clip planes.
+        Must be called at least once per frame before any draw calls are issued.
+        Calling it mid-frame is valid and switches the active camera for subsequent draws.
       </p>
+      <table class="param-table">
+        <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td>viewport</td><td>HRL_Viewport*</td><td>Non-null pointer to a valid viewport descriptor. Lifetime must exceed the frame.</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_ComputeFrameMatrices</span>()</div>
     </div>
     <div class="fn-card-body">
-      <p>Computes per‑frame camera and projection matrices.</p>
+      <p>
+        Computes and caches the view and projection matrices from the currently bound
+        viewport. The resulting matrices are stored internally and exposed via
+        <code>RHI_GetViewMatrix</code> / <code>RHI_GetProjectionMatrix</code>.
+        Must be called after <code>RHI_BindViewport</code> and before the first
+        <code>RHI_BindMaterial</code> of the frame, as materials consume these matrices
+        when uploading shader uniforms.
+      </p>
     </div>
   </div>
 </section>
 
-<!-- MATERIALS & DRAW -->
-
+<!-- ══════════════════════════════════════════
+     MATERIALS & DRAW
+══════════════════════════════════════════ -->
 <section id="materials" class="doc-section">
   <h2>Materials & Draw <span class="section-tag">Draw</span></h2>
 
+  <p>
+    The draw pipeline is split into two steps: binding a material (shaders + textures + GPU state)
+    and submitting a mesh. This separation allows the engine to batch multiple meshes that share
+    the same material without redundant state changes.
+  </p>
+
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig">
         <span class="ret">void</span> <span class="name">RHI_BindMaterial</span>(
         <span class="param-type">HRL_Material*</span> <span class="param-name">material</span>)
       </div>
     </div>
     <div class="fn-card-body">
-      <p>Binds shaders, textures and GPU states for the material.</p>
+      <p>
+        Activates a material for subsequent draw calls. The backend must bind the material's
+        shader program, upload per-material uniforms (model matrix, light array, camera
+        position), and bind all textures declared in the material's
+        <code>textureParams_</code> map to their respective texture units. Texture slots
+        must be iterated with deterministic ordering — use an <code>ordered_map</code> or
+        explicit slot indices to avoid binding order non-determinism.
+      </p>
+      <div class="info-box warn">
+        <span class="icon">⚠️</span>
+        <span>Never use <code>operator[]</code> on the internal texture map during binding.
+        It silently inserts a default-constructed entry for missing keys, which leaves a
+        texture slot unbound and produces rendering artifacts.</span>
+      </div>
+      <p>
+        For each texture channel (albedo, normal, roughness, …), fall back to the
+        channel's registered fallback texture if the material does not declare that slot.
+        Fallback textures must be created during <code>RHI_InitContext</code>.
+      </p>
     </div>
   </div>
 
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig">
         <span class="ret">void</span> <span class="name">RHI_DrawMesh</span>(
         <span class="param-type">HRL_Mesh*</span> <span class="param-name">mesh</span>)
       </div>
     </div>
     <div class="fn-card-body">
-      <p>Issues the actual GPU draw call.</p>
+      <p>
+        Binds the mesh's VAO and issues the GPU draw call. The mesh is expected to carry
+        a pre-uploaded VBO and EBO with positions, normals, UVs and tangents interleaved.
+        The backend uploads the per-object model matrix uniform before issuing
+        <code>glDrawElements</code>. A material must have been bound via
+        <code>RHI_BindMaterial</code> before calling this function.
+      </p>
     </div>
   </div>
 </section>
 
-<!-- LIGHTS -->
-
+<!-- ══════════════════════════════════════════
+     LIGHTS
+══════════════════════════════════════════ -->
 <section id="lights" class="doc-section">
   <h2>Lights <span class="section-tag">Lighting</span></h2>
 
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig">
-        <span class="ret">void</span> <span class="name">RHI_UpdateLights</span>(lights)
+        <span class="ret">void</span> <span class="name">RHI_UpdateLights</span>(<span class="param-type">HRL_LightArray</span> <span class="param-name">lights</span>)
       </div>
     </div>
     <div class="fn-card-body">
-      <p>Uploads and updates light data for the current frame.</p>
+      <p>
+        Uploads the scene's light data to the backend's internal light buffer for the
+        current frame. This data is then consumed by <code>RHI_BindMaterial</code> when
+        uploading lighting uniforms to each shader. Must be called once per frame before
+        any draw calls. Light components must be initialized to <code>HRL_INVALID_ID</code>
+        and must guard against issuing RHI callbacks before their <code>Init()</code>
+        has completed — calling <code>RHI_UpdateLights</code> with a partially constructed
+        light entry results in undefined uniform data.
+      </p>
     </div>
   </div>
 </section>
 
-<!-- WINDOW -->
-
+<!-- ══════════════════════════════════════════
+     WINDOW
+══════════════════════════════════════════ -->
 <section id="window" class="doc-section">
   <h2>Window <span class="section-tag">Platform</span></h2>
 
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       <div class="fn-sig">
         <span class="ret">void</span> <span class="name">RHI_WindowResizeCallback</span>(
         <span class="param-type">int</span> <span class="param-name">width</span>,
@@ -236,116 +484,363 @@
       </div>
     </div>
     <div class="fn-card-body">
-      <p>Handles swapchain or framebuffer resize.</p>
+      <p>
+        Handles a framebuffer resize event forwarded from the GLFW resize callback.
+        The backend must call <code>glViewport(0, 0, width, height)</code>, resize all
+        scene framebuffer texture attachments via <code>RHI_ResizeSceneTexture</code>,
+        and recompute projection matrices on the next call to
+        <code>RHI_ComputeFrameMatrices</code>. The color-picking framebuffer must also
+        be resized to match the new dimensions.
+      </p>
+      <table class="param-table">
+        <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td>width</td><td>int</td><td>New framebuffer width in pixels (may be 0 on minimize)</td></tr>
+          <tr><td>height</td><td>int</td><td>New framebuffer height in pixels (may be 0 on minimize)</td></tr>
+        </tbody>
+      </table>
+      <div class="info-box note">
+        <span class="icon">ℹ️</span>
+        <span>Guard against zero dimensions. When the window is minimized, width and height
+        may both be 0. Skip all resize operations in this case to avoid framebuffer
+        completeness errors.</span>
+      </div>
     </div>
   </div>
 </section>
 
-<!-- TEXTURES -->
-
+<!-- ══════════════════════════════════════════
+     TEXTURES
+══════════════════════════════════════════ -->
 <section id="textures" class="doc-section">
   <h2>Textures <span class="section-tag">Resources</span></h2>
 
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">RHI_CreateTexture</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">RHI_CreateTextureFromBitmap</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_DeleteTexture</span>(id)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetTextureSize</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_SetTextureMinFilter</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_SetTextureMaxFilter</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-</section>
-
-<!-- SCENES -->
-
-<section id="scenes" class="doc-section">
-  <h2>Scenes <span class="section-tag">Framebuffer</span></h2>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_CreateScene</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_DeleteScene</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_BindScene</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_ClearScene</span>()</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_ResizeSceneTexture</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_EnableColorPickingBuffer</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-</section>
-
-<!-- MATRICES -->
-
-<section id="matrices" class="doc-section">
-  <h2>Matrices <span class="section-tag">Math</span></h2>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetProjectionMatrix</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetViewMatrix</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-
-  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
-    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetModelMatrix</span>(...)</div>
-  </div><div class="fn-card-body"></div></div>
-</section>
-
-<!-- DEBUG -->
-
-<section id="debug" class="doc-section">
-  <h2>Debug <span class="section-tag">Tools</span></h2>
+  <p>
+    All texture objects are owned by the backend and referenced externally via opaque
+    <code>HRL_id</code> handles. The caller never holds a raw pointer to GPU resources.
+    Every texture created with <code>RHI_CreateTexture</code> or
+    <code>RHI_CreateTextureFromBitmap</code> must eventually be freed with
+    <code>RHI_DeleteTexture</code>.
+  </p>
 
   <div class="fn-card">
     <div class="fn-card-header" onclick="toggle(this)">
-      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_DrawDebug</span>(...)</div>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">RHI_CreateTexture</span>(<span class="param-type">const char*</span> <span class="param-name">path</span>, ...)</div>
     </div>
     <div class="fn-card-body">
-      <p>Draws debug primitives and overlays.</p>
+      <p>
+        Loads an image file from disk, uploads it to the GPU, and returns an opaque
+        <code>HRL_id</code> handle. The backend is responsible for flipping the image
+        vertically on load (OpenGL UV origin is bottom-left), generating mipmaps, and
+        applying the default min/mag filters. Returns <code>HRL_INVALID_ID</code> on failure.
+      </p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">RHI_CreateTextureFromBitmap</span>(<span class="param-type">unsigned char*</span> <span class="param-name">data</span>, <span class="param-type">int</span> <span class="param-name">w</span>, <span class="param-type">int</span> <span class="param-name">h</span>, <span class="param-type">int</span> <span class="param-name">channels</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Creates a texture directly from a raw pixel buffer in CPU memory. Used for
+        procedural textures, fallback textures created at startup, and ImGui font atlases.
+        The backend does not take ownership of <code>data</code> — the caller may free
+        the buffer immediately after this call returns.
+      </p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_DeleteTexture</span>(<span class="param-type">HRL_id</span> <span class="param-name">id</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Frees the GPU texture object associated with <code>id</code> and removes it from
+        the backend's internal registry. Passing <code>HRL_INVALID_ID</code> is a no-op.
+        Passing a handle that was already deleted is undefined behaviour.
+      </p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetTextureSize</span>(<span class="param-type">HRL_id</span> <span class="param-name">id</span>, <span class="param-type">int*</span> <span class="param-name">w</span>, <span class="param-type">int*</span> <span class="param-name">h</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>Returns the pixel dimensions of the texture. The backend should cache these at
+      creation time rather than querying the GPU.</p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_SetTextureMinFilter</span>(<span class="param-type">HRL_id</span> <span class="param-name">id</span>, <span class="param-type">HRL_FilterMode</span> <span class="param-name">mode</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>Sets the minification filter (<code>GL_TEXTURE_MIN_FILTER</code>) for the given texture.
+      The texture must be bound before calling <code>glTexParameteri</code>.</p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_SetTextureMaxFilter</span>(<span class="param-type">HRL_id</span> <span class="param-name">id</span>, <span class="param-type">HRL_FilterMode</span> <span class="param-name">mode</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>Sets the magnification filter (<code>GL_TEXTURE_MAG_FILTER</code>) for the given texture.
+      Valid values are <code>HRL_FILTER_NEAREST</code> and <code>HRL_FILTER_LINEAR</code> —
+      mipmap modes are not valid for magnification.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════
+     SCENES
+══════════════════════════════════════════ -->
+<section id="scenes" class="doc-section">
+  <h2>Scenes <span class="section-tag">Framebuffer</span></h2>
+
+  <p>
+    In HRL, a <strong>Scene</strong> is a framebuffer wrapper. Each scene owns a color
+    attachment texture (rendered into by the main pass), an optional depth-stencil
+    renderbuffer, and optionally a second color attachment used by the
+    <strong>color-picking pass</strong>. The scene texture is then sampled by the editor's
+    ImGui viewport panel.
+  </p>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_CreateScene</span>(<span class="param-type">HRL_id*</span> <span class="param-name">out</span>, <span class="param-type">HRL_uint</span> <span class="param-name">width</span>, <span class="param-type">HRL_uint</span> <span class="param-name">height</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Allocates a framebuffer object and its color attachment texture at the specified
+        dimensions. Writes the new scene handle into <code>*out</code>. Also creates a
+        depth-stencil renderbuffer for correct depth testing. The scene must be resizable
+        via <code>RHI_ResizeSceneTexture</code>.
+      </p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_DeleteScene</span>(<span class="param-type">HRL_id</span> <span class="param-name">id</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>Destroys the framebuffer object, its color texture and depth renderbuffer associated
+      with <code>id</code>. If the color-picking buffer was enabled on this scene it must
+      also be freed here.</p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_BindScene</span>(<span class="param-type">HRL_id</span> <span class="param-name">id</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Binds the scene's framebuffer as the active render target. All subsequent draw
+        calls write into the scene's color and depth attachments until
+        <code>RHI_ResetFramebuffer</code> is called.
+      </p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_ClearScene</span>()</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Clears the currently bound scene's color and depth buffers.
+        Must be called at the start of each frame after <code>RHI_BindScene</code>.
+        If the color-picking attachment is active on the bound scene, it must also be
+        cleared here (to a sentinel value such as black — actor ID 0 is reserved as
+        "no selection").
+      </p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_ResizeSceneTexture</span>(<span class="param-type">HRL_id</span> <span class="param-name">id</span>, <span class="param-type">HRL_uint</span> <span class="param-name">width</span>, <span class="param-type">HRL_uint</span> <span class="param-name">height</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Resizes the scene's color attachment and depth renderbuffer to the new dimensions.
+        This must re-allocate the texture storage (via <code>glTexImage2D</code> with
+        <code>NULL</code> data) and the renderbuffer storage (via
+        <code>glRenderbufferStorage</code>), then re-attach them to the FBO.
+        The framebuffer completeness must be verified after resizing.
+      </p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_EnableColorPickingBuffer</span>(<span class="param-type">HRL_id</span> <span class="param-name">scene</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Attaches a second <code>GL_RGB</code> color attachment to the scene's FBO dedicated
+        to the editor color-picking pass. Each actor is rendered into this attachment with
+        a flat shader encoding its unique 24-bit ID as an RGB value. The editor then calls
+        <code>glReadPixels</code> at the cursor position (with a Y-axis flip, since OpenGL
+        origin is bottom-left) and decodes the ID from the returned pixel. Enable this
+        buffer only for editor-mode scenes to avoid the GPU memory cost in game mode.
+      </p>
+      <div class="info-box note">
+        <span class="icon">ℹ️</span>
+        <span>The second attachment must be declared with <code>GL_COLOR_ATTACHMENT1</code>
+        and selected via <code>glDrawBuffers</code>. Do not use <code>GL_COLOR_ATTACHMENT0</code>
+        for the picking pass or the main render output will be overwritten.</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════
+     SHADERS
+══════════════════════════════════════════ -->
+<section id="shaders" class="doc-section">
+  <h2>Shaders <span class="section-tag">Resources</span></h2>
+
+  <p>
+    Shaders are compiled and linked entirely inside the backend. The HRL core has no
+    knowledge of GLSL. Shader sources are embedded in the backend or loaded from disk
+    relative to the DLL at startup. The backend exposes shader handles as
+    <code>HRL_id</code> values that materials reference by ID.
+  </p>
+
+  <div class="info-box warn">
+    <span class="icon">⚠️</span>
+    <span>All shaders must target <strong>GLSL 330 core</strong> to match the OpenGL 3.3
+    Core Profile requirement. Using compatibility-profile extensions or
+    ARB suffixed functions is forbidden.</span>
+  </div>
+
+  <h3>Expected default shaders</h3>
+  <table class="doc-table">
+    <thead><tr><th>Shader</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>lit</td><td>Standard Blinn-Phong lit material with albedo, normal and roughness slots</td></tr>
+      <tr><td>unlit</td><td>Flat color / texture pass-through, no lighting</td></tr>
+      <tr><td>picking</td><td>Encodes actor ID as RGB into the color-picking attachment</td></tr>
+      <tr><td>debug</td><td>Immediate-mode colored lines and triangles for the debug renderer</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ══════════════════════════════════════════
+     MATRICES
+══════════════════════════════════════════ -->
+<section id="matrices" class="doc-section">
+  <h2>Matrices <span class="section-tag">Math</span></h2>
+
+  <p>
+    The backend computes and owns the three per-frame transform matrices. They are
+    uploaded to shader uniforms by <code>RHI_BindMaterial</code> and can be queried
+    externally for debug or editor purposes. All matrices use column-major storage
+    (GLM default) compatible with <code>glUniformMatrix4fv</code>.
+  </p>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetProjectionMatrix</span>(<span class="param-type">HRL_mat4*</span> <span class="param-name">out</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Writes the current perspective projection matrix into <code>*out</code>.
+        Computed from the bound viewport's field of view, aspect ratio and clip planes
+        using <code>glm::perspective</code>. Valid only after
+        <code>RHI_ComputeFrameMatrices</code> has been called this frame.
+      </p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetViewMatrix</span>(<span class="param-type">HRL_mat4*</span> <span class="param-name">out</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Writes the current view matrix into <code>*out</code>. Derived from the camera's
+        world-space position and forward vector using <code>glm::lookAt</code>.
+      </p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetModelMatrix</span>(<span class="param-type">const HRL_Transform&amp;</span> <span class="param-name">transform</span>, <span class="param-type">HRL_mat4*</span> <span class="param-name">out</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Computes and writes the model matrix for the given transform (position, rotation,
+        scale) into <code>*out</code>. The backend builds the matrix as
+        <code>T * R * S</code> (translate, then rotate, then scale). Called by
+        <code>RHI_DrawMesh</code> internally before uploading the model uniform.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════
+     DEBUG
+══════════════════════════════════════════ -->
+<section id="debug" class="doc-section">
+  <h2>Debug <span class="section-tag">Tools</span></h2>
+
+  <p>
+    The debug renderer is an immediate-mode overlay that draws colored lines and filled
+    triangles each frame without persistent scene objects. 
+    All primitives submitted during a frame are batched into a shared VBO and flushed
+    in a single draw call at the end of the frame.
+  </p>
+
+  <div class="info-box note">
+    <span class="icon">ℹ️</span>
+    <span>The debug VAO and VBO are shared between the line and triangle sub-renderers.
+    A single <code>current_buffer_size</code> tracker must be maintained across both
+    primitive types to avoid overwriting live data in the VBO.</span>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_DrawDebug</span>(<span class="param-type">const HRL_DebugBatch&amp;</span> <span class="param-name">batch</span>)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Uploads the frame's accumulated debug primitives to the shared VBO and issues
+        the draw call. Lines and filled triangles are drawn as separate
+        <code>GL_LINES</code> and <code>GL_TRIANGLES</code> passes using the debug
+        shader. Depth testing should be disabled for debug overlays so they are always
+        visible above scene geometry. Must be called after the main scene pass and before
+        <code>RHI_ResetFramebuffer</code>.
+      </p>
+      <p>
+        The debug batch is populated by the physics world's <code>b2DebugDraw</code>
+        callbacks each frame. The RHI implementation must not retain the batch pointer
+        beyond this call.
+      </p>
     </div>
   </div>
 </section>
@@ -360,6 +855,20 @@ function toggle(el) {
   body.classList.toggle('open');
   chev.classList.toggle('open');
 }
+
+// Highlight active sidebar link on scroll
+const sections = document.querySelectorAll('section[id]');
+const links    = document.querySelectorAll('.sidebar a');
+const obs = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      links.forEach(l => l.classList.remove('active'));
+      const a = document.querySelector(`.sidebar a[href="#${e.target.id}"]`);
+      if (a) a.classList.add('active');
+    }
+  });
+}, { rootMargin: '-30% 0px -60% 0px' });
+sections.forEach(s => obs.observe(s));
 </script>
 
 </body>
