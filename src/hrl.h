@@ -43,7 +43,7 @@
 #ifdef _WIN32
 	#ifdef HRL_BUILD_DLL
 		#define HRL_API __declspec(dllexport)
-	#elifdef HRL_NO_DLL
+	#elif defined(HRL_NO_DLL)
 		#define HRL_API
 	#else
 		#define HRL_API __declspec(dllimport)
@@ -54,7 +54,7 @@
 
 
 typedef uint32_t HRL_id;
-typedef unsigned int HRL_uint;
+typedef uint32_t HRL_uint;
 
 //Bool
 #define HRL_False ((int)0)
@@ -136,7 +136,7 @@ typedef enum {
 }HRL_Severity;
 
 
-//Default Shaders (we reserve theses ID)
+//Default Shaders (HRL reserve theses ID)
 #define HRL_SpriteShader								(UINT32_MAX)
 #define HRL_Mesh2DShader								(UINT32_MAX - 1)
 #define HRL_Mesh3DShader								(UINT32_MAX - 2)

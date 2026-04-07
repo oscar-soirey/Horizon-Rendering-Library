@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>HRL — Contributor Portal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <img src="assets/logo.png" alt="HRL Logo" class="header-logo-img">
+  <span class="header-title">Contributor Portal</span>
+  <span class="header-version">HRL v0.3</span>
+  <div class="header-spacer"></div>
+  <nav class="header-nav">
+    <a class="header-nav-link" href="index.html">Public Documentation</a>
+  </nav>
+  <a class="header-github" href="https://github.com/oscar-soirey/Horizon-Rendering-Library" target="_blank">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+    GitHub
+  </a>
+</header>
+
+
+<div class="layout">
+
+<nav class="sidebar">
+  <div class="sidebar-section-label">Backend</div>
+  <a href="#overview">Overview</a>
+  <a href="#init">Initialization</a>
+  <a href="#frame">Frame Flow</a>
+  <a href="#viewport">Viewport & Camera</a>
+  <a href="#materials">Materials & Draw</a>
+  <a href="#lights">Lights</a>
+  <a href="#window">Window</a>
+  <a href="#textures">Textures</a>
+  <a href="#scenes">Scenes</a>
+  <a href="#shaders">Shaders</a>
+  <a href="#matrices">Matrices</a>
+  <a href="#debug">Debug</a>
+</nav>
+
+<main>
+
+<!-- OVERVIEW -->
+
+<section id="overview" class="doc-section">
+  <h1>Contributor Portal</h1>
+  <p class="doc-subtitle">
+    Backend implementation guide for HRL
+  </p>
+
+  <div class="intro-callout">
+    <strong>HRL is a fully graphics‑API‑agnostic engine.</strong><br>
+    All GPU logic lives exclusively inside the backend through a strict RHI contract.
+    The HRL core never includes or exposes native APIs such as OpenGL, Vulkan, DirectX or Metal.
+  </div>
+
+  <p>
+    As a backend contributor, you are expected to implement
+    <strong>every RHI function</strong>.
+    Missing or partially implemented functions result in an invalid backend.
+  </p>
+
+  <div class="info-box warn">
+    <span class="icon">⚠️</span>
+    The backend is responsible for most of the engine behavior:
+    resource lifetime, GPU state, pipelines, framebuffers and synchronization.
+  </div>
+</section>
+
+<!-- INIT -->
+
+<section id="init" class="doc-section">
+  <h2>Initialization <span class="section-tag">RHI</span></h2>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_Init</span>()</div>
+    </div>
+    <div class="fn-card-body">
+      <p>Initializes global backend state and loads the graphics API.</p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig">
+        <span class="ret">void</span> <span class="name">RHI_InitContext</span>(
+        <span class="param-type">HRL_uint</span> <span class="param-name">width</span>,
+        <span class="param-type">HRL_uint</span> <span class="param-name">height</span>,
+        <span class="param-type">void*</span> <span class="param-name">loader</span>)
+      </div>
+    </div>
+    <div class="fn-card-body">
+      <p>Initializes the rendering context and swapchain‑dependent resources.</p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_Shutdown</span>()</div>
+    </div>
+    <div class="fn-card-body">
+      <p>Releases all backend resources and shuts down the graphics API.</p>
+    </div>
+  </div>
+</section>
+
+<!-- FRAME -->
+
+<section id="frame" class="doc-section">
+  <h2>Frame Flow <span class="section-tag">Frame</span></h2>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_BeginFrame</span>()</div>
+    </div>
+    <div class="fn-card-body">
+      <p>Marks the beginning of a new GPU frame.</p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_ResetFramebuffer</span>()</div>
+    </div>
+    <div class="fn-card-body">
+      <p>Resets framebuffer bindings to a known default state.</p>
+    </div>
+  </div>
+</section>
+
+<!-- VIEWPORT -->
+
+<section id="viewport" class="doc-section">
+  <h2>Viewport & Camera <span class="section-tag">View</span></h2>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig">
+        <span class="ret">void</span> <span class="name">RHI_BindViewport</span>(
+        <span class="param-type">HRL_Viewport*</span> <span class="param-name">viewport</span>)
+      </div>
+    </div>
+    <div class="fn-card-body">
+      <p>
+        Binds the active viewport and camera.
+        Must be called before any draw calls.
+      </p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_ComputeFrameMatrices</span>()</div>
+    </div>
+    <div class="fn-card-body">
+      <p>Computes per‑frame camera and projection matrices.</p>
+    </div>
+  </div>
+</section>
+
+<!-- MATERIALS & DRAW -->
+
+<section id="materials" class="doc-section">
+  <h2>Materials & Draw <span class="section-tag">Draw</span></h2>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig">
+        <span class="ret">void</span> <span class="name">RHI_BindMaterial</span>(
+        <span class="param-type">HRL_Material*</span> <span class="param-name">material</span>)
+      </div>
+    </div>
+    <div class="fn-card-body">
+      <p>Binds shaders, textures and GPU states for the material.</p>
+    </div>
+  </div>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig">
+        <span class="ret">void</span> <span class="name">RHI_DrawMesh</span>(
+        <span class="param-type">HRL_Mesh*</span> <span class="param-name">mesh</span>)
+      </div>
+    </div>
+    <div class="fn-card-body">
+      <p>Issues the actual GPU draw call.</p>
+    </div>
+  </div>
+</section>
+
+<!-- LIGHTS -->
+
+<section id="lights" class="doc-section">
+  <h2>Lights <span class="section-tag">Lighting</span></h2>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig">
+        <span class="ret">void</span> <span class="name">RHI_UpdateLights</span>(lights)
+      </div>
+    </div>
+    <div class="fn-card-body">
+      <p>Uploads and updates light data for the current frame.</p>
+    </div>
+  </div>
+</section>
+
+<!-- WINDOW -->
+
+<section id="window" class="doc-section">
+  <h2>Window <span class="section-tag">Platform</span></h2>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig">
+        <span class="ret">void</span> <span class="name">RHI_WindowResizeCallback</span>(
+        <span class="param-type">int</span> <span class="param-name">width</span>,
+        <span class="param-type">int</span> <span class="param-name">height</span>)
+      </div>
+    </div>
+    <div class="fn-card-body">
+      <p>Handles swapchain or framebuffer resize.</p>
+    </div>
+  </div>
+</section>
+
+<!-- TEXTURES -->
+
+<section id="textures" class="doc-section">
+  <h2>Textures <span class="section-tag">Resources</span></h2>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">RHI_CreateTexture</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">HRL_id</span> <span class="name">RHI_CreateTextureFromBitmap</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_DeleteTexture</span>(id)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetTextureSize</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_SetTextureMinFilter</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_SetTextureMaxFilter</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+</section>
+
+<!-- SCENES -->
+
+<section id="scenes" class="doc-section">
+  <h2>Scenes <span class="section-tag">Framebuffer</span></h2>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_CreateScene</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_DeleteScene</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_BindScene</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_ClearScene</span>()</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_ResizeSceneTexture</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_EnableColorPickingBuffer</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+</section>
+
+<!-- MATRICES -->
+
+<section id="matrices" class="doc-section">
+  <h2>Matrices <span class="section-tag">Math</span></h2>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetProjectionMatrix</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetViewMatrix</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+
+  <div class="fn-card"><div class="fn-card-header" onclick="toggle(this)">
+    <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_GetModelMatrix</span>(...)</div>
+  </div><div class="fn-card-body"></div></div>
+</section>
+
+<!-- DEBUG -->
+
+<section id="debug" class="doc-section">
+  <h2>Debug <span class="section-tag">Tools</span></h2>
+
+  <div class="fn-card">
+    <div class="fn-card-header" onclick="toggle(this)">
+      <svg class="chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      <div class="fn-sig"><span class="ret">void</span> <span class="name">RHI_DrawDebug</span>(...)</div>
+    </div>
+    <div class="fn-card-body">
+      <p>Draws debug primitives and overlays.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+</div>
+
+<script>
+function toggle(el) {
+  const body = el.nextElementSibling;
+  const chev = el.querySelector('.chevron');
+  body.classList.toggle('open');
+  chev.classList.toggle('open');
+}
+</script>
+
+</body>
+</html>

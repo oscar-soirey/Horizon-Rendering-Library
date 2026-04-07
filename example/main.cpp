@@ -273,7 +273,7 @@ int main()
   HRL_id ptMat = HRL_CreateMaterial(HRL_SpriteShader);
   HRL_MaterialSetTexture(ptMat, HRL_T_Albedo, ptTex);
   HRL_id sprite2 = HRL_CreateMeshSprite(scene);
-  HRL_SetMeshMaterial(sprite2, ptMat);
+  //HRL_SetMeshMaterial(sprite2, ptMat);
   HRL_SetMeshScale(sprite2, 80, 80, 80);
 
 
@@ -408,6 +408,10 @@ int main()
       HRL_GetModelMatrix(sprite_light, proj);
       for (int col = 0; col < 4; col++)
         printf("%f %f %f %f\n", proj[col*4+0], proj[col*4+1], proj[col*4+2], proj[col*4+3]);
+    }
+    if (glfwGetKey(win, GLFW_KEY_F5) == GLFW_PRESS)
+    {
+      HRL_DeleteMaterial(ptMat);
     }
   }
 
