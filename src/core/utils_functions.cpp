@@ -5,17 +5,16 @@
 #include <stb/stb_truetype.h>
 
 
-//on récupere la variable d'erreur déclarée dans hrl.cpp
-extern HRL_Interal_Error lastError;
-extern HRL_ErrorCallback error_callback_;
+extern HRL_Context* GetPrivateContext();
+
 void SetErrorCode(HRL_Error e, HRL_Severity severity, const std::string& detail)
 {
-	lastError.code = e;
-	lastError.severity = severity;
-	lastError.detail = detail;
-	if (error_callback_)
+	GetPrivateContext()->last_error.code = e;
+	GetPrivateContext()->last_error.severity = severity;
+	GetPrivateContext()->last_error.detail = detail;
+	if (GetPrivateContext()->error_callback)
 	{
-		error_callback_(e, severity, detail.c_str());
+		GetPrivateContext()->error_callback(e, severity, detail.c_str());
 	}
 }
 
@@ -29,15 +28,14 @@ HRL_id GenerateHRL_ID()
 
 
 //Window
-extern unsigned int window_width_;
 unsigned int GetWindowWidth()
 {
-	return window_width_;
+	return GetPrivateContext()->window_width;
 }
 extern unsigned int window_height_;
 unsigned int GetWindowHeight()
 {
-	return window_height_;
+	return GetPrivateContext()->window_height;
 }
 
 
@@ -62,18 +60,6 @@ glm::vec3 GetUpVector(glm::vec3 _rot)
     GetRightVector(_rot),
     GetForwardVector(_rot)
   ));
-}
-
-
-extern HRL_uint textureMinFilter;
-HRL_uint GetTextureMinFilter()
-{
-  return textureMinFilter;
-}
-extern HRL_uint textureMagFilter;
-HRL_uint GetTextureMagFilter()
-{
-  return textureMagFilter;
 }
 
 

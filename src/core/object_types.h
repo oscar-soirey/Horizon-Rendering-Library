@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <glm/glm.hpp>
 #include <vector>
+#include <stb/stb_truetype.h>
 
 typedef uint64_t HRL_BackendHandle;
 
@@ -13,7 +14,7 @@ typedef struct {
   HRL_Error code;
   HRL_Severity severity;
   std::string detail;
-}HRL_Interal_Error;
+}HRL_Internal_Error;
 
 //MESH
 struct HRL_Mesh {
@@ -116,6 +117,53 @@ struct BitmapResult {
   int width;
   int height;
 };
+
+
+
+//texte - structure backend API only, pas besoin d'y acceder avec le backend
+typedef struct {
+  stbtt_fontinfo             info;
+  std::vector<unsigned char> ttf_buffer;
+}HRL_Font;
+
+//objects//
+typedef struct {
+  int draw_on_screen;
+  std::unordered_map<HRL_id, HRL_Mesh*> meshes;
+  std::unordered_map<HRL_id, HRL_Light*> lights;
+  std::unordered_map<HRL_id, HRL_Viewport*> viewports;
+  std::unordered_map<HRL_id, HRL_Camera*> cameras;
+  std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
+}hrl_scene_t;
+
+typedef struct {
+  //errors
+  HRL_Internal_Error last_error;
+  HRL_ErrorCallback error_callback;
+
+  //window dimensions
+  uint32_t window_width;
+  uint32_t window_height;
+
+  //scenes
+  std::unordered_map<HRL_id, hrl_scene_t*> scenes;
+
+  //ressources copié des scenes (pour favoriser l'acces)
+  std::unordered_map<HRL_id, HRL_Mesh*> meshes;
+  std::unordered_map<HRL_id, HRL_Light*> lights;
+  std::unordered_map<HRL_id, HRL_Viewport*> viewports;
+  std::unordered_map<HRL_id, HRL_Camera*> cameras;
+  std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
+
+  //global ressources
+  std::unordered_map<HRL_id, HRL_Material*> materials;
+  std::unordered_map<HRL_id, HRL_Font*> fonts;
+
+  //debug
+  //sorted by scenes
+  std::unordered_map<HRL_id, DebugRenderer> debug_renderers;
+  float debug_line_thickness = 1.f;
+} HRL_Context;
 
 
 #endif

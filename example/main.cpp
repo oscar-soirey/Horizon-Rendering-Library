@@ -12,6 +12,8 @@
 //Print
 #include <iostream>
 
+#include "src/example.h"
+
 
 typedef struct {
   float x, y, z;
@@ -39,55 +41,6 @@ void CalculateDeltaTime()
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
   HRL_WindowResizeCallback(width, height);
-}
-
-
-std::string OpenFile(const char* _path, size_t* _size)
-{
-  FILE* f = fopen(_path, "rb");
-  if (!f)
-  {
-    std::cout << "Erreur de lecture du fichier" << std::endl;
-    return "";
-  }
-
-#ifdef WIN32
-  //windows
-  _fseeki64(f, 0, SEEK_END);
-  __int64 size = _ftelli64(f);
-#else
-  //compaptibilité
-  fseek(f, 0, SEEK_END);
-  long size = ftell(f);
-#endif
-
-  if (size <= 0 || size > INT_MAX)
-  {
-    fclose(f);
-    std::cout << "Erreur de taille (<= 0 ou superieur a INT_MAX)" << std::endl;
-    return "";
-  }
-#ifdef WIN32
-  _fseeki64(f, 0, SEEK_SET);
-#else
-  fseek(f, 0, SEEK_SET);
-#endif
-
-  std::string content((size_t)size, '\0');   // alloue buffer
-  if (fread(&content[0], 1, (size_t)size, f) != (size_t)size)
-  {
-    fclose(f);
-    std::cout << "Erreur de lecture complète" << std::endl;
-    return "";
-  }
-
-  fclose(f);
-  //passer la size
-  if (_size)
-  {
-    *_size = (size_t)size;
-  }
-  return content;
 }
 
 
@@ -148,58 +101,9 @@ void ProcessCameraRotation(GLFWwindow* win)
 }
 
 
-void DrawDebugExamples(HRL_id sceneId)
-{
-  // cercle creux
-  HRL_DrawDebugCircle(sceneId, HRL_DebugHollow,
-    0.f, 0.f, 0.f,
-    1.f, 16,
-    1.f, 0.f, 0.f); // rouge
-
-  // cercle plein
-  HRL_DrawDebugCircle(sceneId, HRL_DebugSolid,
-    3.f, 0.f, 0.f,
-    0.5f, 16,
-    0.f, 1.f, 0.f); // vert
-
-  // carré creux
-  {
-    float vx[] = { -0.5f,  0.5f, 0.5f, -0.5f };
-    float vy[] = { -0.5f, -0.5f, 0.5f,  0.5f };
-    float vz[] = {  0.f,   0.f,  0.f,   0.f  };
-    HRL_DrawDebugPolygon(sceneId, HRL_DebugHollow, vx, vy, vz, 4, 0.f, 0.f, 1.f); // bleu
-  }
-
-  // carré plein
-  {
-    float vx[] = {  2.f,  3.f, 3.f,  2.f };
-    float vy[] = { -0.5f, -0.5f, 0.5f, 0.5f };
-    float vz[] = {  0.f,  0.f,  0.f,  0.f };
-    HRL_DrawDebugPolygon(sceneId, HRL_DebugSolid, vx, vy, vz, 4, 1.f, 1.f, 0.f); // jaune
-  }
-
-  // capsule
-  HRL_DrawDebugCapsule(sceneId, HRL_DebugHollow,
-    -2.f, -1.f, 0.f,   // A
-    -2.f,  1.f, 0.f,   // B
-    0.4f, 16,
-    1.f, 0.5f, 0.f);   // orange
-
-  // segment
-  HRL_DrawDebugSegment(sceneId,
-    -3.f, -1.f, 0.f,
-     3.f,  1.f, 0.f,
-    1.f, 1.f, 1.f);    // blanc
-
-  // points
-  HRL_DrawDebugPoint(sceneId,  0.f,  2.f, 0.f, 0.1f, 1.f, 0.f, 1.f); // magenta
-  HRL_DrawDebugPoint(sceneId,  1.f,  2.f, 0.f, 0.1f, 0.f, 1.f, 1.f); // cyan
-  HRL_DrawDebugPoint(sceneId, -1.f,  2.f, 0.f, 0.1f, 1.f, 1.f, 0.f); // jaune
-}
-
 void ErrorCallback(HRL_Error code, HRL_Severity severity, const char* detail)
 {
-  printf("error of type : %s, severity : %s, detail : %s\n", HRL_ErrorEnumToString(code), HRL_SeverityEnumToString(severity), detail);
+  printf("Error of type : %s, Severity : %s, Details : %s\n", HRL_ErrorEnumToString(code), HRL_SeverityEnumToString(severity), detail);
   if (severity >= HRL_SEVERITY_FATAL)
   {
     exit(code);
@@ -242,163 +146,71 @@ int main()
 
   HRL_SetDebugLineThickness(3.f);
 
-  HRL_id scene = HRL_CreateScene(1);
 
-  //on ouvre la texture
-  size_t texSize;
-  std::string texString = OpenFile("canada.jpg", &texSize);
-  size_t normalSize;
-  std::string normalString = OpenFile("normal.jpg", &normalSize);
-  //crée la texture et le material
-  HRL_id tex = HRL_CreateTexture(texString.c_str(), texSize);
-  HRL_id normaltex = HRL_CreateTexture(normalString.c_str(), normalSize);
-  //material
-  HRL_id mat = HRL_CreateMaterial(HRL_SpriteShader);
-  HRL_MaterialSetTexture(mat, HRL_T_Albedo, tex);
-  HRL_MaterialSetTexture(mat, HRL_T_Normal, normaltex);
-  HRL_MaterialSetFloat(mat, "NormalStrength", 1);
+  //Create scene, camera & viewport
+  HRL_id scene = HRL_CreateScene(true);
+  HRL_id camera = HRL_CreateCamera(scene, HRL_Perspective);
+  HRL_SetCameraPerspectiveFov(camera, 90.f);
+  HRL_id viewport = HRL_CreateViewport(scene, camera, 0.f, 0.f, 1.f, 1.f);
 
-  //mesh 1 : canada flag
-  HRL_id sprite = HRL_CreateMeshSprite(scene);
-  HRL_SetMeshMaterial(sprite, mat);
-  HRL_SetMeshScale(sprite, 10, 10, 10);
+  //Create Light
+  {
+    HRL_id light = HRL_CreateLight(scene, HRL_PointLight);
+    HRL_SetLightAttenuation(light, 0.02f);
+    HRL_SetLightLocation(light, 0.f, 0.f, 12.f);
+    HRL_SetLightIntensity(light, 5.f);
+    HRL_SetLightColor(light, 1.f, 1.f, 1.f);
+    HRL_SetLightRotation(light, 0.f, 0.f, 0.f);
+  }
 
+  //Create scene objects
 
-  //Mesh 2 : portugal flag
-  float ptZRot = 0.f; //pour faire tourner le sprite
+  //Atlas sprite
+  {
+    size_t atlas_size;
+    std::string atlas_data = example::OpenFile("atlas.png", &atlas_size);
+    HRL_id atlas_texture = HRL_CreateTexture(atlas_data.c_str(), atlas_size);
+    HRL_id atlas_material = HRL_CreateMaterial(HRL_SpriteShader);
+    HRL_MaterialSetTexture(atlas_material, HRL_T_Albedo, atlas_texture);
+    HRL_id atlas_mesh = HRL_CreateMeshSprite(scene);
+    HRL_SetMeshMaterial(atlas_mesh, atlas_material);
+  }
 
-  size_t ptSize;
-  std::string ptString = OpenFile("portugal.jpg", &ptSize);
-  HRL_id ptTex = HRL_CreateTexture(ptString.c_str(), ptSize);
-  HRL_id ptMat = HRL_CreateMaterial(HRL_SpriteShader);
-  HRL_MaterialSetTexture(ptMat, HRL_T_Albedo, ptTex);
-  HRL_id sprite2 = HRL_CreateMeshSprite(scene);
-  HRL_SetMeshMaterial(sprite2, ptMat);
-  HRL_SetMeshScale(sprite2, 80, 80, 80);
-
-
-  //other camera and viewport
-  HRL_id cam1 = HRL_CreateCamera(scene, HRL_Perspective);
-  HRL_SetCameraPerspectiveFov(cam1, 90.f);
-  HRL_id viewport = HRL_CreateViewport(scene, HRL_InvalidID, 0.f, 0.f, 1.f, 1.f);
-  HRL_SetViewportCamera(viewport, cam1);
-
-
-  //Lights
-  vec3 lightpos(0.f, 0.f, 0.f);
-  HRL_id light0 = HRL_CreateLight(scene, HRL_PointLight);
-  HRL_SetLightAttenuation(light0, 0.02f);
-  HRL_SetLightLocation(light0, 0.f, 0.f, 12.f);
-  HRL_SetLightIntensity(light0, 5.f);
-  HRL_SetLightColor(light0, 1.f, 1.f, 1.f);
-  HRL_SetLightRotation(light0, 0.f, 0.f, 0.f);
-
-
-  size_t liAlbSize;
-  std::string AlbString = OpenFile("atlas.png", &liAlbSize);
-  HRL_id liAlb = HRL_CreateTexture(AlbString.c_str(), liAlbSize);
-
-  HRL_id liMat = HRL_CreateMaterial(HRL_SpriteShader);
-  HRL_MaterialSetTexture(liMat, HRL_T_Albedo, liAlb);
-
-  HRL_id sprite_light = HRL_CreateMeshSprite(scene);
-  HRL_SetMeshMaterial(sprite_light, liMat);
-  HRL_SetMeshScale(sprite_light, 2, 2, 2);
-  HRL_SetMeshLocation(sprite_light, 0, 0, 10);
-  HRL_SetSpriteDrawOrder(sprite_light, 50.f);
-  HRL_SetSpriteRegion(sprite_light, 0.5f, 0.5f, 1.f, 1.f);
-  //HRL_SetMeshPivotPoint(sprite_light, 0.f,0.f,0.f);
-
-  HRL_SetTextureMinFilter(ptTex, HRL_Filter_Trilinear);
-  HRL_SetTextureMagFilter(ptTex, HRL_Filter_Trilinear);
-
-  float light_rotation_z=0.f;
-
-
-  //Text and font
-  size_t fontSize;
-  std::string font = OpenFile("JetBrainsMono.ttf", &fontSize);
-  HRL_id font_id = HRL_CreateFont(font.c_str(), fontSize);
-
-  size_t vert_size;
-  std::string vert_data = OpenFile("vert.glsl", &vert_size);
-  size_t frag_size;
-  std::string frag_data = OpenFile("frag.glsl", &frag_size);
-  HRL_id custom_shader = HRL_CreateShader(vert_data.c_str(), vert_size, frag_data.c_str(), frag_size);
-  HRL_id mat_fps = HRL_CreateMaterial(custom_shader);
-
-  HRL_id sprite_fps = HRL_CreateMeshSprite(scene);
-  HRL_SetMeshMaterial(sprite_fps, mat_fps);
-  HRL_SetMeshLocation(sprite_fps, 1, 1, 1);
-
-
-  HRL_id post_mat = HRL_CreateMaterial(HRL_DefaultPostProcessShader);
-  HRL_id post = HRL_CreatePostProcess(scene, post_mat, 0);
+  //Text
+  {
+    size_t font_size;
+    std::string font_data = example::OpenFile("JetBrainsMono.ttf", &font_size);
+    HRL_id jetbrains_font = HRL_CreateFont(font_data.c_str(), font_size);
+    HRL_id text_texture = HRL_CreateTextureFromText("Hello world!", jetbrains_font, 55, 0.f, 1.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f);
+    HRL_id text_material = HRL_CreateMaterial(HRL_SpriteShader);
+    HRL_MaterialSetTexture(text_material, HRL_T_Albedo, text_texture);
+    HRL_id text_sprite = HRL_CreateMeshSprite(scene);
+    HRL_SetMeshMaterial(text_sprite, text_material);
+    int w;
+    int h;
+    HRL_GetTextureSize(text_texture, &w, &h);
+    HRL_SetMeshScale(text_sprite, w/20, h/20, 1.f);
+  }
 
 
 
-  float proj[16];
-
-  double ticks=0.f;
-  int seconds=0;
-  int last_seconds=0;
-
-  HRL_id texture_fps = HRL_InvalidID;
-
-  //boucle principale
   while (!glfwWindowShouldClose(win))
   {
-    //calculer le deltatime
     CalculateDeltaTime();
 
-    ticks+=dt;
-    seconds = (int)ticks;
-    if (last_seconds != seconds)
-    {
-      if (HRL_IsValidTexture(texture_fps))
-        HRL_DeleteTexture(texture_fps);
-
-      char buf[256];
-      snprintf(buf, sizeof(buf), "FPS : %.f", 1/dt);
-      texture_fps = HRL_CreateTextureFromText(buf, font_id, 100.f, 0.f,
-          1.f, 1.f, 1.f,
-          0.f, 0.f, 0.f, 1.f
-      );
-      HRL_MaterialSetTexture(mat_fps, HRL_T_Albedo, texture_fps);
-
-      int w, h;
-      HRL_GetTextureSize(texture_fps, &w, &h);
-      HRL_SetMeshScale(sprite_fps, w/40, h/40, 1.f);
-
-      last_seconds = seconds;
-    }
-
-    //efface la frame précedente
-    HRL_BeginFrame();
-    //dessine les objets à l'ecran
     HRL_EndFrame();
 
     //update classique glfw
     glfwSwapBuffers(win);
     glfwPollEvents();
 
-    //printf("FPS : %f\n", 1/dt);
+    printf("FPS : %f\n", 1/dt);
 
     //movement de la camera
     ProcessCameraMovement(win);
     ProcessCameraRotation(win);
-
-    HRL_SetCameraPosition(cam1, camX, camY, camZ);
-    HRL_SetCameraRotation(cam1, pitch, yaw, 0.f);
-
-    lightpos.z += (float)dt;
-    light_rotation_z += (float)dt*5;
-    //HRL_SetLightLocation(light0, 0,0, lightpos.z + 10.f);
-    //HRL_SetMeshLocation(sprite_light, 0, 0, lightpos.z);
-    //HRL_SetMeshRotation(sprite_light, 0.f,0.f,light_rotation_z);
-
-    //ptZRot += 1.f * (float)dt;
-    //HRL_SetMeshRotation(sprite2, 0.f, 0.f, ptZRot);
+    HRL_SetCameraPosition(camera, camX, camY, camZ);
+    HRL_SetCameraRotation(camera, pitch, yaw, 0.f);
 
     //debug keys
     if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS)
@@ -410,19 +222,15 @@ int main()
       glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
     if (glfwGetKey(win, GLFW_KEY_F3) == GLFW_PRESS)
-      //activer l'anti-aliasing, 4x MSAA
+      //activer l'anti-aliasing, 8x MSAA
       glfwWindowHint(GLFW_SAMPLES, 8);
 
     if (glfwGetKey(win, GLFW_KEY_F4) == GLFW_PRESS)
     {
-      HRL_GetModelMatrix(sprite_light, proj);
+      float proj[16];
+      HRL_GetProjectionMatrix(proj);
       for (int col = 0; col < 4; col++)
         printf("%f %f %f %f\n", proj[col*4+0], proj[col*4+1], proj[col*4+2], proj[col*4+3]);
-    }
-    if (glfwGetKey(win, GLFW_KEY_F5) == GLFW_PRESS)
-    {
-      if (HRL_IsValidMesh(sprite2))
-        HRL_DeleteMesh(sprite2);
     }
   }
 

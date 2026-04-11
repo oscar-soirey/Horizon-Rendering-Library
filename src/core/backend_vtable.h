@@ -16,6 +16,9 @@ typedef struct {
 	//Draw & batching//
 	void(*RHI_BeginFrame)();
 
+	//If draw on screen is 0, it will render on an intermediate framebuffer
+	void(*RHI_RenderScene)(hrl_scene_t* scene, HRL_id scene_id);
+
 	//Call at the end of function end frame
 	void(*RHI_ResetFramebuffer)();
 
@@ -65,7 +68,7 @@ typedef struct {
 	//Debug//
 	void(*RHI_DrawDebug)(const DebugRenderer&, float line_thickness);
 
-	//Requests
+	//Requests//
 	int(*RHI_IsValidTexture)(HRL_id tex);
 	int(*RHI_IsValidShader)(HRL_id shader);
 }HRL_vtable;

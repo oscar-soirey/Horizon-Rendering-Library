@@ -13,13 +13,15 @@ void GL33_Shutdown();
 
 void GL33_ResetFramebuffer();
 
+void GL33_DrawScene(hrl_scene_t* scene, HRL_id scene_id);
+
 //Scene & Viewport//
-void GL33_ClearScene();
-void GL33_BindScene(HRL_id _sceneid);
-void GL33_BindViewport(HRL_Viewport* viewport);
-void GL33_ComputeFrameMatrices();
-void GL33_BindMaterial(HRL_Material* mat);
-void GL33_DrawMesh(HRL_Mesh* mesh);
+//void GL33_ClearScene();
+//void GL33_BindScene(HRL_id _sceneid);
+//void GL33_BindViewport(HRL_Viewport* viewport);
+//void GL33_ComputeFrameMatrices();
+//void GL33_BindMaterial(HRL_Material* mat);
+//void GL33_DrawMesh(HRL_Mesh* mesh);
 
 //Lights//
 void GL33_UpdateLights(const std::vector<HRL_Light*>& lights);

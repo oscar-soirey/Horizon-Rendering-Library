@@ -1,4 +1,3 @@
 Knowed issues : 
 
 Lights are shared between scenes
-Cannot choose the size of the render texture

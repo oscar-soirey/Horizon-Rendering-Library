@@ -1,4 +1,4 @@
-🔒 Bloquants
+Bloquants
 
  Lights isolées par scene
  //Fallback texture globale
@@ -6,14 +6,14 @@
  //Render texture size configurable
  //HRL_Result + HRL_GetLastErrorCode()
 
-📣 Debug
+Debug
 
  //Logs warning activables
  //Messages humains (pas cryptiques)
  Mode debug vs release clair
 
-📄 Minimum doc
+Minimum doc
 
  //README : philosophie + flow
  Exemple minimal qui marche
- //Liste des limitations connues (comme tu l’as déjà)
+ //Liste des limitations connues

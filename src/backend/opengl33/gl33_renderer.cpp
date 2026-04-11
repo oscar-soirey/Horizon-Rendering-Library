@@ -1,590 +1,696 @@
 #include "gl33_renderer.h"
-#include "gl33_shader.h"
-#include "gl33_texture.h"
 
-#include "../../ressources/ressources.h"
-#include "../../core/utils_functions.h"
-#include "../../hrl.h"
-
-//on va faire les implémentations des fonctions gl-api
 #include "../../hrl_gl.h"
 
-//GL et GLM
+#include "gl33_definitions.h"
+#include "gl33_shader.h"
+#include "gl33_texture.h"
+#include "../../ressources/ressources.h"
+#include "../../core/utils_functions.h"
+
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <algorithm>
 
-//Debug printf
-#include <cstdio>
-
-//Memory
-#include <unordered_map>
-#include <string>
+//HRL PRIVATE
+extern HRL_Context* GetPrivateContext();
 
 
-#define Buffer_Num      4
-
-#define Sprite_Buffer   0
-#define Mesh2D_Buffer   1
-#define Mesh3D_Buffer   2
-#define Debug_Buffer    2
-
-
-//ordre d'importance du batching :
-// 1 - Type de mesh, ex : sprite, mesh2D, etc
-// 2 - Texture
-// 3 - Material
-// 4 - Shader
+//UTILS
+static void InitTextureAndBindToFBO(GLuint _texture, GLuint _fbo, int width, int height);
+static void BatchSprites(const std::unordered_map<HRL_id, HRL_Mesh*>&, std::vector<GL_RenderBatch>& batches);
+static void BindMaterial(HRL_Material* mat);
+static glm::mat4 CalculateProjectionMatrix();
+static glm::mat4 CalculateViewMatrix();
 
 
-//OpenGL objects//
-static GLuint vao[Buffer_Num];
-static GLuint vbo[Buffer_Num];
-static GLuint ebo[Buffer_Num];
 
+//GL33 BACKEND IMPLEMENTATION
+#define BUFFER_QUAD			0
+#define BUFFER_SPRITE		1
+#define BUFFER_DEBUG		2
+#define BUFFER_COUNT		3
 
-//Ubo : Uniform partagés entre plusieurs shaders
-#define Ubo_Num         2
+#define UBO_LIGHTS			0
+#define UBO_COUNT				1
 
-#define LIGHT_UBO       0
-#define CAMERA_UBO      1
+struct GL33_Backend {
+	GLuint vao[BUFFER_COUNT];
+	GLuint vbo[BUFFER_COUNT];
+	GLuint ebo[BUFFER_COUNT];
+	//to pass the mat4 model to the instance (and not to every vertices)
+	GLuint sprite_inst_model_vbo;
 
-static GLuint ubo[Ubo_Num];
+	GLuint ubo[UBO_COUNT];
 
+	//contains the render technique of the scene
+	std::unordered_map<HRL_id, GL_Scene*> gpu_scenes;
 
-#define MAX_LIGHTS      32
+	//backend ressources
+	std::unordered_map<HRL_id, GL33_Shader*> shaders;
+	std::unordered_map<HRL_id, GL33_Texture*> textures;
 
+	std::unordered_map<int, HRL_id> fallback_textures;
 
-//indices pour deux triangles
-static unsigned int sprite_indices[] = {
-    0, 1, 2,
-    2, 3, 0
+	//post process pass (ping pong method)
+	GLuint post_fbo[2];
+	GLuint post_textures[2];
 };
+static GL33_Backend* bck_;
 
 
-//light
-/**
- * La norme std 140 de opengl a respecter pour les ubo demande d'alligner les objets
- * sur des multiples de 16, donc on ajoute des paddings pour correspondre
- */
+
+//Render context, used and updated every frame
 typedef struct {
-  //16 bytes {
-  //4 bytes
-  uint32_t type;
-  //4 bytes
-  float intensity;
-  //4 bytes
-  float attenuation;
-  //4 bytes
-  float padding1;
-  // }
+	//render context
+	HRL_Viewport* viewport;
+	GL33_Shader* shader;
 
-  //16 bytes {
-  //12 bytes
-  glm::vec3 position;
-  //4 bytes
-  float padding2;
-  // }
-
-  //16 bytes {
-  //12 bytes
-  glm::vec3 rotation;
-  //4 bytes
-  float padding3;
-  // }
-
-  //16 bytes {
-  //12 bytes
-  glm::vec3 color;
-  //4 bytes
-  float padding4;
-  // }
-}GL_Light_t;
+	//cached matrices
+	glm::mat4 proj_mat;
+	glm::mat4 view_mat;
+} GL33_State;
+static GL33_State* ctx_;
 
 
-
-typedef struct {
-  GLuint texture_;
-  GLuint framebuffer_;
-  unsigned int width_, height_;
-}GL_Scene_t;
-static std::unordered_map<HRL_id, GL_Scene_t*> gpu_scenes_;
-
-
-
-
-void check_errors(int line)
+void GL33_Init()
 {
-  GLenum err; \
-  while ((err = glGetError()) != GL_NO_ERROR) \
-    printf("OpenGL error: 0x%X after line %d\n", err, line);
-}
-#define GL33_CheckErrors() check_errors(__LINE__)
-
-
-
-
-//shaders//
-std::unordered_map<HRL_id, GL33_Shader*> shaders_;
-
-
-//Textures//
-static std::unordered_map<HRL_id, GL33_Texture*> textures_;
-
-#define ALBEDO_INT (0)
-#define NORMAL_INT (1)
-#define SPECULAR_INT (2)
-#define ROUGHNESS_INT (3)
-#define METALIC_INT (4)
-#define ALPHA_INT (5)
-const char* tex_uniform_name[6]
-{
-  "T_Albedo", "T_Normal", "T_Specular", "T_Roughness", "T_Metalic", "T_Alpha"
-};
-
-static std::unordered_map<int, HRL_id> fallback_textures_;
-
-
-
-//Debug//
-const std::unordered_map<HRL_id, DebugRenderer>* internal_debug_renderer=nullptr;
-
-
-/** Backend Implementation */
-
-void GL33_Init() {}
-
-void GL33_InitContext(HRL_uint _width, HRL_uint _height, void* loader)
-{
-  // ici _handle = contexte déja créé / rendu attaché
-  // GLAD doit charger les fonctions : 
-  // tu passes une fonction de platform loader adaptée
-  // ex: wglGetProcAddress sur Windows, glXGetProcAddress sur Linux
-
-  if (!gladLoadGLLoader((GLADloadproc)loader))
-  {
-    SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_FATAL, "Failed to init GLAD, (loader error)");
-    return;
-  }
-
-  //activer la transparence des shaders
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-  //activer l'anti-aliasing
-  glEnable(GL_MULTISAMPLE);
-
-  //on crée les vao
-  glGenVertexArrays(Buffer_Num, vao);
-  //on crée les vbo
-  glGenBuffers(Buffer_Num, vbo);
-  //on crée les ebo
-  glGenBuffers(Buffer_Num, ebo);
-
-  //on crée le ubo
-  glGenBuffers(Ubo_Num, ubo);
-
-  //ubo light
-  glBindBuffer(GL_UNIFORM_BUFFER, ubo[LIGHT_UBO]);
-  glBufferData(GL_UNIFORM_BUFFER, MAX_LIGHTS * sizeof(HRL_Light), nullptr, GL_DYNAMIC_DRAW);
-  glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo[LIGHT_UBO]);
-  glBindBuffer(GL_UNIFORM_BUFFER, 0);
-
-  //mettre ici le ubo camera
-  //
-  //
-
-  //on va initialiser le vao et vbo Sprite
-  glBindVertexArray(vao[Sprite_Buffer]);
-
-  //on bind le vbo sprite
-  glBindBuffer(GL_ARRAY_BUFFER, vbo[Sprite_Buffer]);
-
-  //allouer la bonne taille mais sans valeur par défaut
-  //16 car on passe 2 float et 2 coordonées UV par vertex (donc 16 en tout pour 4 vertex)
-  glBufferData(GL_ARRAY_BUFFER, 16*sizeof(float), nullptr, GL_DYNAMIC_DRAW);
-
-  //coordonées des points
-  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
-  glEnableVertexAttribArray(0);
-
-  //coordonées de texture (UV)
-  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
-  glEnableVertexAttribArray(1);
-
-  //on bind le ebo
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo[Sprite_Buffer]);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(sprite_indices), sprite_indices, GL_DYNAMIC_DRAW);
-
-  //Sprite shader
-  //ajouter une gestion des erreurs
-  auto* spriteShader = new GL33_Shader();
-  spriteShader->GL33_Create(
-    (const char*)res_sprite_vert_glsl,
-    res_sprite_vert_glsl_len,
-    (const char*)res_sprite_frag_glsl,
-    res_sprite_frag_glsl_len);
-
-  shaders_.emplace(HRL_SpriteShader, spriteShader);
-
-  //gerer les vao Mesh2D et Mesh3D ici
-  //
-  //
-
-  //debug
-  glBindVertexArray(vao[Debug_Buffer]);
-  glBindBuffer(GL_ARRAY_BUFFER, vbo[Debug_Buffer]);
-
-  //nullptr car taille inconnue à l'avance, réallouée au flush
-  glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
-
-  //position (x, y, z) — 3 floats
-  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
-  glEnableVertexAttribArray(0);
-
-  //couleur (r, g, b) — 3 floats
-  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)(3*sizeof(float)));
-  glEnableVertexAttribArray(1);
-  //pas de glBindBuffer(GL_ELEMENT_ARRAY_BUFFER) — pas d'EBO
-
-  auto* debugShader = new GL33_Shader();
-  debugShader->GL33_Create(
-    (const char*)res_debug_vert_glsl,
-    res_debug_vert_glsl_len,
-    (const char*)res_debug_frag_glsl,
-    res_debug_frag_glsl_len
-  );
-  shaders_.emplace(HRL_DebugShader, debugShader);
-
-
-  //Create default post process shader
-  auto* defaultPostProcessShader = new GL33_Shader();
-  defaultPostProcessShader->GL33_Create(
-    (const char*)res_post_vert_glsl,
-    res_post_vert_glsl_len,
-    (const char*)res_post_frag_glsl,
-    res_post_frag_glsl_len
-  );
-  shaders_.emplace(HRL_DefaultPostProcessShader, defaultPostProcessShader);
-
-
-
-  //Creer les texures de fallback
-  fallback_textures_[ALBEDO_INT] = GL33_CreateTexture((const char*)res_default_albedo_png, res_default_albedo_png_len);
-  fallback_textures_[NORMAL_INT] = GL33_CreateTexture((const char*)res_default_normal_png, res_default_normal_png_len);
-  fallback_textures_[SPECULAR_INT] = GL33_CreateTexture((const char*)res_default_specular_png, res_default_specular_png_len);
-  fallback_textures_[ROUGHNESS_INT] = GL33_CreateTexture((const char*)res_default_roughness_png, res_default_roughness_png_len);
-  fallback_textures_[METALIC_INT] = GL33_CreateTexture((const char*)res_default_metalic_png, res_default_metalic_png_len);
-  fallback_textures_[ALPHA_INT] = GL33_CreateTexture((const char*)res_default_alpha_png, res_default_alpha_png_len);
-
-  assert(fallback_textures_[ALBEDO_INT] != HRL_InvalidID && "Failed to load fallback albedo");
-  assert(fallback_textures_[NORMAL_INT] != HRL_InvalidID && "Failed to load fallback normal");
-  assert(fallback_textures_[SPECULAR_INT] != HRL_InvalidID && "Failed to load fallback specular");
-  assert(fallback_textures_[ROUGHNESS_INT] != HRL_InvalidID && "Failed to load fallback roughness");
-  assert(fallback_textures_[METALIC_INT] != HRL_InvalidID && "Failed to load fallback metalic");
-  assert(fallback_textures_[ALPHA_INT] != HRL_InvalidID && "Failed to load fallback alpha");
-
+	//empty with opengl
 }
 
-void GL33_ResetFramebuffer()
+void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 {
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  glViewport(0, 0, GetWindowWidth(), GetWindowHeight());
-}
+	if (!gladLoadGLLoader((GLADloadproc)loader))
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_FATAL, "Failed to init GLAD, (loader error)");
+		return;
+	}
 
+	//create backend
+	bck_ = new GL33_Backend();
+	ctx_ = new GL33_State();
+
+	//Gen VAO, VBO and EBO
+	glGenVertexArrays(BUFFER_COUNT, bck_->vao);
+	glGenBuffers(BUFFER_COUNT, bck_->vbo);
+	glGenBuffers(BUFFER_COUNT, bck_->ebo);
+	glGenBuffers(1, &bck_->sprite_inst_model_vbo);
+	glGenBuffers(UBO_COUNT, bck_->ubo);
+
+	//INIT QUAD BUFFER (static draw)
+	glBindVertexArray(bck_->vao[BUFFER_QUAD]);
+	glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_QUAD]);
+	//alloca buffer data with
+	glBufferData(GL_ARRAY_BUFFER, 16*sizeof(float), fullscreen_quad_verts, GL_STATIC_DRAW);
+	//layout(location=0) in vec2 apos
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
+	glEnableVertexAttribArray(0);
+	//layout(location=1) in vec2 auv
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
+	glEnableVertexAttribArray(1);
+	//EBO
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bck_->ebo[BUFFER_QUAD]);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(quad_indices), quad_indices, GL_STATIC_DRAW);
+
+	//GEN FBO & TEXTURES (post processing)
+	glGenFramebuffers(2, bck_->post_fbo);
+	glGenTextures(2, bck_->post_textures);
+	InitTextureAndBindToFBO(bck_->post_textures[0], bck_->post_fbo[0], (int)_width, (int)_height);
+	InitTextureAndBindToFBO(bck_->post_textures[1], bck_->post_fbo[1], (int)_width, (int)_height);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);  //reset fbo binding
+
+
+	//INIT SPRITE BUFFER
+	glBindVertexArray(bck_->vao[BUFFER_SPRITE]);
+	glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_SPRITE]);
+	//alloca buffer data (with no value)
+	glBufferData(GL_ARRAY_BUFFER, 16*sizeof(float), nullptr, GL_DYNAMIC_DRAW); //(dynamic draw)
+	//layout(location=0) in vec2 apos (creer un autre vbo pour ne plus passer les vertices à chaque frames)
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
+	glEnableVertexAttribArray(0);
+	//layout(location=1) in vec2 auv
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
+	glEnableVertexAttribArray(1);
+	//bind vbo instance sprite
+	glBindBuffer(GL_ARRAY_BUFFER, bck_->sprite_inst_model_vbo);
+	glBufferData(GL_ARRAY_BUFFER, 16*sizeof(float), nullptr, GL_DYNAMIC_DRAW); //(dynamic draw)
+	//layout(location=2) in mat4 amodel (hold location 2,3,4 and 5 ; [see shader code])
+	for (int i = 0; i < 4; i++)
+	{
+		glVertexAttribPointer(2 + i, 4, GL_FLOAT, GL_FALSE, 16 * sizeof(float), (void*)(i * 4 * sizeof(float)));
+		glEnableVertexAttribArray(2 + i);
+		glVertexAttribDivisor(2 + i, 1);  //read by instance, not by vertex (instancing)
+	}
+	//EBO
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bck_->ebo[BUFFER_SPRITE]);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(quad_indices), quad_indices, GL_STATIC_DRAW);
+
+	//DEBUG
+	glBindVertexArray(bck_->vao[BUFFER_DEBUG]);
+	glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_DEBUG]);
+	//alloca buffer data (with no value)
+	glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
+	//layout(location = 0) in vec3 apos
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
+	glEnableVertexAttribArray(0);
+	//layout(location = 1) in vec3 acolor
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)(3*sizeof(float)));
+	glEnableVertexAttribArray(1);
+
+	//RESET VAO BINDING
+	glBindVertexArray(0);
+
+
+	//SHADERS
+
+	//DEFAULT POST PROCESS
+	auto* default_post_process_shader = new GL33_Shader();
+	default_post_process_shader->GL33_Create(
+		(const char*)res_post_vert_glsl,
+		res_post_vert_glsl_len,
+		(const char*)res_post_frag_glsl,
+		res_post_frag_glsl_len
+	);
+	bck_->shaders.emplace(HRL_DefaultPostProcessShader, default_post_process_shader);
+
+	//SPRITE SHADER
+	auto* sprite_shader = new GL33_Shader();
+	sprite_shader->GL33_Create(
+		(const char*)res_sprite_vert_glsl,
+		res_sprite_vert_glsl_len,
+		(const char*)res_sprite_frag_glsl,
+		res_sprite_frag_glsl_len);
+
+	bck_->shaders.emplace(HRL_SpriteShader, sprite_shader);
+
+	//DEBUG SHADER
+	auto* debug_shader = new GL33_Shader();
+	debug_shader->GL33_Create(
+		(const char*)res_debug_vert_glsl,
+		res_debug_vert_glsl_len,
+		(const char*)res_debug_frag_glsl,
+		res_debug_frag_glsl_len
+	);
+	bck_->shaders.emplace(HRL_DebugShader, debug_shader);
+
+
+	//FALLBACK TEXTURES
+	bck_->fallback_textures[ALBEDO_INT] = GL33_CreateTexture((const char*)res_default_albedo_png, res_default_albedo_png_len);
+	bck_->fallback_textures[NORMAL_INT] = GL33_CreateTexture((const char*)res_default_normal_png, res_default_normal_png_len);
+	bck_->fallback_textures[SPECULAR_INT] = GL33_CreateTexture((const char*)res_default_specular_png, res_default_specular_png_len);
+	bck_->fallback_textures[ROUGHNESS_INT] = GL33_CreateTexture((const char*)res_default_roughness_png, res_default_roughness_png_len);
+	bck_->fallback_textures[METALIC_INT] = GL33_CreateTexture((const char*)res_default_metalic_png, res_default_metalic_png_len);
+	bck_->fallback_textures[ALPHA_INT] = GL33_CreateTexture((const char*)res_default_alpha_png, res_default_alpha_png_len);
+
+	assert(bck_->fallback_textures[ALBEDO_INT] != HRL_InvalidID && "Failed to load fallback albedo");
+	assert(bck_->fallback_textures[NORMAL_INT] != HRL_InvalidID && "Failed to load fallback normal");
+	assert(bck_->fallback_textures[SPECULAR_INT] != HRL_InvalidID && "Failed to load fallback specular");
+	assert(bck_->fallback_textures[ROUGHNESS_INT] != HRL_InvalidID && "Failed to load fallback roughness");
+	assert(bck_->fallback_textures[METALIC_INT] != HRL_InvalidID && "Failed to load fallback metalic");
+	assert(bck_->fallback_textures[ALPHA_INT] != HRL_InvalidID && "Failed to load fallback alpha");
+
+
+	//UBO
+	//LIGHTS
+	glBindBuffer(GL_UNIFORM_BUFFER, bck_->ubo[UBO_LIGHTS]);
+	glBufferData(GL_UNIFORM_BUFFER, MAX_LIGHTS * sizeof(HRL_Light), nullptr, GL_DYNAMIC_DRAW);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, bck_->ubo[UBO_LIGHTS]);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+}
 
 void GL33_Shutdown()
 {
-  glDeleteVertexArrays(Buffer_Num, vao);
-  glDeleteBuffers(Buffer_Num, vbo);
-  glDeleteBuffers(Buffer_Num, ebo);
+	for (const auto s : bck_->shaders)
+	{
+		delete s.second;
+	}
+	for (const auto t : bck_->textures)
+	{
+		delete t.second;
+	}
+
+	//DELETE POST PROCESS OBJECTS
+	glDeleteFramebuffers(2, bck_->post_fbo);
+	glDeleteTextures(2, bck_->post_textures);
+	//DELETE BUFFERS
+	glDeleteVertexArrays(BUFFER_COUNT, bck_->vao);
+	glDeleteBuffers(BUFFER_COUNT, bck_->vbo);
+	glDeleteBuffers(BUFFER_COUNT, bck_->ebo);
+
+	delete bck_;
+	delete ctx_;
 }
 
-//passer plus tard a une structure RenderContext
-static GL_Scene_t* currentScene;
-static HRL_Viewport* currentViewport;
-static HRL_Camera* currentCamera;
-static GL33_Shader* currentShader;
 
-static unsigned int currentWidth, currentHeight;
 
-static glm::mat4 cached_proj_mat_;
-static glm::mat4 cached_view_mat_;
-
-//calculate matrices
-glm::mat4 CalculateProjectionMatrix()
+void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 {
-  //taille absolue du viewport width et height (on prend en compte la taille de la fenetre et la taille relative du viewport HRL)
-  float viewportWidth  = (float)currentWidth * currentViewport->width_;
-  float viewportHeight = (float)currentHeight * currentViewport->height_;
+	//Changer pour calculer que quand un sprite est ajouté ou modifié
+	std::vector<GL_RenderBatch> render_batches;
 
-  //on evite la division par 0
-  if (viewportHeight < 1e-3f)
-  {
-    viewportHeight = 1.f;
-  }
+	//if render on screen, fbo equals 0
+	auto scene_it = bck_->gpu_scenes.find(scene_id);
+	if (scene_it == bck_->gpu_scenes.end())
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "GL33_DrawScene: tried to draw scene with invalid gpu ID");
+		return;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, scene_it->second->fbo);
+	//clear framebuffer
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT);
 
-  //calcul du ratio largeur/hauteur du viewport
-  float aspect = viewportWidth / viewportHeight;
+	//For each viewport
+	for (const auto& v : scene->viewports)
+	{
+		//bind viewport to context
+		ctx_->viewport = v.second;
+		auto winW = (float)GetWindowWidth();
+		auto winH = (float)GetWindowHeight();
+		glViewport(
+			(GLsizei)(v.second->x_ * winW),
+			(GLsizei)(v.second->y_ * winH),
+			(GLsizei)(v.second->width_ * winW),
+			(GLsizei)(v.second->height_ * winH)
+		);
 
-  glm::mat4 proj;
-  if (currentCamera->type_ == HRL_Perspective)
-  {
-    proj = glm::perspective(glm::radians(currentCamera->value_), aspect, currentCamera->near_plane_, currentCamera->far_plane_);
-  }
-  else
-  {
-    //on calcule la taille en hauteur d'abord, puis on fait le calcul de la largeur en fonction de la hauteur et de l'aspect
-    float halfHeight = currentCamera->value_ * 0.5f;
-    float halfWidth  = halfHeight * aspect;
-    proj = glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight,
-                      currentCamera->near_plane_, currentCamera->far_plane_);
-  }
-  return proj;
+		//uses viewport & camera
+		BatchSprites(scene->meshes, render_batches);
+
+		//calculate matrices based on viewport
+		ctx_->proj_mat = CalculateProjectionMatrix();
+		ctx_->view_mat = CalculateViewMatrix();
+
+		for (const auto& rb : render_batches)
+		{
+			auto it_mat = GetPrivateContext()->materials.find(rb.mat);
+			if (it_mat == GetPrivateContext()->materials.end())
+			{
+				SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "GL33_DrawScene: tried to bind material, invalid ID");
+				return;
+			}
+
+			BindMaterial(it_mat->second);
+
+			std::vector<float> vertices_data;
+			std::vector<float> instance_data;
+
+			for (int i=0; i < rb.instance_count; i++)
+			{
+				auto inst = rb.instances[i];
+
+				//add vertex data
+				float uMin = inst.region[0];
+				float vMin = inst.region[1];
+				float uMax = inst.region[2];
+				float vMax = inst.region[3];
+				float vertices[] = {
+					-0.5f, -0.5f,  uMin, vMin,
+					 0.5f, -0.5f,  uMax, vMin,
+					 0.5f,  0.5f,  uMax, vMax,
+					-0.5f,  0.5f,  uMin, vMax
+				};
+				vertices_data.insert(vertices_data.end(), vertices, vertices + 16);
+
+				//add instance model data
+				float* model_p = glm::value_ptr(inst.model);
+				instance_data.insert(instance_data.end(), model_p, model_p + 16);
+			}
+
+			glBindVertexArray(bck_->vao[BUFFER_SPRITE]);
+
+			//SPRITE VBO
+			glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_SPRITE]);
+			//allocate to target size
+			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(vertices_data.size() * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
+			glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(vertices_data.size() * sizeof(float)), vertices_data.data());
+
+			//SPRITE INSTANCE VBO
+			glBindBuffer(GL_ARRAY_BUFFER, bck_->sprite_inst_model_vbo);
+			//allocate to target size
+			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(instance_data.size() * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
+			glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(instance_data.size() * sizeof(float)), instance_data.data());
+
+			glDisable(GL_DEPTH_TEST); //disable when 2D, enable when 3D
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+			glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, rb.instance_count);
+		}
+	}
 }
-glm::mat4 CalculateViewMatrix()
+
+
+
+
+
+
+//UTILS IMPLEMENTATION
+static void InitTextureAndBindToFBO(GLuint _texture, GLuint _fbo, int width, int height)
 {
-  //position et vue de la camera
-  glm::mat4 view = glm::lookAt(
-    currentCamera->position_,
-    currentCamera->position_ + GetForwardVector(currentCamera->rotation_),
-    GetUpVector(currentCamera->rotation_)
-  );
-  return view;
-}
-//called by API pipeline
-void GL33_ComputeFrameMatrices()
-{
-  cached_proj_mat_ = CalculateProjectionMatrix();
-  cached_view_mat_ = CalculateViewMatrix();
-}
+	//on initialise avec les bonnes valeurs la texture
+	glBindTexture(GL_TEXTURE_2D, _texture);
 
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-//stocke le nombre de texures bindées avant de draw.
-//permet de savoir jusqu'a ou unbind les slots gl
-static int textureSlotsBinded;
+	//pour eviter les artefacts sur les bords
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-void GL33_BindScene(HRL_id _sceneid)
-{
-  auto it = gpu_scenes_.find(_sceneid);
-  if (it == gpu_scenes_.end())
-  {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33 Bind Scene error : scene id not valid");
-    return;
-  }
-  currentScene = it->second;
-  //si on veut draw on screen, le framebuffer id sera 0, donc l'ecran
-  glBindFramebuffer(GL_FRAMEBUFFER, it->second->framebuffer_);
+	//on unbind la texture du container texture openGL (on va la bind une seule fois au FBO correspondant)
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	//on attache la texture au framebuffer
+	glBindFramebuffer(GL_FRAMEBUFFER, _fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, _texture, 0);
 }
 
-void GL33_ClearScene()
-{
-  glClearColor(0.f, 0.f, 0.f, 1.f);
-  glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-}
 
-void GL33_BindViewport(HRL_Viewport* viewport)
-{
-  //si on render sur l'ecran, on prend les dimensions de l'ecran, sinon, la taille de la scene
-  if (currentScene->framebuffer_ == 0)
-  {
-    currentWidth = GetWindowWidth();
-    currentHeight = GetWindowHeight();
-  }
-  else
-  {
-    currentWidth = currentScene->width_;
-    currentHeight = currentScene->height_;
-  }
 
-  glViewport((GLint)(viewport->x_*(float)currentWidth),
-    //pour que 0 soit le haut et 1 le bas
-    (GLint)((1 - viewport->y_ - viewport->height_)*(float)currentHeight),
-    (GLint)(viewport->width_ * (float)currentWidth),
-    (GLint)(viewport->height_ * (float)currentHeight));
-  currentViewport = viewport;
-  currentCamera = viewport->camera_;
-}
-
+//MATERIALS
 static void ApplyFallback(int index)
 {
-  //texture non trouvée, on passe la fallback texture
-  glActiveTexture(GL_TEXTURE0 + index);
-  HRL_id fallback_hrl_id = fallback_textures_[index];
-  glBindTexture(GL_TEXTURE_2D, textures_[fallback_hrl_id]->GetGL_ID());
+	//texture non trouvée, on passe la fallback texture
+	glActiveTexture(GL_TEXTURE0 + index);
+	HRL_id fallback_hrl_id = bck_->fallback_textures[index];
+	glBindTexture(GL_TEXTURE_2D, bck_->textures[fallback_hrl_id]->GetGL_ID());
 }
-
-
-void GL33_BindMaterial(HRL_Material* mat)
+static void BindMaterial(HRL_Material* mat)
 {
-  auto it = shaders_.find(mat->shader_);
-  if (it == shaders_.end())
-  {
-    SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_FATAL, "Bind material error : shader doesn't exists");
-    return;
-  }
-  auto* s = it->second;
-  //on set CurrentShader pour spécifier que les prochains calls utiliseront ce shader
-  currentShader = s;
-  s->Use();
+	auto it = bck_->shaders.find(mat->shader_);
+	if (it == bck_->shaders.end())
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_FATAL, "Bind material error : shader doesn't exists");
+		return;
+	}
+	auto* s = it->second;
+	//on set CurrentShader pour spécifier que les prochains calls utiliseront ce shader
+	ctx_->shader = s;
+	s->Use();
 
-  s->SetMat4("projection", cached_proj_mat_);
-  s->SetMat4("view", cached_view_mat_);
+	s->SetMat4("projection", ctx_->proj_mat);
+	s->SetMat4("view", ctx_->view_mat);
 
-  //on passe tous les uniforms donnés par l'utilisateur
-  for (const auto& [name, value] : mat->intParams_)
-  {
-    s->SetInt(name, value);
-  }
+	//on passe tous les uniforms donnés par l'utilisateur
+	for (const auto& [name, value] : mat->intParams_)
+	{
+		s->SetInt(name, value);
+	}
 
-  //utilisé pour unbind les textures apres avoir draw
-  textureSlotsBinded = (int)mat->textureParams_.size();
+	//utilisé pour unbind les textures apres avoir draw
+	//textureSlotsBinded = (int)mat->textureParams_.size();
 
-  for (int i=0; i<6; i++)
-  {
-    //on passe toujours les memes uniforms
-    s->SetInt(tex_uniform_name[i], i);
+	for (int i=0; i<6; i++)
+	{
+		//on passe toujours les memes uniforms
+		s->SetInt(tex_uniform_name[i], i);
 
-    //on recherche la texture
-    auto itParam = mat->textureParams_.find(std::string(tex_uniform_name[i]));
-    if (itParam == mat->textureParams_.end())
-    {
-      ApplyFallback(i);
-      continue;
-    }
+		//on recherche la texture
+		auto itParam = mat->textureParams_.find(std::string(tex_uniform_name[i]));
+		if (itParam == mat->textureParams_.end())
+		{
+			ApplyFallback(i);
+			continue;
+		}
 
-    auto itTexture = textures_.find(itParam->second);
-    if (itTexture == textures_.end())
-    {
-      ApplyFallback(i);
-      continue;
-    }
+		auto itTexture = bck_->textures.find(itParam->second);
+		if (itTexture == bck_->textures.end())
+		{
+			ApplyFallback(i);
+			continue;
+		}
 
-    glActiveTexture(GL_TEXTURE0 + i);
-    glBindTexture(GL_TEXTURE_2D, itTexture->second->GetGL_ID());
-  }
+		glActiveTexture(GL_TEXTURE0 + i);
+		glBindTexture(GL_TEXTURE_2D, itTexture->second->GetGL_ID());
+	}
 
-  for (auto [name, value] : mat->floatParams_)
-  {
-    s->SetFloat(name, value);
-  }
-  for (auto [name, value] : mat->vec2Params_)
-  {
-    s->SetVec2(name, value);
-  }
-  for (auto [name, value] : mat->vec3Params_)
-  {
-    s->SetVec3(name, value);
-  }
-  for (auto [name, value] : mat->vec4Params_)
-  {
-    s->SetVec4(name, value);
-  }
+	//apply uniforms
+	for (auto& [name, value] : mat->floatParams_)
+	{
+		s->SetFloat(name, value);
+	}
+	for (auto& [name, value] : mat->vec2Params_)
+	{
+		s->SetVec2(name, value);
+	}
+	for (auto& [name, value] : mat->vec3Params_)
+	{
+		s->SetVec3(name, value);
+	}
+	for (auto& [name, value] : mat->vec4Params_)
+	{
+		s->SetVec4(name, value);
+	}
 }
 
-void GL33_DrawMesh(HRL_Mesh* mesh)
+
+//BATCHING
+static void BatchSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, std::vector<GL_RenderBatch>& batches)
 {
-  glm::mat4 model = glm::mat4(1.f);
+	for (const auto& [id, mesh] : meshes)
+	{
+		if (mesh->type_ == HRL_Sprite)
+		{
+			glm::mat4 model = glm::mat4(1.f);
 
-  //aller à la position du mesh
-  model = glm::translate(model, mesh->position_);
+			//aller à la position du mesh
+			model = glm::translate(model, mesh->position_);
 
-  //aller au pivot
-  model = glm::translate(model, mesh->pivot_point_);
+			//aller au pivot
+			model = glm::translate(model, mesh->pivot_point_);
 
-  //tourner
-  model = glm::rotate(model, mesh->rotation_.x, glm::vec3(1.f, 0.f, 0.f));
-  model = glm::rotate(model, mesh->rotation_.y, glm::vec3(0.f, 1.f, 0.f));
-  model = glm::rotate(model, mesh->rotation_.z, glm::vec3(0.f, 0.f, 1.f));
+			//tourner
+			model = glm::rotate(model, mesh->rotation_.x, glm::vec3(1.f, 0.f, 0.f));
+			model = glm::rotate(model, mesh->rotation_.y, glm::vec3(0.f, 1.f, 0.f));
+			model = glm::rotate(model, mesh->rotation_.z, glm::vec3(0.f, 0.f, 1.f));
 
-  //revenir en arrière
-  model = glm::translate(model, -mesh->pivot_point_);
+			//revenir en arrière
+			model = glm::translate(model, -mesh->pivot_point_);
 
-  //scale
-  model = glm::scale(model, mesh->scale_);
+			//scale
+			model = glm::scale(model, mesh->scale_);
 
-  currentShader->SetMat4("model", model);
+			auto* sprite = static_cast<HRL_MeshSprite*>(mesh);
 
-  if (mesh->type_ == HRL_Sprite)
-  {
-    float uMin, vMin, uMax, vMax;
-    auto* sprite = static_cast<HRL_MeshSprite*>(mesh);
-    uMin = sprite->region_[0];
-    vMin = sprite->region_[1];
-    uMax = sprite->region_[2];
-    vMax = sprite->region_[3];
+			auto* inst = new GL_SpriteInstance(model, {sprite->region_[0], sprite->region_[1], sprite->region_[2], sprite->region_[3]});
+			GL_RenderBatch batch{inst, 1, mesh->material_};
+			batches.emplace_back(batch);
 
-    float vertices[] = {
-      -0.5f, -0.5f,  uMin, vMin,
-       0.5f, -0.5f,  uMax, vMin,
-       0.5f,  0.5f,  uMax, vMax,
-      -0.5f,  0.5f,  uMin, vMax,
-    };
+			//Trier par distance a la camera
+			glm::vec3 camPos = ctx_->viewport->camera_->position_;
 
-    //on bind le bon vao (pas besoin de bind de vbo ou ebo car ils sont configurés pour le vao)
-    glBindVertexArray(vao[Sprite_Buffer]);
+			std::sort(batches.begin(), batches.end(), [&](const GL_RenderBatch& a, const GL_RenderBatch& b) {
+					// tu as besoin de la position du mesh dans le batch
+					glm::vec3 posA = glm::vec3(a.instances[0].model[3]);
+					glm::vec3 posB = glm::vec3(b.instances[0].model[3]);
+					float distA = glm::distance(camPos, posA);
+					float distB = glm::distance(camPos, posB);
+					return distA > distB; //plus loin = dessiné en premier
+			});
+		}
+	}
+}
 
-    //on bind le vbo et on lui envoie les données du mesh
-    glBindBuffer(GL_ARRAY_BUFFER, vbo[Sprite_Buffer]);
+//MATRICES
+static glm::mat4 CalculateProjectionMatrix()
+{
+	//taille absolue du viewport width et height (on prend en compte la taille de la fenetre et la taille relative du viewport HRL)
+	float viewportWidth  = (float)GetWindowWidth() * ctx_->viewport->width_;
+	float viewportHeight = (float)GetWindowHeight() * ctx_->viewport->height_;
 
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
+	//on evite la division par 0
+	if (viewportHeight < 1e-3f)
+	{
+		viewportHeight = 1.f;
+	}
 
-    //desactiver si 2D, activer si 3D
-    glDisable(GL_DEPTH_TEST);
+	//calcul du ratio largeur/hauteur du viewport
+	float aspect = viewportWidth / viewportHeight;
 
-
-    //on draw sur tous le render target
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
-
-    //reset les binds de textures (changer avec le nouveau systeme)
-    for (int i = 0; i < textureSlotsBinded; i++)
-    {
-      glActiveTexture(GL_TEXTURE0 + i);
-      glBindTexture(GL_TEXTURE_2D, 0);
-    }
-  }
+	glm::mat4 proj;
+	if (ctx_->viewport->camera_->type_ == HRL_Perspective)
+	{
+		proj = glm::perspective(glm::radians(ctx_->viewport->camera_->value_), aspect, ctx_->viewport->camera_->near_plane_, ctx_->viewport->camera_->far_plane_);
+	}
+	else
+	{
+		//on calcule la taille en hauteur d'abord, puis on fait le calcul de la largeur en fonction de la hauteur et de l'aspect
+		float halfHeight = ctx_->viewport->camera_->value_ * 0.5f;
+		float halfWidth  = halfHeight * aspect;
+		proj = glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight,
+											ctx_->viewport->camera_->near_plane_, ctx_->viewport->camera_->far_plane_);
+	}
+	return proj;
+}
+static glm::mat4 CalculateViewMatrix()
+{
+	//position et vue de la camera
+	glm::mat4 view = glm::lookAt(
+		ctx_->viewport->camera_->position_,
+		ctx_->viewport->camera_->position_ + GetForwardVector(ctx_->viewport->camera_->rotation_),
+		GetUpVector(ctx_->viewport->camera_->rotation_)
+	);
+	return view;
 }
 
 
+
+//LIGHTS
 void GL33_UpdateLights(const std::vector<HRL_Light*>& _lights)
 {
-  //on commence par creer le tableau de GL_Lights_t
-  GL_Light_t gpuLights[MAX_LIGHTS];
-  size_t count = 0;
+	//on commence par creer le tableau de GL_Lights
+	GL_Light gpu_lights[MAX_LIGHTS];
+	size_t count = 0;
 
-  //on rempli le tableau
-  for (const auto& light: _lights)
-  {
-    if (count >= MAX_LIGHTS)
-    {
-      break;
-    }
+	//on rempli le tableau
+	for (const auto& light: _lights)
+	{
+		if (count >= MAX_LIGHTS)
+		{
+			break;
+		}
 
-    gpuLights[count].type = light->type_;
-    gpuLights[count].intensity = light->intensity_;
-    gpuLights[count].attenuation = light->attenuation_;
-    gpuLights[count].padding1 = 0.f;
+		gpu_lights[count].type = light->type_;
+		gpu_lights[count].intensity = light->intensity_;
+		gpu_lights[count].attenuation = light->attenuation_;
+		gpu_lights[count].padding1 = 0.f;
 
-    gpuLights[count].position = light->position_;
-    gpuLights[count].padding2 = 0.f;
+		gpu_lights[count].position = light->position_;
+		gpu_lights[count].padding2 = 0.f;
 
-    gpuLights[count].rotation = light->rotation_;
-    gpuLights[count].padding3 = 0.f;
+		gpu_lights[count].rotation = light->rotation_;
+		gpu_lights[count].padding3 = 0.f;
 
-    gpuLights[count].color = light->color_;
-    gpuLights[count].padding4 = 0.f;
+		gpu_lights[count].color = light->color_;
+		gpu_lights[count].padding4 = 0.f;
 
-    ++count;
-  }
+		++count;
+	}
 
-  //on passe les données à opengl
-  glBindBuffer(GL_UNIFORM_BUFFER, ubo[LIGHT_UBO]);
-  glBufferSubData(GL_UNIFORM_BUFFER, 0, count * sizeof(GL_Light_t), gpuLights);
-  GL33_CheckErrors();
+	//on passe les données à opengl
+	glBindBuffer(GL_UNIFORM_BUFFER, bck_->ubo[UBO_LIGHTS]);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)(count * sizeof(GL_Light)), gpu_lights);
 }
 
 
+
+
+
+//SCENES
+void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
+{
+	auto* scene = new GL_Scene();
+	if (_renderOnScreen)
+	{
+		//le framebuffer est 0 (ecran)
+		scene->fbo = 0;
+	}
+	else
+	{
+		glGenTextures(1, &scene->texture);
+		glBindTexture(GL_TEXTURE_2D, scene->texture);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 512, 512, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+		scene->width = 512;
+		scene->height = 512;
+
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+		glGenFramebuffers(1, &scene->fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, scene->fbo);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene->texture, 0);
+
+		GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+		assert(status == GL_FRAMEBUFFER_COMPLETE && "Framebuffer incomplete!");
+	}
+
+	//les HRL_id sont partagés entre le backend et l'api
+	bck_->gpu_scenes.emplace(_newSceneid, scene);
+}
+void GL33_DeleteScene(HRL_id _sceneid)
+{
+	auto it = bck_->gpu_scenes.find(_sceneid);
+	if (it == bck_->gpu_scenes.end())
+	{
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_DeleteScene error: invalid scene id");
+		return;
+	}
+
+	if (it->second->fbo != 0)
+	{
+		//scene is not rendered at screen
+		glDeleteTextures(1, &it->second->texture);
+		glDeleteFramebuffers(1, &it->second->fbo);
+	}
+	delete it->second;
+	bck_->gpu_scenes.erase(it);
+}
+void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
+{
+	auto it = bck_->gpu_scenes.find(_sceneid);
+	if (it == bck_->gpu_scenes.end())
+	{
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_ResizeSceneTexture error: invalid scene id");
+		return;
+	}
+	if (it->second->fbo == 0)
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_WARNING, "GL33_ResizeSceneTexture error: scene is render on the screen");
+		return;
+	}
+
+	GLuint tex = it->second->texture;
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, _width, _height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+	it->second->width = _width;
+	it->second->height = _height;
+}
+
+
+
+
+
+
+//CREATE & DELETE CUSTOM SHADERS
+HRL_id GL33_CreateShader(const char *_vertContent, size_t _vertSize, const char *_fragContent, size_t _fragSize)
+{
+	//on crée le shader et on recupere le code d'erreur
+	auto* s = new GL33_Shader();
+	int error = s->GL33_Create(_vertContent, _vertSize, _fragContent, _fragSize);
+
+	//si il n'y a pas d'erreur, on génere un ID et on push le shader dans la liste des shaders, sinon on retourne invalid
+	//la classe shader s'occupe des codes d'erreurs HRL, pas besoin de le faire ici.
+	if (error == 0)
+	{
+		HRL_id id = GenerateHRL_ID();
+		bck_->shaders.emplace(id, s);
+		return id;
+	}
+	return HRL_InvalidID;
+}
+void GL33_DeleteShader(HRL_id _id)
+{
+	auto it = bck_->shaders.find(_id);
+	if (it == bck_->shaders.end())
+	{
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteShader error : Shader ID doesn't exists");
+		return;
+	}
+	delete it->second;
+	bck_->shaders.erase(it);
+}
+
+
+
+//TEXTURES
 HRL_id GL33_CreateTexture(const char* _imageContent, size_t _imageSize)
 {
   //on crée la texture et on récupere le code d'erreur
@@ -596,12 +702,11 @@ HRL_id GL33_CreateTexture(const char* _imageContent, size_t _imageSize)
   if (error == 0)
   {
     HRL_id id = GenerateHRL_ID();
-    textures_.emplace(id, t);
+    bck_->textures.emplace(id, t);
     return id;
   }
   return HRL_InvalidID;
 }
-
 HRL_id GL33_CreateTextureFromBitmap(BitmapResult bmp)
 {
   //on crée la texture et on récupere le code d'erreur
@@ -613,29 +718,26 @@ HRL_id GL33_CreateTextureFromBitmap(BitmapResult bmp)
   if (error == 0)
   {
     HRL_id id = GenerateHRL_ID();
-    textures_.emplace(id, t);
+    bck_->textures.emplace(id, t);
     return id;
   }
   return HRL_InvalidID;
 }
-
-
 void GL33_DeleteTexture(HRL_id _id)
 {
-  auto it = textures_.find(_id);
-  if (it == textures_.end())
+  auto it = bck_->textures.find(_id);
+  if (it == bck_->textures.end())
   {
     SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteTexture error : Texture ID doesn't exists");
     return;
   }
   delete it->second;
-  textures_.erase(it);
+  bck_->textures.erase(it);
 }
-
 void GL33_GetTextureSize(HRL_id id, int *width, int *height)
 {
-  auto it = textures_.find(id);
-  if (it == textures_.end())
+  auto it = bck_->textures.find(id);
+  if (it == bck_->textures.end())
   {
     SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_GetTextureSize error : Texture ID doesn't exists");
     return;
@@ -643,22 +745,20 @@ void GL33_GetTextureSize(HRL_id id, int *width, int *height)
   *width = (int)it->second->GetWidth();
   *height = (int)it->second->GetHeight();
 }
-
 void GL33_SetTextureMinFilter(HRL_id id, HRL_uint _filter)
 {
-  auto it = textures_.find(id);
-  if (it == textures_.end())
+  auto it = bck_->textures.find(id);
+  if (it == bck_->textures.end())
   {
     SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMinFilter error : Texture ID doesn't exists");
     return;
   }
   it->second->SetMinFilter(_filter);
 }
-
 void GL33_SetTextureMaxFilter(HRL_id id, HRL_uint _filter)
 {
-  auto it = textures_.find(id);
-  if (it == textures_.end())
+  auto it = bck_->textures.find(id);
+  if (it == bck_->textures.end())
   {
     SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMaxFilter error : Texture ID doesn't exists");
     return;
@@ -668,297 +768,105 @@ void GL33_SetTextureMaxFilter(HRL_id id, HRL_uint _filter)
 
 
 
-
-HRL_id GL33_CreateShader(const char *_vertContent, size_t _vertSize, const char *_fragContent, size_t _fragSize)
-{
-  //on crée le shader et on recupere le code d'erreur
-  auto* s = new GL33_Shader();
-  int error = s->GL33_Create(_vertContent, _vertSize, _fragContent, _fragSize);
-
-  //si il n'y a pas d'erreur, on génere un ID et on push le shader dans la liste des shaders, sinon on retourne invalid
-  //la classe shader s'occupe des codes d'erreurs HRL, pas besoin de le faire ici.
-  if (error == 0)
-  {
-    HRL_id id = GenerateHRL_ID();
-    shaders_.emplace(id, s);
-    return id;
-  }
-  return HRL_InvalidID;
-}
-
-void GL33_DeleteShader(HRL_id _id)
-{
-  auto it = shaders_.find(_id);
-  if (it == shaders_.end())
-  {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteShader error : Shader ID doesn't exists");
-    return;
-  }
-  else
-  {
-    delete it->second;
-    shaders_.erase(it);
-  }
-}
-
-
-void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
-{
-  auto* scene = new GL_Scene_t();
-  if (_renderOnScreen)
-  {
-    //le framebuffer est 0 (ecran)
-    scene->framebuffer_ = 0;
-  }
-  else
-  {
-    glGenTextures(1, &scene->texture_);
-    glBindTexture(GL_TEXTURE_2D, scene->texture_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 480, 480, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-
-    scene->width_ = 480;
-    scene->height_ = 480;
-
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glGenFramebuffers(1, &scene->framebuffer_);
-    glBindFramebuffer(GL_FRAMEBUFFER, scene->framebuffer_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene->texture_, 0);
-
-    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    assert(status == GL_FRAMEBUFFER_COMPLETE && "Framebuffer incomplete!");
-  }
-
-  //les HRL_id sont partagés entre le backend et l'api
-  gpu_scenes_.emplace(_newSceneid, scene);
-}
-
-void GL33_DeleteScene(HRL_id _sceneid)
-{
-  auto it = gpu_scenes_.find(_sceneid);
-  if (it == gpu_scenes_.end())
-  {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_DeleteScene error : invalid scene id");
-    return;
-  }
-
-  if (it->second->framebuffer_ != 0)
-  {
-    //scene is not rendered at screen
-    glDeleteTextures(1, &it->second->texture_);
-    glDeleteFramebuffers(1, &it->second->framebuffer_);
-  }
-  delete it->second;
-  gpu_scenes_.erase(it);
-}
-
-void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
-{
-  auto it = gpu_scenes_.find(_sceneid);
-  if (it == gpu_scenes_.end())
-  {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_ResizeSceneTexture error : invalid scene id");
-    return;
-  }
-  if (it->second->framebuffer_ == 0)
-  {
-    SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_WARNING, "GL33_ResizeSceneTexture error : scene is render on the screen");
-    return;
-  }
-
-  GLuint tex = it->second->texture_;
-  glBindTexture(GL_TEXTURE_2D, tex);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, _width, _height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-
-  it->second->width_ = _width;
-  it->second->height_ = _height;
-}
-
-
-//Post Process//
+//POST PROCESSING
 void GL33_CreatePostProcess(HRL_id mat, int priority)
 {
 
 }
-
 void GL33_DeletePostProcess(HRL_id post)
 {
 
 }
+void GL33_ResetFramebuffer()
+{
+
+}
 
 
-//Matrices
+
+
+
+//HRL UTILS
 void GL33_GetProjectionMatrix(float *aa)
 {
-  glm::mat4 proj = cached_proj_mat_;
-  memcpy(aa, glm::value_ptr(proj), sizeof(float) * 16);
+	glm::mat4 proj = ctx_->proj_mat;
+	memcpy(aa, glm::value_ptr(proj), sizeof(float) * 16);
 }
-
 void GL33_GetViewMatrix(float *aa)
 {
-  glm::mat4 proj = cached_view_mat_;
-  memcpy(aa, glm::value_ptr(proj), sizeof(float) * 16);
+	glm::mat4 proj = ctx_->view_mat;
+	memcpy(aa, glm::value_ptr(proj), sizeof(float) * 16);
 }
-
-void GL33_GetModelMatrix(HRL_Mesh* mesh, float *aa)
+void GL33_GetModelMatrix(HRL_Mesh *mesh, float *aa)
 {
-  glm::mat4 model = glm::mat4(1.f);
 
-  //aller à la position du mesh
-  model = glm::translate(model, mesh->position_);
-
-  //aller au pivot
-  model = glm::translate(model, mesh->pivot_point_);
-
-  //tourner
-  model = glm::rotate(model, mesh->rotation_.x, glm::vec3(1.f, 0.f, 0.f));
-  model = glm::rotate(model, mesh->rotation_.y, glm::vec3(0.f, 1.f, 0.f));
-  model = glm::rotate(model, mesh->rotation_.z, glm::vec3(0.f, 0.f, 1.f));
-
-  //revenir en arrière
-  model = glm::translate(model, -mesh->pivot_point_);
-
-  //scale
-  model = glm::scale(model, mesh->scale_);
-
-  memcpy(aa, glm::value_ptr(model), sizeof(float) * 16);
 }
 
 
 
-//Debug//
-struct GL33_DebugRenderer {
-  size_t current_buffer_size=0;
-};
 
-//passer a une map pour gerer toutes les scenes
-static GL33_DebugRenderer gl_debug_renderer{};
-
-void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness)
+//DEBUG
+void GL33_DrawDebug(const DebugRenderer &_renderer, float line_thickness)
 {
-  auto it = shaders_.find(HRL_DebugShader);
-  if (it == shaders_.end())
-  {
-    SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_FATAL, "GL33_DrawDebug error : debug shader doesn't exists");
-    return;
-  }
-  auto* s = it->second;
-  //on set CurrentShader pour spécifier que les prochains calls utiliseront ce shader
-  currentShader = s;
-  s->Use();
 
-  s->SetMat4("projection", cached_proj_mat_);
-  s->SetMat4("view", cached_view_mat_);
-
-  //bind vao and initialize opengl evironement
-  glBindVertexArray(vao[Debug_Buffer]);
-  glBindBuffer(GL_ARRAY_BUFFER, vbo[Debug_Buffer]);
-
-  glEnable(GL_DEPTH_TEST);
-
-  //remplacer par une seule fonction dans la vtable pour eviter de le faire a chaque frames
-  glLineWidth(line_thickness);
-
-  // lignes
-  if (!_renderer.lines.empty())
-  {
-    size_t size = _renderer.lines.size() * sizeof(DebugVertex);
-
-    //réalloue si le buffer est trop petit
-    if (size > gl_debug_renderer.current_buffer_size)
-    {
-      glBufferData(GL_ARRAY_BUFFER, (GLsizei)size, _renderer.lines.data(), GL_STREAM_DRAW);
-      gl_debug_renderer.current_buffer_size = size;
-    }
-    else
-    {
-      glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizei)size, _renderer.lines.data());
-    }
-
-    glDrawArrays(GL_LINES, 0, (GLsizei)_renderer.lines.size());
-  }
-
-  // triangles
-  if (!_renderer.triangles.empty())
-  {
-    size_t size = _renderer.triangles.size() * sizeof(DebugVertex);
-
-    if (size > gl_debug_renderer.current_buffer_size)
-    {
-      glBufferData(GL_ARRAY_BUFFER, (GLsizei)size, _renderer.triangles.data(), GL_STREAM_DRAW);
-      gl_debug_renderer.current_buffer_size = size;
-    }
-    else
-    {
-      glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizei)size, _renderer.triangles.data());
-    }
-
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)_renderer.triangles.size());
-  }
 }
 
 
-//Requests//
+
+
+//HRL REQUESTS
 int GL33_IsValidTexture(HRL_id tex)
 {
-  auto it = textures_.find(tex);
-  if (it == textures_.end())
-  {
-    return 0;
-  }
-  return 1;
+	auto it = bck_->textures.find(tex);
+	if (it == bck_->textures.end())
+	{
+		return 0;
+	}
+	return 1;
 }
-
 int GL33_IsValidShader(HRL_id shader)
 {
-  auto it = shaders_.find(shader);
-  if (it == shaders_.end())
-  {
-    return 0;
-  }
-  return 1;
+	auto it = bck_->shaders.find(shader);
+	if (it == bck_->shaders.end())
+	{
+		return 0;
+	}
+	return 1;
 }
 
 
 
 ///////// HRL_GL (hrl_gl.h) /////////
-
 unsigned int HRL_GL_GetTextureGL_ID(HRL_id _textureid)
 {
-  auto it = textures_.find(_textureid);
-  if (it == textures_.end())
-  {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetTextureGL_ID error : Texture ID doesn't exists");
-    return GL_INVALID_VALUE;
-  }
+	auto it = bck_->textures.find(_textureid);
+	if (it == bck_->textures.end())
+	{
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetTextureGL_ID error : Texture ID doesn't exists");
+		return GL_INVALID_VALUE;
+	}
 
-  return it->second->GetGL_ID();
+	return it->second->GetGL_ID();
 }
-
-
 unsigned int HRL_GL_GetShaderGL_ID(HRL_id _shaderid)
 {
-  auto it = shaders_.find(_shaderid);
-  if (it == shaders_.end())
-  {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetShaderGL_ID error : Shader ID doesn't exists");
-    return GL_INVALID_VALUE;
-  }
+	auto it = bck_->shaders.find(_shaderid);
+	if (it == bck_->shaders.end())
+	{
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetShaderGL_ID error : Shader ID doesn't exists");
+		return GL_INVALID_VALUE;
+	}
 
-  return it->second->GetId();
+	return it->second->GetId();
 }
-
 unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid)
 {
-  auto it = gpu_scenes_.find(_sceneid);
-  if (it == gpu_scenes_.end())
-  {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneTextureGL_ID : scene ID is not valid");
-    return GL_INVALID_VALUE;
-  }
+	auto it = bck_->gpu_scenes.find(_sceneid);
+	if (it == bck_->gpu_scenes.end())
+	{
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneTextureGL_ID : scene ID is not valid");
+		return GL_INVALID_VALUE;
+	}
 
-  return it->second->texture_;
+	return it->second->texture;
 }

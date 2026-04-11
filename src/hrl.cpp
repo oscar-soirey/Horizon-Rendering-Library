@@ -8,7 +8,6 @@
 
 #include "core/backend_vtable.h"
 #include "core/object_types.h"
-//on inclus utils functions car hrl.cpp contient la définition de std::string lastError;
 #include "core/utils_functions.h"
 
 #include "backend/opengl33/gl33_backend.h"
@@ -26,58 +25,17 @@
 #include <stb/stb_truetype.h>
 
 
+static HRL_Context ctx_;
+
 //vtable utilisée pour appeller les fonctions, ne doit jamais etre modifiée apres Init()
 static HRL_vtable g_Backend;
 
 
-//erreurs//
-HRL_Interal_Error lastError{};
-HRL_ErrorCallback error_callback_;
+HRL_Context* GetPrivateContext()
+{
+	return &ctx_;
+}
 
-
-//variables window//
-unsigned int window_width_;
-unsigned int window_height_;
-
-
-//variables textures//
-HRL_uint textureMinFilter = HRL_Filter_Linear;
-HRL_uint textureMagFilter = HRL_Filter_Linear;
-
-
-
-//texte - structure backend API only, pas besoin d'y acceder avec le backend
-typedef struct {
-	stbtt_fontinfo             info;
-	std::vector<unsigned char> ttf_buffer;
-}HRL_Font;
-
-
-//objects//
-typedef struct {
-	std::unordered_map<HRL_id, HRL_Mesh*> meshes;
-	std::unordered_map<HRL_id, HRL_Light*> lights;
-	std::unordered_map<HRL_id, HRL_Viewport*> viewports;
-	std::unordered_map<HRL_id, HRL_Camera*> cameras;
-	std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
-}hrl_scene_t;
-static std::unordered_map<HRL_id, hrl_scene_t*> scenes_;
-
-//ressources copié des scenes (pour favoriser l'acces)
-static std::unordered_map<HRL_id, HRL_Mesh*> meshes_;
-static std::unordered_map<HRL_id, HRL_Light*> lights_;
-static std::unordered_map<HRL_id, HRL_Viewport*> viewports_;
-static std::unordered_map<HRL_id, HRL_Camera*> cameras_;
-static std::unordered_map<HRL_id, HRL_PostProcess*> post_processes_;
-
-//ressources globales
-static std::unordered_map<HRL_id, HRL_Material*> materials_;
-static std::unordered_map<HRL_id, HRL_Font*> fonts_;
-
-
-//debugs triés par scenes
-static std::unordered_map<HRL_id, DebugRenderer> debug_renderers{};
-static float debug_line_thickness = 1.f;
 
 
 //Utils Non-API Functions :
@@ -106,8 +64,8 @@ std::vector<HRL_Mesh*> GetSortedSprites(hrl_scene_t* _scene)
 
 std::vector<HRL_Light*> GetLightsVector(/*HRL_id _scene*/)
 {/**
-	auto it = scenes_.find(_scene);
-	if (it == scenes_.end())
+	auto it = ctx_.scenes.find(_scene);
+	if (it == ctx_.scenes.end())
 	{
 		return {};
 	}
@@ -127,9 +85,9 @@ std::vector<HRL_Light*> GetLightsVector(/*HRL_id _scene*/)
 	std::vector<HRL_Light*> lvector;
 
 	//on réserve la taille pour eviter l'alocation a chaque boucle
-	lvector.reserve(lights_.size());
+	lvector.reserve(ctx_.lights.size());
 
-	for (const auto& [id, light] : lights_)
+	for (const auto& [id, light] : ctx_.lights)
 	{
 		lvector.push_back(light);
 	}
@@ -188,15 +146,15 @@ void HRL_Init(HRL_uint _api)
 
 void HRL_InitContext(HRL_uint _width, HRL_uint _height, void* _loader)
 {
-	window_width_ = _width;
-	window_height_ = _height;
+	ctx_.window_width  = _width;
+	ctx_.window_height = _height;
 	g_Backend.RHI_InitContext(_width, _height, _loader);
 }
 
 void HRL_Shutdown()
 {
 	//supprimer tous les objets de toutes les scenes
-	for (const auto& [scene_id, scene] : scenes_)
+	for (const auto& [scene_id, scene] : ctx_.scenes)
 	{
 		for (const auto& [id, mesh] : scene->meshes)
 		{
@@ -224,14 +182,26 @@ void HRL_Shutdown()
 
 		delete scene;
 	}
-	scenes_.clear();
+	ctx_.scenes.clear();
 
+	//nettoyer les caches flat
+	ctx_.meshes.clear();
+	ctx_.lights.clear();
+	ctx_.viewports.clear();
+	ctx_.cameras.clear();
+	ctx_.post_processes.clear();
 
-	for (const auto& [id, material] : materials_)
+	for (const auto& [id, material] : ctx_.materials)
 	{
 		delete material;
 	}
-	materials_.clear();
+	ctx_.materials.clear();
+
+	for (const auto& [id, font] : ctx_.fonts)
+	{
+		delete font;
+	}
+	ctx_.fonts.clear();
 
 	g_Backend.RHI_Shutdown();
 }
@@ -244,62 +214,63 @@ void HRL_BeginFrame()
 void HRL_EndFrame()
 {
 	//appels à RHI_DrawMesh, HRI_BindMaterial, etc...
-	for (const auto& [scene_id, scene] : scenes_)
+	for (const auto& [scene_id, scene] : ctx_.scenes)
 	{
 		if (!scene)
 		{
 			SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_EndFrame: Tried to bind an invalid scene");
 			continue;
 		}
+		/**
+				g_Backend.RHI_BindScene(scene_id);
+				g_Backend.RHI_ClearScene();
 
-		g_Backend.RHI_BindScene(scene_id);
-		g_Backend.RHI_ClearScene();
-
-		for (const auto& [id, viewport] : scene->viewports)
-		{
-			//camera can be nullptr, just continue if not initialized
-			if (!viewport->camera_)
-			{
-				continue;
-			}
-
-			g_Backend.RHI_BindViewport(viewport);
-			g_Backend.RHI_ComputeFrameMatrices();
-
-			// --- Draw Sprites --- //
-			for (const auto& sprite : GetSortedSprites(scene))
-			{
-				auto mat_it = materials_.find(sprite->material_);
-				if (mat_it == materials_.end())
+				for (const auto& [id, viewport] : scene->viewports)
 				{
-					SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_EndFrame: tried to draw mesh, material not found");
-					continue;
+					//camera can be nullptr, just continue if not initialized
+					if (!viewport->camera_)
+					{
+						continue;
+					}
+
+					g_Backend.RHI_BindViewport(viewport);
+					g_Backend.RHI_ComputeFrameMatrices();
+
+					// --- Draw Sprites --- //
+					for (const auto& sprite : GetSortedSprites(scene))
+					{
+						auto mat_it = ctx_.materials.find(sprite->material_);
+						if (mat_it == ctx_.materials.end())
+						{
+							SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_EndFrame: tried to draw mesh, material not found");
+							continue;
+						}
+						g_Backend.RHI_BindMaterial(mat_it->second);
+
+						g_Backend.RHI_DrawMesh(sprite);
+					}
+
+					auto it_debug = ctx_.debug_renderers.find(scene_id);
+					if (it_debug != ctx_.debug_renderers.end())
+					{
+						g_Backend.RHI_DrawDebug(it_debug->second, ctx_.debug_line_thickness);
+					}
+
+					//clear le debug a chaque frame
+					ctx_.debug_renderers.clear();
+
+					// --- Mettre ici le draw des mesh 3D --- //
 				}
-				g_Backend.RHI_BindMaterial(mat_it->second);
-
-				g_Backend.RHI_DrawMesh(sprite);
-			}
-
-			auto it_debug = debug_renderers.find(scene_id);
-			if (it_debug != debug_renderers.end())
-			{
-				g_Backend.RHI_DrawDebug(it_debug->second, debug_line_thickness);
-			}
-
-			//clear le debug a chaque frame
-			debug_renderers.clear();
-
-			// --- Mettre ici le draw des mesh 3D --- //
-		}
+			}*/
+		g_Backend.RHI_RenderScene(scene, scene_id);
 	}
-
-	g_Backend.RHI_ResetFramebuffer();
+	//g_Backend.RHI_ResetFramebuffer();
 }
 
 void HRL_WindowResizeCallback(int _width, int _height)
 {
-	window_width_ = _width;
-	window_height_ = _height;
+	ctx_.window_width  = _width;
+	ctx_.window_height = _height;
 }
 
 
@@ -307,10 +278,10 @@ HRL_Error HRL_GetLastError(const char** _detail, HRL_Severity* _severity)
 {
 	//on stocke dans une var statique pour eviter un use after free
 	static std::string detail;
-	detail = lastError.detail;
-	*_detail = detail.c_str();
-	*_severity = lastError.severity;
-	return lastError.code;
+	detail     = ctx_.last_error.detail;
+	*_detail   = detail.c_str();
+	*_severity = ctx_.last_error.severity;
+	return ctx_.last_error.code;
 }
 
 constexpr const char* errors_str[]={
@@ -358,34 +329,34 @@ const char* HRL_SeverityEnumToString(HRL_Severity sev)
 
 void HRL_RegisterErrorCallback(HRL_ErrorCallback _callback)
 {
-	error_callback_ = _callback;
+	ctx_.error_callback = _callback;
 }
 
 
 //Meshes//
 HRL_id HRL_CreateMeshSprite(HRL_id _sceneid)
 {
-	auto it_scene = scenes_.find(_sceneid);
-	if (it_scene == scenes_.end())
+	auto it_scene = ctx_.scenes.find(_sceneid);
+	if (it_scene == ctx_.scenes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateMeshSprite: invalid scene ID");
 		return HRL_InvalidID;
 	}
 	auto* m = new HRL_MeshSprite();
 	m->scene_ = _sceneid;
-	m->type_ = HRL_Sprite;
+	m->type_  = HRL_Sprite;
 
 	HRL_id newId = GenerateHRL_ID();
 	it_scene->second->meshes.emplace(newId, m);
-	meshes_.emplace(newId, m);
+	ctx_.meshes.emplace(newId, m);
 
 	return newId;
 }
 
 void HRL_SetMeshPivotPoint(HRL_id _meshid, float x, float y, float z)
 {
-	auto it = meshes_.find(_meshid);
-	if (it == meshes_.end())
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshPivotPoint: invalid ID");
 		return;
@@ -400,8 +371,8 @@ void HRL_SetSpriteRegion(HRL_id _meshid, float min_u, float min_v, float max_u, 
 		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetSpriteRegion: minimum cannot be greater than maximum");
 		return;
 	}
-	auto it = meshes_.find(_meshid);
-	if (it == meshes_.end())
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetSpriteRegion: invalid ID");
 		return;
@@ -420,27 +391,27 @@ void HRL_SetSpriteRegion(HRL_id _meshid, float min_u, float min_v, float max_u, 
 
 void HRL_DeleteMesh(HRL_id _meshid)
 {
-	auto it = meshes_.find(_meshid);
-	if (it == meshes_.end())
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteMesh: invalid ID");
 		return;
 	}
 
-	auto scene_it = scenes_.find(it->second->scene_);
-	if (scene_it != scenes_.end())
+	auto scene_it = ctx_.scenes.find(it->second->scene_);
+	if (scene_it != ctx_.scenes.end())
 	{
 		scene_it->second->meshes.erase(_meshid);
 	}
 
 	delete it->second;
-	meshes_.erase(it);
+	ctx_.meshes.erase(it);
 }
 
 void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid)
 {
-	auto it = meshes_.find(_meshid);
-	if (it == meshes_.end())
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshMaterial: invalid ID");
 		return;
@@ -450,8 +421,8 @@ void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid)
 
 void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
 {
-	auto it = meshes_.find(_meshid);
-	if (it == meshes_.end())
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshLocation: invalid ID");
 		return;
@@ -461,8 +432,8 @@ void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
 
 void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll)
 {
-	auto it = meshes_.find(_meshid);
-	if (it == meshes_.end())
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshRotation: invalid ID");
 		return;
@@ -473,8 +444,8 @@ void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll)
 
 void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z)
 {
-	auto it = meshes_.find(_meshid);
-	if (it == meshes_.end())
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshScale: invalid ID");
 		return;
@@ -484,8 +455,8 @@ void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z)
 
 void HRL_SetSpriteDrawOrder(HRL_id _meshid, float _draworder)
 {
-	auto it = meshes_.find(_meshid);
-	if (it == meshes_.end())
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetSpriteDrawOrder: invalid ID");
 		return;
@@ -498,8 +469,8 @@ void HRL_SetSpriteDrawOrder(HRL_id _meshid, float _draworder)
 //Lights//
 HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_uint _type)
 {
-	auto it_scene = scenes_.find(_sceneid);
-	if (it_scene == scenes_.end())
+	auto it_scene = ctx_.scenes.find(_sceneid);
+	if (it_scene == ctx_.scenes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateLight: invalid scene ID");
 		return HRL_InvalidID;
@@ -512,7 +483,7 @@ HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_uint _type)
 
 		HRL_id newId = GenerateHRL_ID();
 		it_scene->second->lights.emplace(newId, l);
-		lights_.emplace(newId, l);
+		ctx_.lights.emplace(newId, l);
 
 		g_Backend.RHI_UpdateLights(GetLightsVector());
 
@@ -524,22 +495,34 @@ HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_uint _type)
 
 void HRL_DeleteLight(HRL_id _lightid)
 {
-	auto it = lights_.find(_lightid);
-	if (it == lights_.end())
+	auto it = ctx_.lights.find(_lightid);
+	if (it == ctx_.lights.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteLight: invalid ID");
 		return;
 	}
+
+	//retire de la scene propriétaire
+	for (auto& [scene_id, scene] : ctx_.scenes)
+	{
+		auto sit = scene->lights.find(_lightid);
+		if (sit != scene->lights.end())
+		{
+			scene->lights.erase(sit);
+			break;
+		}
+	}
+
 	delete it->second;
-	lights_.erase(it);
+	ctx_.lights.erase(it);
 
 	g_Backend.RHI_UpdateLights(GetLightsVector());
 }
 
 void HRL_SetLightColor(HRL_id _lightid, float x, float y, float z)
 {
-	auto it = lights_.find(_lightid);
-	if (it == lights_.end())
+	auto it = ctx_.lights.find(_lightid);
+	if (it == ctx_.lights.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightColor: invalid ID");
 		return;
@@ -552,8 +535,8 @@ void HRL_SetLightColor(HRL_id _lightid, float x, float y, float z)
 
 void HRL_SetLightIntensity(HRL_id _lightid, float i)
 {
-	auto it = lights_.find(_lightid);
-	if (it == lights_.end())
+	auto it = ctx_.lights.find(_lightid);
+	if (it == ctx_.lights.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightIntensity: invalid ID");
 		return;
@@ -565,8 +548,8 @@ void HRL_SetLightIntensity(HRL_id _lightid, float i)
 
 void HRL_SetLightAttenuation(HRL_id _lightid, float a)
 {
-	auto it = lights_.find(_lightid);
-	if (it == lights_.end())
+	auto it = ctx_.lights.find(_lightid);
+	if (it == ctx_.lights.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightAttenuation: invalid ID");
 		return;
@@ -578,8 +561,8 @@ void HRL_SetLightAttenuation(HRL_id _lightid, float a)
 
 void HRL_SetLightLocation(HRL_id _lightid, float x, float y, float z)
 {
-	auto it = lights_.find(_lightid);
-	if (it == lights_.end())
+	auto it = ctx_.lights.find(_lightid);
+	if (it == ctx_.lights.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightLocation: invalid ID");
 		return;
@@ -592,8 +575,8 @@ void HRL_SetLightLocation(HRL_id _lightid, float x, float y, float z)
 
 void HRL_SetLightRotation(HRL_id _lightid, float pitch, float yaw, float roll)
 {
-	auto it = lights_.find(_lightid);
-	if (it == lights_.end())
+	auto it = ctx_.lights.find(_lightid);
+	if (it == ctx_.lights.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightRotation: invalid ID");
 		return;
@@ -645,8 +628,8 @@ HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
 	float bg_r, float bg_g, float bg_b, float bg_a
 )
 {
-	auto it = fonts_.find(_fontid);
-	if (it == fonts_.end())
+	auto it = ctx_.fonts.find(_fontid);
+	if (it == ctx_.fonts.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateTextureFromText: invalid font ID");
 		return HRL_InvalidID;
@@ -669,7 +652,7 @@ HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
 
 void HRL_ClearScreen()
 {
-	for (const auto& s : scenes_)
+	/**for (const auto& s : ctx_.scenes)
 	{
 		if (!s.second)
 		{
@@ -678,7 +661,7 @@ void HRL_ClearScreen()
 		}
 		g_Backend.RHI_BindScene(s.first);
 		g_Backend.RHI_ResetFramebuffer();
-	}
+	}*/
 }
 
 
@@ -687,47 +670,44 @@ void HRL_ClearScreen()
 HRL_id HRL_CreateScene(int _renderOnScreen)
 {
 	auto* scene = new hrl_scene_t();
+	scene->draw_on_screen = _renderOnScreen;
+
 	HRL_id newId = GenerateHRL_ID();
-	scenes_.emplace(newId, scene);
+	ctx_.scenes.emplace(newId, scene);
+
 	g_Backend.RHI_CreateScene(newId, _renderOnScreen);
 	return newId;
+
+
 }
 
 void HRL_DeleteScene(HRL_id _sceneid)
 {
-	auto it = scenes_.find(_sceneid);
-	if (it == scenes_.end())
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteScene: invalid scene ID");
 		return;
 	}
 
+	//on collecte les IDs d'abord pour eviter l'invalidation d'iterateur
+	std::vector<HRL_id> mesh_ids, light_ids, viewport_ids, camera_ids;
+	for (const auto& [id, mesh]     : it->second->meshes)     mesh_ids.push_back(id);
+	for (const auto& [id, light]    : it->second->lights)     light_ids.push_back(id);
+	for (const auto& [id, viewport] : it->second->viewports)  viewport_ids.push_back(id);
+	for (const auto& [id, camera]   : it->second->cameras)    camera_ids.push_back(id);
+
 	//delete every objects that ows the scene
-	for (const auto& [id, mesh] : it->second->meshes)
-	{
-		HRL_DeleteMesh(id);
-	}
-
-	for (const auto& [id, light] : it->second->lights)
-	{
-		HRL_DeleteLight(id);
-	}
-
-	for (const auto& [id, viewport] : it->second->viewports)
-	{
-		HRL_DeleteViewport(id);
-	}
-
-	for (const auto& [id, camera] : it->second->cameras)
-	{
-		HRL_DeleteCamera(id);
-	}
+	for (auto id : mesh_ids)     HRL_DeleteMesh(id);
+	for (auto id : light_ids)    HRL_DeleteLight(id);
+	for (auto id : viewport_ids) HRL_DeleteViewport(id);
+	for (auto id : camera_ids)   HRL_DeleteCamera(id);
 
 	delete it->second;
 
 	g_Backend.RHI_DeleteScene(_sceneid);
 
-	scenes_.erase(it);
+	ctx_.scenes.erase(it);
 }
 
 
@@ -746,15 +726,15 @@ void HRL_EnableColorPickingBuffer(HRL_id _sceneid, int _enable)
 //Post Process//
 HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid, int priority)
 {
-	auto it_scene = scenes_.find(_sceneid);
-	if (it_scene == scenes_.end())
+	auto it_scene = ctx_.scenes.find(_sceneid);
+	if (it_scene == ctx_.scenes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreatePostProcess: invalid scene ID");
 		return HRL_InvalidID;
 	}
 
-	auto it = materials_.find(_matid);
-	if (it == materials_.end())
+	auto it = ctx_.materials.find(_matid);
+	if (it == ctx_.materials.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreatePostProcess: invalid material ID");
 		return HRL_InvalidID;
@@ -762,28 +742,40 @@ HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid, int priority)
 
 	auto p = new HRL_PostProcess();
 	p->material_ = _matid;
-	p->priority = priority;
+	p->priority  = priority;
 
 	HRL_id newId = GenerateHRL_ID();
 
 	g_Backend.RHI_CreatePostProcess(_matid, priority);
 
 	it_scene->second->post_processes.emplace(newId, p);
-	post_processes_.emplace(newId, p);
+	ctx_.post_processes.emplace(newId, p);
 
 	return newId;
 }
 void HRL_DeletePostProcess(HRL_id _postid)
 {
-	auto it = post_processes_.find(_postid);
-	if (it == post_processes_.end())
+	auto it = ctx_.post_processes.find(_postid);
+	if (it == ctx_.post_processes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeletePostProcess: invalid ID");
 		return;
 	}
+
+	//retire de la scene propriétaire
+	for (auto& [scene_id, scene] : ctx_.scenes)
+	{
+		auto sit = scene->post_processes.find(_postid);
+		if (sit != scene->post_processes.end())
+		{
+			scene->post_processes.erase(sit);
+			break;
+		}
+	}
+
 	g_Backend.RHI_DeletePostProcess(_postid);
 	delete it->second;
-	post_processes_.erase(it);
+	ctx_.post_processes.erase(it);
 }
 
 
@@ -807,27 +799,27 @@ HRL_id HRL_CreateMaterial(HRL_id _shaderid)
 	m->shader_ = _shaderid;
 
 	HRL_id newId = GenerateHRL_ID();
-	materials_.emplace(newId, m);
+	ctx_.materials.emplace(newId, m);
 
 	return newId;
 }
 
 void HRL_DeleteMaterial(HRL_id _matid)
 {
-	auto it = materials_.find(_matid);
-	if (it == materials_.end())
+	auto it = ctx_.materials.find(_matid);
+	if (it == ctx_.materials.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteMaterial: invalid ID");
 		return;
 	}
 	delete it->second;
-	materials_.erase(it);
+	ctx_.materials.erase(it);
 }
 
 void HRL_MaterialSetInt(HRL_id _matid, const char* _uniformName, int a)
 {
-	auto it = materials_.find(_matid);
-	if (it == materials_.end())
+	auto it = ctx_.materials.find(_matid);
+	if (it == ctx_.materials.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetInt: invalid ID");
 		return;
@@ -838,8 +830,8 @@ void HRL_MaterialSetInt(HRL_id _matid, const char* _uniformName, int a)
 
 void HRL_MaterialSetTexture(HRL_id _matid, const char* _uniformName, HRL_id _textureid)
 {
-	auto it_mat = materials_.find(_matid);
-	if (it_mat == materials_.end())
+	auto it_mat = ctx_.materials.find(_matid);
+	if (it_mat == ctx_.materials.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetTexture: invalid material ID");
 		return;
@@ -851,8 +843,8 @@ void HRL_MaterialSetTexture(HRL_id _matid, const char* _uniformName, HRL_id _tex
 
 void HRL_MaterialSetBool(HRL_id _matid, const char* _uniformName, int a)
 {
-	auto it = materials_.find(_matid);
-	if (it == materials_.end())
+	auto it = ctx_.materials.find(_matid);
+	if (it == ctx_.materials.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetBool: invalid ID");
 		return;
@@ -862,8 +854,8 @@ void HRL_MaterialSetBool(HRL_id _matid, const char* _uniformName, int a)
 
 void HRL_MaterialSetFloat(HRL_id _matid, const char* _uniformName, float a)
 {
-	auto it = materials_.find(_matid);
-	if (it == materials_.end())
+	auto it = ctx_.materials.find(_matid);
+	if (it == ctx_.materials.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetFloat: invalid ID");
 		return;
@@ -873,8 +865,8 @@ void HRL_MaterialSetFloat(HRL_id _matid, const char* _uniformName, float a)
 
 void HRL_MaterialSetVec2(HRL_id _matid, const char* _uniformName, float x, float y)
 {
-	auto it = materials_.find(_matid);
-	if (it == materials_.end())
+	auto it = ctx_.materials.find(_matid);
+	if (it == ctx_.materials.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec2: invalid ID");
 		return;
@@ -884,8 +876,8 @@ void HRL_MaterialSetVec2(HRL_id _matid, const char* _uniformName, float x, float
 
 void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float x, float y, float z)
 {
-	auto it = materials_.find(_matid);
-	if (it == materials_.end())
+	auto it = ctx_.materials.find(_matid);
+	if (it == ctx_.materials.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec3: invalid ID");
 		return;
@@ -895,8 +887,8 @@ void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float x, float
 
 void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float y, float z, float w)
 {
-	auto it = materials_.find(_matid);
-	if (it == materials_.end())
+	auto it = ctx_.materials.find(_matid);
+	if (it == ctx_.materials.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec4: invalid ID");
 		return;
@@ -908,19 +900,19 @@ void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float
 
 HRL_id HRL_CreateViewport(HRL_id _sceneid, HRL_id _cameraid, float x, float y, float _width, float _height)
 {
-	auto it_scene = scenes_.find(_sceneid);
-	if (it_scene == scenes_.end())
+	auto it_scene = ctx_.scenes.find(_sceneid);
+	if (it_scene == ctx_.scenes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateViewport: invalid scene ID");
 		return HRL_InvalidID;
 	}
 
-	HRL_Camera* cam=nullptr;
+	HRL_Camera* cam = nullptr;
 
-	auto it = cameras_.find(_cameraid);
-	if (it != cameras_.end())
+	auto it = ctx_.cameras.find(_cameraid);
+	if (it != ctx_.cameras.end())
 	{
-		cam=it->second;
+		cam = it->second;
 	}
 
 	//camera valide
@@ -928,27 +920,39 @@ HRL_id HRL_CreateViewport(HRL_id _sceneid, HRL_id _cameraid, float x, float y, f
 
 	HRL_id newId = GenerateHRL_ID();
 	it_scene->second->viewports.emplace(newId, v);
-	viewports_.emplace(newId, v);
+	ctx_.viewports.emplace(newId, v);
 
 	return newId;
 }
 
 void HRL_DeleteViewport(HRL_id _viewportid)
 {
-	auto it = viewports_.find(_viewportid);
-	if (it == viewports_.end())
+	auto it = ctx_.viewports.find(_viewportid);
+	if (it == ctx_.viewports.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteViewport: invalid ID");
 		return;
 	}
+
+	//retire de la scene propriétaire
+	for (auto& [scene_id, scene] : ctx_.scenes)
+	{
+		auto sit = scene->viewports.find(_viewportid);
+		if (sit != scene->viewports.end())
+		{
+			scene->viewports.erase(sit);
+			break;
+		}
+	}
+
 	delete it->second;
-	viewports_.erase(it);
+	ctx_.viewports.erase(it);
 }
 
 void HRL_SetViewportCamera(HRL_id _viewportid, HRL_id _camid)
 {
-	auto viewport_it = viewports_.find(_viewportid);
-	if (viewport_it == viewports_.end())
+	auto viewport_it = ctx_.viewports.find(_viewportid);
+	if (viewport_it == ctx_.viewports.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetViewportCamera: invalid viewport ID");
 		return;
@@ -956,8 +960,8 @@ void HRL_SetViewportCamera(HRL_id _viewportid, HRL_id _camid)
 
 	HRL_Camera* cam = nullptr;
 
-	auto cam_it = cameras_.find(_camid);
-	if (cam_it != cameras_.end())
+	auto cam_it = ctx_.cameras.find(_camid);
+	if (cam_it != ctx_.cameras.end())
 	{
 		cam = cam_it->second;
 	}
@@ -967,24 +971,24 @@ void HRL_SetViewportCamera(HRL_id _viewportid, HRL_id _camid)
 
 void HRL_SetViewportRect(HRL_id _viewportid, float x, float y, float _width, float _height)
 {
-	auto it = viewports_.find(_viewportid);
-	if (it == viewports_.end())
+	auto it = ctx_.viewports.find(_viewportid);
+	if (it == ctx_.viewports.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetViewportRect: invalid ID");
 		return;
 	}
-	it->second->x_ = x;
-	it->second->y_ = y;
-	it->second->width_= _width;
-	it->second->height_= _height;
+	it->second->x_      = x;
+	it->second->y_      = y;
+	it->second->width_  = _width;
+	it->second->height_ = _height;
 }
 
 
 
 HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_uint _type)
 {
-	auto it_scene = scenes_.find(_sceneid);
-	if (it_scene == scenes_.end())
+	auto it_scene = ctx_.scenes.find(_sceneid);
+	if (it_scene == ctx_.scenes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateCamera: invalid scene ID");
 		return HRL_InvalidID;
@@ -1005,7 +1009,7 @@ HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_uint _type)
 			);
 		HRL_id newId = GenerateHRL_ID();
 		it_scene->second->cameras.emplace(newId, cam);
-		cameras_.emplace(newId, cam);
+		ctx_.cameras.emplace(newId, cam);
 		return newId;
 	}
 	else
@@ -1017,21 +1021,33 @@ HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_uint _type)
 
 void HRL_DeleteCamera(HRL_id _camid)
 {
-	auto it = cameras_.find(_camid);
-	if (it == cameras_.end())
+	auto it = ctx_.cameras.find(_camid);
+	if (it == ctx_.cameras.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteCamera: invalid ID");
 		return;
 	}
+
+	//retire de la scene propriétaire
+	for (auto& [scene_id, scene] : ctx_.scenes)
+	{
+		auto sit = scene->cameras.find(_camid);
+		if (sit != scene->cameras.end())
+		{
+			scene->cameras.erase(sit);
+			break;
+		}
+	}
+
 	delete it->second;
-	cameras_.erase(it);
+	ctx_.cameras.erase(it);
 }
 
 
 void HRL_SetCameraType(HRL_id _camid, HRL_uint _type)
 {
-	auto it = cameras_.find(_camid);
-	if (it == cameras_.end())
+	auto it = ctx_.cameras.find(_camid);
+	if (it == ctx_.cameras.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraType: invalid ID");
 		return;
@@ -1041,8 +1057,8 @@ void HRL_SetCameraType(HRL_id _camid, HRL_uint _type)
 
 void HRL_SetCameraOrthoVertical(HRL_id _camid, float _height)
 {
-	auto it = cameras_.find(_camid);
-	if (it == cameras_.end())
+	auto it = ctx_.cameras.find(_camid);
+	if (it == ctx_.cameras.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraOrthoVertical: invalid ID");
 		return;
@@ -1059,8 +1075,8 @@ void HRL_SetCameraOrthoVertical(HRL_id _camid, float _height)
 
 void HRL_SetCameraPerspectiveFov(HRL_id _camid, float _fov)
 {
-	auto it = cameras_.find(_camid);
-	if (it == cameras_.end())
+	auto it = ctx_.cameras.find(_camid);
+	if (it == ctx_.cameras.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraPerspectiveFov: invalid ID");
 		return;
@@ -1077,8 +1093,8 @@ void HRL_SetCameraPerspectiveFov(HRL_id _camid, float _fov)
 
 void HRL_SetCameraNearPlane(HRL_id _camid, float _nearPlane)
 {
-	auto it = cameras_.find(_camid);
-	if (it == cameras_.end())
+	auto it = ctx_.cameras.find(_camid);
+	if (it == ctx_.cameras.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraNearPlane: invalid ID");
 		return;
@@ -1088,8 +1104,8 @@ void HRL_SetCameraNearPlane(HRL_id _camid, float _nearPlane)
 
 void HRL_SetCameraFarPlane(HRL_id _camid, float _farPlane)
 {
-	auto it = cameras_.find(_camid);
-	if (it == cameras_.end())
+	auto it = ctx_.cameras.find(_camid);
+	if (it == ctx_.cameras.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraFarPlane: invalid ID");
 		return;
@@ -1099,8 +1115,8 @@ void HRL_SetCameraFarPlane(HRL_id _camid, float _farPlane)
 
 void HRL_SetCameraPosition(HRL_id _camid, float x, float y, float z)
 {
-	auto it = cameras_.find(_camid);
-	if (it == cameras_.end())
+	auto it = ctx_.cameras.find(_camid);
+	if (it == ctx_.cameras.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraPosition: invalid ID");
 		return;
@@ -1110,8 +1126,8 @@ void HRL_SetCameraPosition(HRL_id _camid, float x, float y, float z)
 
 void HRL_SetCameraRotation(HRL_id _camid, float pitch, float yaw, float roll)
 {
-	auto it = cameras_.find(_camid);
-	if (it == cameras_.end())
+	auto it = ctx_.cameras.find(_camid);
+	if (it == ctx_.cameras.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraRotation: invalid ID");
 		return;
@@ -1134,8 +1150,8 @@ void HRL_GetViewMatrix(float *aa)
 
 void HRL_GetModelMatrix(HRL_id _meshid, float *aa)
 {
-	auto it = meshes_.find(_meshid);
-	if (it == meshes_.end())
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetModelMatrix: Invalid ID");
 		return;
@@ -1147,26 +1163,26 @@ void HRL_GetModelMatrix(HRL_id _meshid, float *aa)
 
 void HRL_SetDebugLineThickness(float a)
 {
-	debug_line_thickness = a;
+	ctx_.debug_line_thickness = a;
 }
 
 void HRL_DrawDebugSegment(HRL_id _sceneid, float a_x, float a_y, float a_z, float b_x, float b_y, float b_z, float r, float g, float b)
 {
-	auto it = scenes_.find(_sceneid);
-	if (it == scenes_.end())
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugSegment: invalid scene ID");
 		return;
 	}
 
-	debug_renderers[_sceneid].lines.emplace_back(a_x, a_y, a_z, r, g, b);
-	debug_renderers[_sceneid].lines.emplace_back(b_x, b_y, b_z, r, g, b);
+	ctx_.debug_renderers[_sceneid].lines.emplace_back(a_x, a_y, a_z, r, g, b);
+	ctx_.debug_renderers[_sceneid].lines.emplace_back(b_x, b_y, b_z, r, g, b);
 }
 
 void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode, const float *vertices_x, const float *vertices_y, const float *vertices_z, int vertices_count, float r, float g, float b)
 {
-	auto it = scenes_.find(_sceneid);
-	if (it == scenes_.end())
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugPolygon: invalid scene ID");
 		return;
@@ -1177,24 +1193,24 @@ void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode, const float *vertices
 		for (int i=1; i < vertices_count-1; i++)
 		{
 			//pivot
-			debug_renderers[_sceneid].triangles.emplace_back(vertices_x[0], vertices_y[0], vertices_z[0], r, g, b);
+			ctx_.debug_renderers[_sceneid].triangles.emplace_back(vertices_x[0], vertices_y[0], vertices_z[0], r, g, b);
 			//i
-			debug_renderers[_sceneid].triangles.emplace_back(vertices_x[i], vertices_y[i], vertices_z[i], r, g, b);
+			ctx_.debug_renderers[_sceneid].triangles.emplace_back(vertices_x[i], vertices_y[i], vertices_z[i], r, g, b);
 			//i+1
-			debug_renderers[_sceneid].triangles.emplace_back(vertices_x[i+1], vertices_y[i+1], vertices_z[i+1], r, g, b);
+			ctx_.debug_renderers[_sceneid].triangles.emplace_back(vertices_x[i+1], vertices_y[i+1], vertices_z[i+1], r, g, b);
 		}
 	}
 	else if (_mode == HRL_DebugHollow)
 	{
 		for (int i=0; i < vertices_count - 1; i++)
 		{
-			debug_renderers[_sceneid].lines.emplace_back(vertices_x[i], vertices_y[i], vertices_z[i], r, g, b);
-			debug_renderers[_sceneid].lines.emplace_back(vertices_x[i+1], vertices_y[i+1], vertices_z[i+1], r, g, b);
+			ctx_.debug_renderers[_sceneid].lines.emplace_back(vertices_x[i], vertices_y[i], vertices_z[i], r, g, b);
+			ctx_.debug_renderers[_sceneid].lines.emplace_back(vertices_x[i+1], vertices_y[i+1], vertices_z[i+1], r, g, b);
 		}
 
 		//line entre le dernier et le 0 pour refermer
-		debug_renderers[_sceneid].lines.emplace_back(vertices_x[vertices_count-1], vertices_y[vertices_count-1], vertices_z[vertices_count-1], r, g, b);
-		debug_renderers[_sceneid].lines.emplace_back(vertices_x[0], vertices_y[0], vertices_z[0], r, g, b);
+		ctx_.debug_renderers[_sceneid].lines.emplace_back(vertices_x[vertices_count-1], vertices_y[vertices_count-1], vertices_z[vertices_count-1], r, g, b);
+		ctx_.debug_renderers[_sceneid].lines.emplace_back(vertices_x[0], vertices_y[0], vertices_z[0], r, g, b);
 	}
 	else
 	{
@@ -1204,8 +1220,8 @@ void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode, const float *vertices
 
 void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode, float center_x, float center_y, float center_z, float radius, int segments, float r, float g, float b)
 {
-	auto it = scenes_.find(_sceneid);
-	if (it == scenes_.end()) { SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugCircle: invalid scene ID"); return; }
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugCircle: invalid scene ID"); return; }
 
 	int seg = segments;
 	auto* vx = (float*)alloca(seg * sizeof(float));
@@ -1225,8 +1241,8 @@ void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode, float center_x, float 
 
 void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode, float a_x, float a_y, float a_z, float b_x, float b_y, float b_z, float radius, int segments, float r, float g, float b)
 {
-	auto it = scenes_.find(_sceneid);
-	if (it == scenes_.end()) { SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugCapsule: invalid scene ID"); return; }
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugCapsule: invalid scene ID"); return; }
 
 	int half_seg = segments / 2;
 
@@ -1249,8 +1265,8 @@ void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode, float a_x, float a_y,
 		float a0 = base_angle - (float)M_PI / 2.f + (float)M_PI * (float)i       / (float)half_seg;
 		float a1 = base_angle - (float)M_PI / 2.f + (float)M_PI * (float)(i + 1) / (float)half_seg;
 
-		debug_renderers[_sceneid].lines.emplace_back(b_x + radius * cosf(a0), b_y + radius * sinf(a0), b_z, r, g, b);
-		debug_renderers[_sceneid].lines.emplace_back(b_x + radius * cosf(a1), b_y + radius * sinf(a1), b_z, r, g, b);
+		ctx_.debug_renderers[_sceneid].lines.emplace_back(b_x + radius * cosf(a0), b_y + radius * sinf(a0), b_z, r, g, b);
+		ctx_.debug_renderers[_sceneid].lines.emplace_back(b_x + radius * cosf(a1), b_y + radius * sinf(a1), b_z, r, g, b);
 	}
 
 	// demi-cercle autour de A — face opposée à B
@@ -1260,31 +1276,31 @@ void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode, float a_x, float a_y,
 		float a0 = base_angle + (float)M_PI / 2.f + (float)M_PI * (float)i       / (float)half_seg;
 		float a1 = base_angle + (float)M_PI / 2.f + (float)M_PI * (float)(i + 1) / (float)half_seg;
 
-		debug_renderers[_sceneid].lines.emplace_back(a_x + radius * cosf(a0), a_y + radius * sinf(a0), a_z, r, g, b);
-		debug_renderers[_sceneid].lines.emplace_back(a_x + radius * cosf(a1), a_y + radius * sinf(a1), a_z, r, g, b);
+		ctx_.debug_renderers[_sceneid].lines.emplace_back(a_x + radius * cosf(a0), a_y + radius * sinf(a0), a_z, r, g, b);
+		ctx_.debug_renderers[_sceneid].lines.emplace_back(a_x + radius * cosf(a1), a_y + radius * sinf(a1), a_z, r, g, b);
 	}
 
 	// deux segments latéraux reliant les demi-cercles
-	debug_renderers[_sceneid].lines.emplace_back(a_x + nx * radius, a_y + ny * radius, a_z, r, g, b);
-	debug_renderers[_sceneid].lines.emplace_back(b_x + nx * radius, b_y + ny * radius, b_z, r, g, b);
+	ctx_.debug_renderers[_sceneid].lines.emplace_back(a_x + nx * radius, a_y + ny * radius, a_z, r, g, b);
+	ctx_.debug_renderers[_sceneid].lines.emplace_back(b_x + nx * radius, b_y + ny * radius, b_z, r, g, b);
 
-	debug_renderers[_sceneid].lines.emplace_back(a_x - nx * radius, a_y - ny * radius, a_z, r, g, b);
-	debug_renderers[_sceneid].lines.emplace_back(b_x - nx * radius, b_y - ny * radius, b_z, r, g, b);
+	ctx_.debug_renderers[_sceneid].lines.emplace_back(a_x - nx * radius, a_y - ny * radius, a_z, r, g, b);
+	ctx_.debug_renderers[_sceneid].lines.emplace_back(b_x - nx * radius, b_y - ny * radius, b_z, r, g, b);
 
 }
 
 void HRL_DrawDebugPoint(HRL_id _sceneid, float a_x, float a_y, float a_z, float size, float r, float g, float b)
 {
-	auto it = scenes_.find(_sceneid);
-	if (it == scenes_.end()) { SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugPoint: invalid scene ID"); return; }
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugPoint: invalid scene ID"); return; }
 
 	float h = size * 0.5f;
 
-	debug_renderers[_sceneid].lines.emplace_back(a_x - h, a_y,     a_z, r, g, b);
-	debug_renderers[_sceneid].lines.emplace_back(a_x + h, a_y,     a_z, r, g, b);
+	ctx_.debug_renderers[_sceneid].lines.emplace_back(a_x - h, a_y,     a_z, r, g, b);
+	ctx_.debug_renderers[_sceneid].lines.emplace_back(a_x + h, a_y,     a_z, r, g, b);
 
-	debug_renderers[_sceneid].lines.emplace_back(a_x,     a_y - h, a_z, r, g, b);
-	debug_renderers[_sceneid].lines.emplace_back(a_x,     a_y + h, a_z, r, g, b);
+	ctx_.debug_renderers[_sceneid].lines.emplace_back(a_x,     a_y - h, a_z, r, g, b);
+	ctx_.debug_renderers[_sceneid].lines.emplace_back(a_x,     a_y + h, a_z, r, g, b);
 }
 
 
@@ -1309,21 +1325,21 @@ HRL_id HRL_CreateFont(const char *data, size_t _data_size)
 		return HRL_InvalidID;
 	}
 
-	fonts_.emplace(newId, font);
+	ctx_.fonts.emplace(newId, font);
 
 	return newId;
 }
 
 void HRL_DeleteFont(HRL_id _fontid)
 {
-	auto it = fonts_.find(_fontid);
-	if (it == fonts_.end())
+	auto it = ctx_.fonts.find(_fontid);
+	if (it == ctx_.fonts.end())
 	{
 		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteFont: invalid ID");
 		return;
 	}
 	delete it->second;
-	fonts_.erase(it);
+	ctx_.fonts.erase(it);
 }
 
 
@@ -1333,8 +1349,8 @@ void HRL_DeleteFont(HRL_id _fontid)
 //Is Valid Functions
 int HRL_IsValidMesh(HRL_id _id)
 {
-	auto it = meshes_.find(_id);
-	if (it == meshes_.end())
+	auto it = ctx_.meshes.find(_id);
+	if (it == ctx_.meshes.end())
 	{
 		return 0;
 	}
@@ -1343,8 +1359,8 @@ int HRL_IsValidMesh(HRL_id _id)
 
 int HRL_IsValidLight(HRL_id _id)
 {
-	auto it = lights_.find(_id);
-	if (it == lights_.end())
+	auto it = ctx_.lights.find(_id);
+	if (it == ctx_.lights.end())
 	{
 		return 0;
 	}
@@ -1359,8 +1375,8 @@ int HRL_IsValidTexture(HRL_id _id)
 
 int HRL_IsValidScene(HRL_id _id)
 {
-	auto it = scenes_.find(_id);
-	if (it == scenes_.end())
+	auto it = ctx_.scenes.find(_id);
+	if (it == ctx_.scenes.end())
 	{
 		return 0;
 	}
@@ -1369,8 +1385,8 @@ int HRL_IsValidScene(HRL_id _id)
 
 int HRL_IsValidPostProcess(HRL_id _id)
 {
-	auto it = post_processes_.find(_id);
-	if (it == post_processes_.end())
+	auto it = ctx_.post_processes.find(_id);
+	if (it == ctx_.post_processes.end())
 	{
 		return 0;
 	}
@@ -1385,8 +1401,8 @@ int HRL_IsValidShader(HRL_id _id)
 
 int HRL_IsValidMaterial(HRL_id _id)
 {
-	auto it = materials_.find(_id);
-	if (it == materials_.end())
+	auto it = ctx_.materials.find(_id);
+	if (it == ctx_.materials.end())
 	{
 		return 0;
 	}
@@ -1395,8 +1411,8 @@ int HRL_IsValidMaterial(HRL_id _id)
 
 int HRL_IsValidViewport(HRL_id _id)
 {
-	auto it = viewports_.find(_id);
-	if (it == viewports_.end())
+	auto it = ctx_.viewports.find(_id);
+	if (it == ctx_.viewports.end())
 	{
 		return 0;
 	}
@@ -1405,8 +1421,8 @@ int HRL_IsValidViewport(HRL_id _id)
 
 int HRL_IsValidCamera(HRL_id _id)
 {
-	auto it = cameras_.find(_id);
-	if (it == cameras_.end())
+	auto it = ctx_.cameras.find(_id);
+	if (it == ctx_.cameras.end())
 	{
 		return 0;
 	}
@@ -1415,8 +1431,8 @@ int HRL_IsValidCamera(HRL_id _id)
 
 int HRL_IsValidFont(HRL_id _id)
 {
-	auto it = fonts_.find(_id);
-	if (it == fonts_.end())
+	auto it = ctx_.fonts.find(_id);
+	if (it == ctx_.fonts.end())
 	{
 		return 0;
 	}

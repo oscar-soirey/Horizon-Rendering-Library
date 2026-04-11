@@ -1,16 +1,10 @@
-/**
- * Ce shader ne supporte pas les caracteres non - ASCII, donc il ne faut pas utiliser les accents,
- * meme dans les commentaires
- */
-
 #version 330 core
 
 //vertex/point
 layout(location = 0) in vec2 apos;
 layout(location = 1) in vec2 auv;
-
-//entite/objet
-uniform mat4 model;
+//hold location 2,3,4 and 5 (four vec4)
+layout(location = 2) in mat4 amodel;
 
 //vue/ecran
 uniform mat4 view;
@@ -24,9 +18,9 @@ void main()
     vec4 pos = vec4(apos, 0.0, 1.0);
 
     //on passe les coordonees fragment et uv au fragment shader
-    fragPos = vec3(model * pos);
+    fragPos = vec3(amodel * pos);
     uv = auv;
 
     //garder cet ordre
-    gl_Position = projection * view * model * pos;
+    gl_Position = projection * view * amodel * pos;
 }

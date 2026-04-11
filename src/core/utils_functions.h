@@ -24,9 +24,6 @@ glm::vec3 GetForwardVector(glm::vec3 _rotation);
 glm::vec3 GetRightVector(glm::vec3 _rotation);
 glm::vec3 GetUpVector(glm::vec3 _rotation);
 
-HRL_uint GetTextureMinFilter();
-HRL_uint GetTextureMagFilter();
-
 
 //generate bitmap from text
 class stbtt_fontinfo;

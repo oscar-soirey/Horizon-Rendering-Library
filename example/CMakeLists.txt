@@ -7,7 +7,9 @@ include_directories(src)
 include_directories(third_party)
 
 #Crée l'exécutable
-add_executable(example main.cpp
+add_executable(example
+        main.cpp
+        src/example.cpp
 )
 
 #Déclare libhrl.a comme une bibliothèque IMPORTED
