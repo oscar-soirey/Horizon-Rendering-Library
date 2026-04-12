@@ -902,7 +902,7 @@ HRL_API void HRL_SetAntialiasingMode(HRL_uint _mode);
  * @param _data_size Size of the buffer in bytes.
  * @return HRL_id of the new font, or HRL_InvalidID on failure.
  */
-HRL_API HRL_id HRL_CreateFont(const char* data, size_t _data_size);
+HRL_API HRL_id HRL_CreateFont(const char* _data, size_t _data_size);
 
 /**
  * @brief Destroys a font and frees its associated resources.

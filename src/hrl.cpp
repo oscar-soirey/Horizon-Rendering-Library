@@ -1514,3 +1514,45 @@ int HRL_IsValidFont(HRL_id _id)
 	}
 	return 1;
 }
+
+
+
+void HRL_TakeScreenshot(HRL_id _sceneid, const char *_target_path)
+{
+
+}
+
+void HRL_ReloadTexture(HRL_id _textureid, const char *_data, size_t _bufferSize)
+{
+
+}
+
+void HRL_SetAntialiasingMode(HRL_uint _mode)
+{
+
+}
+
+void HRL_MaterialSetEmissiveColor(HRL_id matid, float r, float g, float b, float a)
+{
+
+}
+
+HRL_id HRL_CreateMesh(HRL_id _sceneid, HRL_uint _type, float *_vertices)
+{
+	return HRL_INVALID_ID;
+}
+
+void HRL_EnableColorPickingBuffer(HRL_id _scene, HRL_uint _enable)
+{
+
+}
+
+HRL_id HRL_CreateMeshFromFile(HRL_id _sceneid, HRL_uint _type, const char *_data, size_t _bufferSize)
+{
+	return HRL_INVALID_ID;
+}
+
+void HRL_DrawSceneAsDebugMode(HRL_id _sceneid, HRL_uint mode)
+{
+
+}
