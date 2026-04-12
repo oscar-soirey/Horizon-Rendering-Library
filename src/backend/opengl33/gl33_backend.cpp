@@ -44,6 +44,8 @@ HRL_vtable GetOpenGL33Backend()
 	vtable.RHI_CreatePostProcess = GL33_CreatePostProcess;
 	vtable.RHI_DeletePostProcess = GL33_DeletePostProcess;
 
+	vtable.RHI_FogPropertyChanged = GL33_FogPropertyChanged;
+
 	vtable.RHI_GetProjectionMatrix = GL33_GetProjectionMatrix;
 	vtable.RHI_GetViewMatrix = GL33_GetViewMatrix;
 	vtable.RHI_GetModelMatrix = GL33_GetModelMatrix;

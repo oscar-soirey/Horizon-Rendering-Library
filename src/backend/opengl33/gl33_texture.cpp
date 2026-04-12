@@ -116,15 +116,15 @@ void GL33_Texture::SetMinFilter(HRL_uint filter)
   GLint param;
   switch (filter)
   {
-    case HRL_Filter_Nearest: { param = GL_NEAREST; break; }
-    case HRL_Filter_Linear: { param = GL_LINEAR; break; }
-    case HRL_Filter_Bilinear: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR_MIPMAP_NEAREST; break; }
-    case HRL_Filter_Trilinear: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR_MIPMAP_LINEAR; break; }
+    case HRL_FILTER_NEAREST: { param = GL_NEAREST; break; }
+    case HRL_FILTER_LINEAR: { param = GL_LINEAR; break; }
+    case HRL_FILTER_BILINEAR: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR_MIPMAP_NEAREST; break; }
+    case HRL_FILTER_TRILINEAR: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR_MIPMAP_LINEAR; break; }
 
     //not avalaible with opengl 3.3
-    case HRL_Filter_Anisotropic: { param = GL_LINEAR; break; }
+    case HRL_FILTER_ANISOTROPIC: { param = GL_LINEAR; break; }
 
-    case HRL_Filter_Supersampling: { param = GL_LINEAR; break; }
+    case HRL_FILTER_SUPERSAMPLING: { param = GL_LINEAR; break; }
     default: { param = GL_LINEAR; break; }
   }
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, param);
@@ -136,15 +136,15 @@ void GL33_Texture::SetMaxFilter(HRL_uint filter)
   GLint param;
   switch (filter)
   {
-    case HRL_Filter_Nearest: { param = GL_NEAREST; break; }
-    case HRL_Filter_Linear: { param = GL_LINEAR; break; }
-    case HRL_Filter_Bilinear: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR; break; }
-    case HRL_Filter_Trilinear: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR; break; }
+    case HRL_FILTER_NEAREST: { param = GL_NEAREST; break; }
+    case HRL_FILTER_LINEAR: { param = GL_LINEAR; break; }
+    case HRL_FILTER_BILINEAR: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR; break; }
+    case HRL_FILTER_TRILINEAR: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR; break; }
 
     //not avalaible with opengl 3.3
-    case HRL_Filter_Anisotropic: { param = GL_LINEAR; break; }
+    case HRL_FILTER_ANISOTROPIC: { param = GL_LINEAR; break; }
 
-    case HRL_Filter_Supersampling: { param = GL_LINEAR; break; }
+    case HRL_FILTER_SUPERSAMPLING: { param = GL_LINEAR; break; }
     default: { param = GL_LINEAR; break; }
   }
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, param);

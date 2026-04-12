@@ -77,6 +77,9 @@ typedef struct {
 	glm::mat4 proj_mat;
 	glm::mat4 view_mat;
 
+	//fog
+	hrl_fog_t* current_fog;
+
 	//debug
 	size_t current_debug_buffer_size=0;
 } GL33_State;
@@ -181,7 +184,7 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		(const char*)res_post_frag_glsl,
 		res_post_frag_glsl_len
 	);
-	bck_->shaders.emplace(HRL_DefaultPostProcessShader, default_post_process_shader);
+	bck_->shaders.emplace(HRL_DEFAULT_POST_PROCESS_SHADER, default_post_process_shader);
 
 	//SPRITE SHADER
 	auto* sprite_shader = new GL33_Shader();
@@ -191,7 +194,7 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		(const char*)res_sprite_frag_glsl,
 		res_sprite_frag_glsl_len);
 
-	bck_->shaders.emplace(HRL_SpriteShader, sprite_shader);
+	bck_->shaders.emplace(HRL_SPRITE_SHADER, sprite_shader);
 
 	//DEBUG SHADER
 	auto* debug_shader = new GL33_Shader();
@@ -201,7 +204,7 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		(const char*)res_debug_frag_glsl,
 		res_debug_frag_glsl_len
 	);
-	bck_->shaders.emplace(HRL_DebugShader, debug_shader);
+	bck_->shaders.emplace(HRL_DEBUG_SHADER, debug_shader);
 
 
 	//FALLBACK TEXTURES
@@ -212,12 +215,12 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 	bck_->fallback_textures[METALIC_INT] = GL33_CreateTexture((const char*)res_default_metalic_png, res_default_metalic_png_len);
 	bck_->fallback_textures[ALPHA_INT] = GL33_CreateTexture((const char*)res_default_alpha_png, res_default_alpha_png_len);
 
-	assert(bck_->fallback_textures[ALBEDO_INT] != HRL_InvalidID && "Failed to load fallback albedo");
-	assert(bck_->fallback_textures[NORMAL_INT] != HRL_InvalidID && "Failed to load fallback normal");
-	assert(bck_->fallback_textures[SPECULAR_INT] != HRL_InvalidID && "Failed to load fallback specular");
-	assert(bck_->fallback_textures[ROUGHNESS_INT] != HRL_InvalidID && "Failed to load fallback roughness");
-	assert(bck_->fallback_textures[METALIC_INT] != HRL_InvalidID && "Failed to load fallback metalic");
-	assert(bck_->fallback_textures[ALPHA_INT] != HRL_InvalidID && "Failed to load fallback alpha");
+	assert(bck_->fallback_textures[ALBEDO_INT] != HRL_INVALID_ID && "Failed to load fallback albedo");
+	assert(bck_->fallback_textures[NORMAL_INT] != HRL_INVALID_ID && "Failed to load fallback normal");
+	assert(bck_->fallback_textures[SPECULAR_INT] != HRL_INVALID_ID && "Failed to load fallback specular");
+	assert(bck_->fallback_textures[ROUGHNESS_INT] != HRL_INVALID_ID && "Failed to load fallback roughness");
+	assert(bck_->fallback_textures[METALIC_INT] != HRL_INVALID_ID && "Failed to load fallback metalic");
+	assert(bck_->fallback_textures[ALPHA_INT] != HRL_INVALID_ID && "Failed to load fallback alpha");
 
 
 	//UBO
@@ -274,6 +277,8 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 	}
 
 	GLuint scene_fbo = scene_it->second->fbo;
+
+	ctx_->current_fog = &scene->fog;
 
 	//clear scene once (évite les artefacts entre viewports)
 	glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
@@ -395,6 +400,22 @@ static void BindMaterial(HRL_Material* mat)
 
 	s->SetMat4("projection", ctx_->proj_mat);
 	s->SetMat4("view", ctx_->view_mat);
+	s->SetVec3("CamPos", ctx_->viewport->camera_->position_);
+	s->SetVec3("TintColor", glm::vec3(1.f));
+
+	//fog uniforms
+	s->SetInt("FogEnabled", ctx_->current_fog->enabled);
+	s->SetInt("FogMode", ctx_->current_fog->mode);
+	s->SetVec4("FogColor", {
+		ctx_->current_fog->r,
+		ctx_->current_fog->g,
+		ctx_->current_fog->b,
+		1.f}
+	);
+	s->SetFloat("FogStart", ctx_->current_fog->range_start);
+	s->SetFloat("FogEnd", ctx_->current_fog->range_end);
+	s->SetFloat("FogDensity", ctx_->current_fog->density);
+
 
 	//on passe tous les uniforms donnés par l'utilisateur
 	for (const auto& [name, value] : mat->intParams_)
@@ -454,7 +475,7 @@ static void BatchSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, st
 {
 	for (const auto& [id, mesh] : meshes)
 	{
-		if (mesh->type_ == HRL_Sprite)
+		if (mesh->type_ == HRL_SPRITE)
 		{
 			glm::mat4 model = glm::mat4(1.f);
 
@@ -595,6 +616,14 @@ static void DrawPostProcessQuad(GLuint src_texture, HRL_PostProcess* pp)
 }
 
 
+//EFFECTS
+void GL33_FogPropertyChanged(HRL_id scene, hrl_fog_t* fog_ptr)
+{
+
+}
+
+
+
 //MATRICES
 static glm::mat4 CalculateProjectionMatrix()
 {
@@ -612,7 +641,7 @@ static glm::mat4 CalculateProjectionMatrix()
 	float aspect = viewportWidth / viewportHeight;
 
 	glm::mat4 proj;
-	if (ctx_->viewport->camera_->type_ == HRL_Perspective)
+	if (ctx_->viewport->camera_->type_ == HRL_PERSPECTIVE)
 	{
 		proj = glm::perspective(glm::radians(ctx_->viewport->camera_->value_), aspect, ctx_->viewport->camera_->near_plane_, ctx_->viewport->camera_->far_plane_);
 	}
@@ -719,7 +748,7 @@ void GL33_DeleteScene(HRL_id _sceneid)
 	auto it = bck_->gpu_scenes.find(_sceneid);
 	if (it == bck_->gpu_scenes.end())
 	{
-		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_DeleteScene error: invalid scene id");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_DeleteScene error: invalid scene id");
 		return;
 	}
 
@@ -737,7 +766,7 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
 	auto it = bck_->gpu_scenes.find(_sceneid);
 	if (it == bck_->gpu_scenes.end())
 	{
-		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_ResizeSceneTexture error: invalid scene id");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_ResizeSceneTexture error: invalid scene id");
 		return;
 	}
 	if (it->second->fbo == 0)
@@ -774,14 +803,14 @@ HRL_id GL33_CreateShader(const char *_vertContent, size_t _vertSize, const char 
 		bck_->shaders.emplace(id, s);
 		return id;
 	}
-	return HRL_InvalidID;
+	return HRL_INVALID_ID;
 }
 void GL33_DeleteShader(HRL_id _id)
 {
 	auto it = bck_->shaders.find(_id);
 	if (it == bck_->shaders.end())
 	{
-		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteShader error : Shader ID doesn't exists");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteShader error : Shader ID doesn't exists");
 		return;
 	}
 	delete it->second;
@@ -805,7 +834,7 @@ HRL_id GL33_CreateTexture(const char* _imageContent, size_t _imageSize)
     bck_->textures.emplace(id, t);
     return id;
   }
-  return HRL_InvalidID;
+  return HRL_INVALID_ID;
 }
 HRL_id GL33_CreateTextureFromBitmap(BitmapResult bmp)
 {
@@ -821,14 +850,14 @@ HRL_id GL33_CreateTextureFromBitmap(BitmapResult bmp)
     bck_->textures.emplace(id, t);
     return id;
   }
-  return HRL_InvalidID;
+  return HRL_INVALID_ID;
 }
 void GL33_DeleteTexture(HRL_id _id)
 {
   auto it = bck_->textures.find(_id);
   if (it == bck_->textures.end())
   {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteTexture error : Texture ID doesn't exists");
+    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteTexture error : Texture ID doesn't exists");
     return;
   }
   delete it->second;
@@ -839,7 +868,7 @@ void GL33_GetTextureSize(HRL_id id, int *width, int *height)
   auto it = bck_->textures.find(id);
   if (it == bck_->textures.end())
   {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_GetTextureSize error : Texture ID doesn't exists");
+    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_GetTextureSize error : Texture ID doesn't exists");
     return;
   }
   *width = (int)it->second->GetWidth();
@@ -850,7 +879,7 @@ void GL33_SetTextureMinFilter(HRL_id id, HRL_uint _filter)
   auto it = bck_->textures.find(id);
   if (it == bck_->textures.end())
   {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMinFilter error : Texture ID doesn't exists");
+    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMinFilter error : Texture ID doesn't exists");
     return;
   }
   it->second->SetMinFilter(_filter);
@@ -860,7 +889,7 @@ void GL33_SetTextureMaxFilter(HRL_id id, HRL_uint _filter)
   auto it = bck_->textures.find(id);
   if (it == bck_->textures.end())
   {
-    SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMaxFilter error : Texture ID doesn't exists");
+    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMaxFilter error : Texture ID doesn't exists");
     return;
   }
   it->second->SetMaxFilter(_filter);
@@ -908,7 +937,7 @@ void GL33_GetModelMatrix(HRL_Mesh *mesh, float *aa)
 //DEBUG
 void GL33_DrawDebug(const DebugRenderer &_renderer, float line_thickness)
 {
-	auto it = bck_->shaders.find(HRL_DebugShader);
+	auto it = bck_->shaders.find(HRL_DEBUG_SHADER);
 	if (it == bck_->shaders.end())
 	{
 		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_FATAL, "GL33_DrawDebug error : debug shader doesn't exists");
@@ -1000,7 +1029,7 @@ unsigned int HRL_GL_GetTextureGL_ID(HRL_id _textureid)
 	auto it = bck_->textures.find(_textureid);
 	if (it == bck_->textures.end())
 	{
-		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetTextureGL_ID error : Texture ID doesn't exists");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetTextureGL_ID error : Texture ID doesn't exists");
 		return GL_INVALID_VALUE;
 	}
 
@@ -1011,7 +1040,7 @@ unsigned int HRL_GL_GetShaderGL_ID(HRL_id _shaderid)
 	auto it = bck_->shaders.find(_shaderid);
 	if (it == bck_->shaders.end())
 	{
-		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetShaderGL_ID error : Shader ID doesn't exists");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetShaderGL_ID error : Shader ID doesn't exists");
 		return GL_INVALID_VALUE;
 	}
 
@@ -1022,7 +1051,7 @@ unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid)
 	auto it = bck_->gpu_scenes.find(_sceneid);
 	if (it == bck_->gpu_scenes.end())
 	{
-		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneTextureGL_ID : scene ID is not valid");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneTextureGL_ID : scene ID is not valid");
 		return GL_INVALID_VALUE;
 	}
 

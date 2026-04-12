@@ -4,6 +4,7 @@
 #include "../hrl.h"
 
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -27,7 +28,7 @@ struct HRL_Mesh {
 
   HRL_uint type_;
 
-  HRL_id material_=HRL_InvalidID;
+  HRL_id material_=HRL_INVALID_ID;
 
   float draw_order_=0.f;
 
@@ -130,13 +131,33 @@ typedef struct {
   std::vector<unsigned char> ttf_buffer;
 }HRL_Font;
 
+//Fog
+typedef struct {
+  //mode
+  bool enabled = false;
+  HRL_uint mode = HRL_FOG_LINEAR;
+  //color
+  float r = 0.5f;
+  float g = 0.5f;
+  float b = 0.5f;
+  //rendering
+  float density = 0.1f;
+  float range_start = 20.f;
+  float range_end = 100.f;
+}hrl_fog_t;
+
 //objects//
 typedef struct {
   int draw_on_screen;
+
+  //objects
   std::unordered_map<HRL_id, HRL_Mesh*> meshes;
   std::unordered_map<HRL_id, HRL_Light*> lights;
   std::unordered_map<HRL_id, HRL_Viewport*> viewports;
   std::unordered_map<HRL_id, HRL_Camera*> cameras;
+
+  //Effects
+  hrl_fog_t fog;
 }hrl_scene_t;
 
 typedef struct {

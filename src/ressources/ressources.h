@@ -75,6 +75,14 @@ extern size_t res_sprite_frag_glsl_len;
 extern unsigned char res_sprite_vert_glsl[];
 extern size_t res_sprite_vert_glsl_len;
 
+//res_static_3dmesh_frag_glsl
+extern unsigned char res_static_3dmesh_frag_glsl[];
+extern size_t res_static_3dmesh_frag_glsl_len;
+
+//res_static_3dmesh_vert_glsl
+extern unsigned char res_static_3dmesh_vert_glsl[];
+extern size_t res_static_3dmesh_vert_glsl_len;
+
 //res_ui_frag_glsl
 extern unsigned char res_ui_frag_glsl[];
 extern size_t res_ui_frag_glsl_len;

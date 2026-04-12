@@ -9,7 +9,7 @@
 
 
 //vertex.hrls
-#define HRL_VERSION "0.3"
+#define HRL_VERSION "0.4"
 #include "common.hrls"
 
 buffer {
@@ -34,7 +34,7 @@ void main()
 
 
 //fragment.hrls
-#define HRL_VERSION "0.3"
+#define HRL_VERSION "0.4"
 #include "common.hrls"
 
 in {

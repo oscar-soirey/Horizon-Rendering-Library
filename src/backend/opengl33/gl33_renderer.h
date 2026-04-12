@@ -49,6 +49,9 @@ void GL33_DeleteShader(HRL_id _id);
 void GL33_CreatePostProcess(HRL_id mat, int priority);
 void GL33_DeletePostProcess(HRL_id post);
 
+//Effects
+void GL33_FogPropertyChanged(HRL_id scene, hrl_fog_t* fog_ptr);
+
 //Matrices
 void GL33_GetProjectionMatrix(float* aa);
 void GL33_GetViewMatrix(float* aa);

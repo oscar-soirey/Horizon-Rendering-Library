@@ -114,7 +114,7 @@ void ErrorCallback(HRL_Error code, HRL_Severity severity, const char* detail)
 int main()
 {
   //on init HRL avec l'api cible
-  HRL_Init(HRL_OpenGL33);
+  HRL_Init(HRL_OPENGL_33);
 
   //GLFW WINDOW//
 
@@ -135,7 +135,7 @@ int main()
   glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
   //désactiver la v-sync
-  glfwSwapInterval(0);
+  //glfwSwapInterval(0);
 
 
   HRL_RegisterErrorCallback(ErrorCallback);
@@ -149,16 +149,17 @@ int main()
 
   //Create scene, camera & viewport
   HRL_id scene = HRL_CreateScene(true);
-  HRL_id camera = HRL_CreateCamera(scene, HRL_Perspective);
+  HRL_id camera = HRL_CreateCamera(scene, HRL_PERSPECTIVE);
   HRL_SetCameraPerspectiveFov(camera, 90.f);
   HRL_id viewport = HRL_CreateViewport(scene, camera, 0.f, 0.f, 1.f, 1.f);
 
   //Create Light
+  HRL_id light;
   {
-    HRL_id light = HRL_CreateLight(scene, HRL_PointLight);
+    light = HRL_CreateLight(scene, HRL_POINT_LIGHT);
     HRL_SetLightAttenuation(light, 0.02f);
     HRL_SetLightLocation(light, 0.f, 0.f, 12.f);
-    HRL_SetLightIntensity(light, 5.f);
+    HRL_SetLightIntensity(light, 2.f);
     HRL_SetLightColor(light, 1.f, 1.f, 1.f);
     HRL_SetLightRotation(light, 0.f, 0.f, 0.f);
   }
@@ -170,8 +171,8 @@ int main()
     size_t atlas_size;
     std::string atlas_data = example::OpenFile("atlas.png", &atlas_size);
     HRL_id atlas_texture = HRL_CreateTexture(atlas_data.c_str(), atlas_size);
-    HRL_id atlas_material = HRL_CreateMaterial(HRL_SpriteShader);
-    HRL_MaterialSetTexture(atlas_material, HRL_T_Albedo, atlas_texture);
+    HRL_id atlas_material = HRL_CreateMaterial(HRL_SPRITE_SHADER);
+    HRL_MaterialSetTexture(atlas_material, HRL_T_ALBEDO, atlas_texture);
     HRL_id atlas_mesh = HRL_CreateMeshSprite(scene);
     HRL_SetMeshMaterial(atlas_mesh, atlas_material);
   }
@@ -182,8 +183,8 @@ int main()
     std::string font_data = example::OpenFile("JetBrainsMono.ttf", &font_size);
     HRL_id jetbrains_font = HRL_CreateFont(font_data.c_str(), font_size);
     HRL_id text_texture = HRL_CreateTextureFromText("Hello world!", jetbrains_font, 55, 0.f, 1.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f);
-    HRL_id text_material = HRL_CreateMaterial(HRL_SpriteShader);
-    HRL_MaterialSetTexture(text_material, HRL_T_Albedo, text_texture);
+    HRL_id text_material = HRL_CreateMaterial(HRL_SPRITE_SHADER);
+    HRL_MaterialSetTexture(text_material, HRL_T_ALBEDO, text_texture);
     HRL_id text_sprite = HRL_CreateMeshSprite(scene);
     HRL_SetMeshMaterial(text_sprite, text_material);
     int w;
@@ -194,10 +195,87 @@ int main()
 
   //Post Process
   {
-    HRL_id pp_material = HRL_CreateMaterial(HRL_DefaultPostProcessShader);
+    HRL_id pp_material = HRL_CreateMaterial(HRL_DEFAULT_POST_PROCESS_SHADER);
     HRL_MaterialSetFloat(pp_material, "saturation", 1.5f);
     HRL_id pp = HRL_CreatePostProcess(viewport, pp_material, 1);
   }
+
+  //Photorealistic texture
+  {
+    size_t al_size;
+    std::string al_data = example::OpenFile("rock/albedo.jpg", &al_size);
+    HRL_id rock_texture = HRL_CreateTexture(al_data.c_str(), al_size);
+    HRL_SetTextureMinFilter(rock_texture, HRL_FILTER_TRILINEAR);
+    HRL_SetTextureMagFilter(rock_texture, HRL_FILTER_TRILINEAR);
+
+    size_t normal_size;
+    std::string normal_data = example::OpenFile("rock/normal.jpg", &normal_size);
+    HRL_id normal_texture = HRL_CreateTexture(normal_data.c_str(), normal_size);
+    HRL_SetTextureMinFilter(normal_texture, HRL_FILTER_TRILINEAR);
+    HRL_SetTextureMagFilter(normal_texture, HRL_FILTER_TRILINEAR);
+
+    size_t roughness_size;
+    std::string roughness_data = example::OpenFile("rock/roughness.jpg", &roughness_size);
+    HRL_id roughness_texture = HRL_CreateTexture(roughness_data.c_str(), roughness_size);
+    HRL_SetTextureMinFilter(roughness_texture, HRL_FILTER_TRILINEAR);
+    HRL_SetTextureMagFilter(roughness_texture, HRL_FILTER_TRILINEAR);
+
+    HRL_id rock_material = HRL_CreateMaterial(HRL_SPRITE_SHADER);
+    HRL_MaterialSetTexture(rock_material, HRL_T_ALBEDO, rock_texture);
+    HRL_MaterialSetTexture(rock_material, HRL_T_NORMAL, normal_texture);
+    HRL_MaterialSetTexture(rock_material, HRL_T_ROUGHNESS, roughness_texture);
+    HRL_MaterialSetTexture(rock_material, HRL_T_SPECULAR, roughness_texture);
+
+
+    HRL_id rock_mesh = HRL_CreateMeshSprite(scene);
+    HRL_SetMeshMaterial(rock_mesh, rock_material);
+    HRL_SetMeshScale(rock_mesh, 20.f, 10.f, 1.f);
+    HRL_SetMeshLocation(rock_mesh, 0.f, 0.f, 1.f);
+  }
+
+  //tree texture
+  {
+    size_t al_size;
+    std::string al_data = example::OpenFile("tree/albedo.jpg", &al_size);
+    HRL_id al_texture = HRL_CreateTexture(al_data.c_str(), al_size);
+    HRL_SetTextureMinFilter(al_texture, HRL_FILTER_TRILINEAR);
+    HRL_SetTextureMagFilter(al_texture, HRL_FILTER_TRILINEAR);
+
+    size_t normal_size;
+    std::string normal_data = example::OpenFile("tree/normal.jpg", &normal_size);
+    HRL_id normal_texture = HRL_CreateTexture(normal_data.c_str(), normal_size);
+    HRL_SetTextureMinFilter(normal_texture, HRL_FILTER_TRILINEAR);
+    HRL_SetTextureMagFilter(normal_texture, HRL_FILTER_TRILINEAR);
+
+    size_t roughness_size;
+    std::string roughness_data = example::OpenFile("tree/roughness.jpg", &roughness_size);
+    HRL_id roughness_texture = HRL_CreateTexture(roughness_data.c_str(), roughness_size);
+    HRL_SetTextureMinFilter(roughness_texture, HRL_FILTER_TRILINEAR);
+    HRL_SetTextureMagFilter(roughness_texture, HRL_FILTER_TRILINEAR);
+
+    size_t metalic_size;
+    std::string metalic_data = example::OpenFile("tree/metalic.jpg", &metalic_size);
+    HRL_id metalic_texture = HRL_CreateTexture(metalic_data.c_str(), metalic_size);
+    HRL_SetTextureMinFilter(metalic_texture, HRL_FILTER_TRILINEAR);
+    HRL_SetTextureMagFilter(metalic_texture, HRL_FILTER_TRILINEAR);
+
+    HRL_id tree_material = HRL_CreateMaterial(HRL_SPRITE_SHADER);
+    HRL_MaterialSetTexture(tree_material, HRL_T_ALBEDO, al_texture);
+    HRL_MaterialSetTexture(tree_material, HRL_T_NORMAL, normal_texture);
+    HRL_MaterialSetTexture(tree_material, HRL_T_ROUGHNESS, roughness_texture);
+    //HRL_MaterialSetTexture(tree_material, HRL_T_Metalic, metalic_texture);
+
+
+    HRL_id tree_mesh = HRL_CreateMeshSprite(scene);
+    HRL_SetMeshMaterial(tree_mesh, tree_material);
+    HRL_SetMeshScale(tree_mesh, 20.f, 10.f, 1.f);
+    HRL_SetMeshLocation(tree_mesh, 10.f, 0.f, 0.f);
+  }
+
+  //Enable fog
+  HRL_SetFogEnabled(scene, false);
+  HRL_SetFogMode(scene, HRL_FOG_EXPONENTIAL);
+  HRL_SetFogColor(scene, 0.1f, 0.1f, 0.1f);
 
 
 
@@ -205,7 +283,7 @@ int main()
   {
     if (glfwGetKey(win, GLFW_KEY_F5) == GLFW_PRESS)
     {
-      HRL_DrawDebugCircle(scene, HRL_DebugSolid, 0.f,0.f,0.f, 30.f, 16, 1.f, 0.f,1.f);
+      HRL_DrawDebugCircle(scene, HRL_DEBUG_SOLID, 0.f,0.f,0.f, 30.f, 16, 1.f, 0.f,1.f);
     }
     CalculateDeltaTime();
 
@@ -220,8 +298,9 @@ int main()
     //movement de la camera
     ProcessCameraMovement(win);
     ProcessCameraRotation(win);
-    HRL_SetCameraPosition(camera, camX, camY, camZ);
+    HRL_SetCameraLocation(camera, camX, camY, camZ);
     HRL_SetCameraRotation(camera, pitch, yaw, 0.f);
+    HRL_SetLightLocation(light, camX, camY, camZ);
 
     //debug keys
     if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS)

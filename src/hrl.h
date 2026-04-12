@@ -27,7 +27,7 @@
 #ifndef HRL_IMPL
 #define HRL_IMPL
 
-#define HRL_API_VERSION "0.3"
+#define HRL_API_VERSION "0.4"
 
 #ifdef __cplusplus
  #include <cstdint>
@@ -57,70 +57,71 @@ typedef uint32_t HRL_id;
 typedef uint32_t HRL_uint;
 
 //Bool
-#define HRL_False ((int)0)
-#define HRL_True  ((int)1)
+#define HRL_FALSE ((int)0)
+#define HRL_TRUE  ((int)1)
 
 //Errors
-#define HRL_InvalidID										((HRL_id)-1)
+#define HRL_INVALID_ID								((HRL_id)-1)
 
 //Textures
-#define HRL_T_Albedo									"T_Albedo"
-#define HRL_T_Normal									"T_Normal"
-#define HRL_T_Specular								"T_Specular"
-#define HRL_T_Roughness								"T_Roughness"
-#define HRL_T_Metalic									"T_Metalic"
-#define HRL_T_Alpha										"T_Alpha"
-#define HRL_T_ShadowMap								"T_ShadowMap"
-#define HRL_T_CubeMap									"T_CubeMap"
+#define HRL_T_ALBEDO									"T_Albedo"
+#define HRL_T_NORMAL									"T_Normal"
+#define HRL_T_SPECULAR								"T_Specular"
+#define HRL_T_ROUGHNESS								"T_Roughness"
+#define HRL_T_METALIC									"T_Metalic"
+#define HRL_T_ALPHA										"T_Alpha"
+#define HRL_T_EMISSIVE								"T_Emissive"
+#define HRL_T_SHADOW_MAP							"T_ShadowMap"
+#define HRL_T_CUBE_MAP								"T_CubeMap"
 
 //APIs
-#define HRL_OpenGL33										0x0001
-#define HRL_OpenGL45										0x0002
-#define HRL_Vulkan											0x0003
+#define HRL_OPENGL_33										0x0001
+#define HRL_OPENGL_45										0x0002
+#define HRL_VULKAN											0x0003
 #define HRL_D3D11												0x0004
 #define HRL_D3D12												0x0005
-#define HRL_Metal												0x0006
+#define HRL_METAL												0x0006
 #define HRL_NVN													0x0007
 #define HRL_GNM													0x0008
 
 //Lights
-#define HRL_PointLight									0x0011
-#define HRL_DirectionalLight						0x0012
-#define HRL_SpotLight										0x0013
+#define HRL_POINT_LIGHT									0x0011
+#define HRL_DIRECTIONAL_LIGHT						0x0012
+#define HRL_SPOT_LIGHT									0x0013
 
 //Meshes & sprite
-#define HRL_Sprite											0x0021   //[[deprecated]] in API
-#define HRL_2D_Mesh											0x0022
-#define HRL_3D_Mesh											0x0023
-#define HRL_3D_SkeletalMesh							0x0024
+#define HRL_SPRITE											0x0021   //[[deprecated]] in API
+#define HRL_2D_MESH											0x0022
+#define HRL_3D_MESH											0x0023
+#define HRL_3D_SKELETAL_MESH						0x0024
 
 //Debug geometry
-#define HRL_DebugHollow									0x0031
-#define HRL_DebugSolid									0x0032
+#define HRL_DEBUG_HOLLOW								0x0031
+#define HRL_DEBUG_SOLID									0x0032
 
 //Camera
-#define HRL_Ortho												0x0041
-#define HRL_Perspective									0x0042
+#define HRL_ORTHO												0x0041
+#define HRL_PERSPECTIVE									0x0042
 
 //Filter Textures
-#define HRL_Filter_Nearest							0x0050
-#define HRL_Filter_Linear								0x0051
-#define HRL_Filter_Bilinear							0x0052
-#define HRL_Filter_Trilinear						0x0053
-#define HRL_Filter_Anisotropic					0x0054
-#define HRL_Filter_Supersampling				0x0055
+#define HRL_FILTER_NEAREST							0x0050
+#define HRL_FILTER_LINEAR								0x0051
+#define HRL_FILTER_BILINEAR							0x0052
+#define HRL_FILTER_TRILINEAR						0x0053
+#define HRL_FILTER_ANISOTROPIC					0x0054
+#define HRL_FILTER_SUPERSAMPLING				0x0055
 
 //Debug Views
-#define HRL_DebugViewNone								0x0060
-#define HRL_DebugViewUnlit							0x0061
-#define HRL_DebugViewNormal							0x0062
-#define HRL_DebugViewLights							0x0063
+#define HRL_DEBUG_VIEW_NONE							0x0060
+#define HRL_DEBUG_VIEW_UNLIT						0x0061
+#define HRL_DEBUG_VIEW_NORMAL						0x0062
+#define HRL_DEBUG_VIEW_LIGHTS						0x0063
 
 
 //errors
 typedef enum {
 	HRL_NO_ERROR=0x0070,
-	HRL_INVALID_ID,
+	HRL_ERROR_INVALID_ID,
 	HRL_INVALID_ENUM,
 	HRL_INVALID_VALUE,
 	HRL_INVALID_OPERATION,
@@ -136,13 +137,18 @@ typedef enum {
 	HRL_SEVERITY_FATAL
 }HRL_Severity;
 
+//Fog type
+#define HRL_FOG_LINEAR									0x0090
+#define HRL_FOG_EXPONENTIAL							0x0091
+#define HRL_FOG_EXP_SQUARED							0x0092
+
 
 //Default Shaders (HRL reserve theses ID)
-#define HRL_SpriteShader								(UINT32_MAX)
-#define HRL_Mesh2DShader								(UINT32_MAX - 1)
-#define HRL_Mesh3DShader								(UINT32_MAX - 2)
-#define HRL_DebugShader									(UINT32_MAX - 3)
-#define HRL_DefaultPostProcessShader		(UINT32_MAX - 4)
+#define HRL_SPRITE_SHADER								(UINT32_MAX)
+#define HRL_MESH_2D_SHADER							(UINT32_MAX - 1)
+#define HRL_MESH_3D_SHADER							(UINT32_MAX - 2)
+#define HRL_DEBUG_SHADER								(UINT32_MAX - 3)
+#define HRL_DEFAULT_POST_PROCESS_SHADER	(UINT32_MAX - 4)
 
 
 #ifdef __cplusplus
@@ -277,6 +283,11 @@ HRL_API HRL_id HRL_CreateMeshFromFile(HRL_id _sceneid, HRL_uint _type, const cha
  */
 HRL_API void HRL_DeleteMesh(HRL_id _meshid);
 
+/**
+ * @brief Returns whether the given ID refers to a live mesh object.
+ * @param _id ID to test.
+ * @return HRL_TRUE if valid, HRL_FALSE otherwise.
+ */
 	HRL_API int HRL_IsValidMesh(HRL_id _id);
 
 /**
@@ -329,6 +340,11 @@ HRL_API HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_uint _type);
  */
 HRL_API void HRL_DeleteLight(HRL_id _lightid);
 
+/**
+ * @brief Returns whether the given ID refers to a live light object.
+ * @param _id ID to test.
+ * @return HRL_TRUE if valid, HRL_FALSE otherwise.
+ */
 	HRL_API int HRL_IsValidLight(HRL_id _id);
 
 /**
@@ -382,8 +398,20 @@ HRL_API HRL_id HRL_CreateTexture(const char* _data, size_t _bufferSize);
  */
 HRL_API void HRL_DeleteTexture(HRL_id _textureid);
 
+/**
+ * @brief Returns whether the given ID refers to a live texture object.
+ * @param _id ID to test.
+ * @return HRL_TRUE if valid, HRL_FALSE otherwise.
+ */
 	HRL_API int HRL_IsValidTexture(HRL_id _id);
 
+/**
+ * @brief Replaces the pixel data of an existing texture from a new file buffer.
+ * The texture ID remains valid; any material referencing it will use the updated image.
+ * @param _textureid  ID of the texture to update.
+ * @param _data       Pointer to the new file contents (opened in binary mode).
+ * @param _bufferSize Size of the buffer in bytes.
+ */
 HRL_API void HRL_ReloadTexture(HRL_id _textureid, const char* _data, size_t _bufferSize);
 
 /**
@@ -426,7 +454,10 @@ HRL_API HRL_id HRL_CreateTextureFromText(const char* _text, HRL_id _fontid,
  *  SCENES
  * ============================================================================ */
 
-	//Clear screen space
+/**
+ * @brief Clears the entire screen to its default clear color.
+ * Useful when no scene covers the full framebuffer.
+ */
 	HRL_API void HRL_ClearScreen();
 
 /**
@@ -443,6 +474,11 @@ HRL_API HRL_id HRL_CreateScene(int _renderOnScreen);
  */
 HRL_API void HRL_DeleteScene(HRL_id _sceneid);
 
+/**
+ * @brief Returns whether the given ID refers to a live scene object.
+ * @param _id ID to test.
+ * @return HRL_TRUE if valid, HRL_FALSE otherwise.
+ */
 	HRL_API int HRL_IsValidScene(HRL_id _id);
 
 /**
@@ -478,6 +514,11 @@ HRL_API HRL_id HRL_CreatePostProcess(HRL_id _viewport, HRL_id _matid, int priori
  */
 HRL_API void HRL_DeletePostProcess(HRL_id _postid);
 
+/**
+ * @brief Returns whether the given ID refers to a live post-process object.
+ * @param _id ID to test.
+ * @return HRL_TRUE if valid, HRL_FALSE otherwise.
+ */
 HRL_API int HRL_IsValidPostProcess(HRL_id _id);
 
 
@@ -501,6 +542,11 @@ HRL_API HRL_id HRL_CreateShader(const char* _vertData, size_t _vertSize, const c
  */
 HRL_API void HRL_DeleteShader(HRL_id _shaderid);
 
+/**
+ * @brief Returns whether the given ID refers to a live shader object.
+ * @param _id ID to test.
+ * @return HRL_TRUE if valid, HRL_FALSE otherwise.
+ */
 	HRL_API int HRL_IsValidShader(HRL_id _id);
 
 
@@ -522,7 +568,12 @@ HRL_API HRL_id HRL_CreateMaterial(HRL_id _shaderid);
  */
 HRL_API void HRL_DeleteMaterial(HRL_id _matid);
 
-	HRL_API int HRL_IsValidMaterial(HRL_id _id);
+/**
+ * @brief Returns whether the given ID refers to a live material object.
+ * @param _id ID to test.
+ * @return HRL_TRUE if valid, HRL_FALSE otherwise.
+ */
+HRL_API int HRL_IsValidMaterial(HRL_id _id);
 
 /**
  * @brief Sets an integer uniform on a material.
@@ -559,6 +610,13 @@ HRL_API void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float 
  */
 HRL_API void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float y, float z, float w);
 
+/**
+ * @brief Sets the emissive color tint of a material, additively blended with the emissive texture.
+ * @param matid    ID of the target material.
+ * @param r,g,b,a  Emissive color and alpha multiplier in [0..1].
+ */
+HRL_API void HRL_MaterialSetEmissiveColor(HRL_id matid, float r, float g, float b, float a);
+
 
 /* ============================================================================
  *  VIEWPORTS
@@ -579,6 +637,11 @@ HRL_API HRL_id HRL_CreateViewport(HRL_id _sceneid, HRL_id _cameraid, float x, fl
  */
 HRL_API void HRL_DeleteViewport(HRL_id _viewportid);
 
+/**
+ * @brief Returns whether the given ID refers to a live viewport object.
+ * @param _id ID to test.
+ * @return HRL_TRUE if valid, HRL_FALSE otherwise.
+ */
 	HRL_API int HRL_IsValidViewport(HRL_id _id);
 
 /**
@@ -611,6 +674,11 @@ HRL_API HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_uint _type);
  */
 HRL_API void HRL_DeleteCamera(HRL_id _camid);
 
+/**
+ * @brief Returns whether the given ID refers to a live camera object.
+ * @param _id ID to test.
+ * @return HRL_TRUE if valid, HRL_FALSE otherwise.
+ */
 	HRL_API int HRL_IsValidCamera(HRL_id _id);
 
 /**
@@ -646,13 +714,79 @@ HRL_API void HRL_SetCameraFarPlane(HRL_id _camid, float _farPlane);
 /**
  * @brief Sets the world-space position of a camera.
  */
-HRL_API void HRL_SetCameraPosition(HRL_id _camid, float x, float y, float z);
+HRL_API void HRL_SetCameraLocation(HRL_id _camid, float x, float y, float z);
 
 /**
  * @brief Sets the orientation of a camera using Euler angles (in degrees).
  * Axis mapping: Pitch = X, Yaw = Y, Roll = Z.
  */
 HRL_API void HRL_SetCameraRotation(HRL_id _camid, float pitch, float yaw, float roll);
+
+
+/* ============================================================================
+ *  EFFECTS
+ * ============================================================================ */
+
+//BLOOM
+/**
+ * @brief Enables or disables the bloom post-process effect for a scene. Disabled by default.
+ * @param scene  ID of the target scene.
+ * @param enable HRL_TRUE to enable, HRL_FALSE to disable.
+ */
+HRL_API void HRL_SetBloomEnabled(HRL_id scene, int enable);
+
+/**
+ * @brief Sets the bloom intensity for a scene.
+ * @param scene    ID of the target scene.
+ * @param strength Bloom blend factor. Higher values produce a more pronounced glow.
+ */
+HRL_API void HRL_SetBloomStrength(HRL_id scene, float strength);
+
+/**
+ * @brief Sets the luminance threshold above which pixels contribute to bloom.
+ * @param scene     ID of the target scene.
+ * @param threshold Brightness cutoff in [0..1]. Pixels below this value are unaffected.
+ */
+HRL_API void HRL_SetBloomThreshold(HRL_id scene, float threshold);
+
+//FOG
+/**
+ * @brief Enables or disables the fog effect for a scene.
+ * @param scene  ID of the target scene.
+ * @param enable HRL_TRUE to enable, HRL_FALSE to disable.
+ */
+HRL_API void HRL_SetFogEnabled(HRL_id scene, int enable);
+
+/**
+ * @brief Sets the fog blending mode for a scene.
+ * @param scene ID of the target scene.
+ * @param mode  One of HRL_FOG_LINEAR, HRL_FOG_EXPONENTIAL, or HRL_FOG_EXP_SQUARED.
+ */
+HRL_API void HRL_SetFogMode(HRL_id scene, HRL_uint mode);
+
+/**
+ * @brief Sets the fog color for a scene.
+ * @param scene   ID of the target scene.
+ * @param r,g,b   Fog color in [0..1].
+ */
+HRL_API void HRL_SetFogColor(HRL_id scene, float r, float g, float b);
+
+/**
+ * @brief Sets the fog density for exponential fog modes.
+ * Has no effect when fog mode is HRL_FOG_LINEAR.
+ * @param scene   ID of the target scene.
+ * @param density Density coefficient. Higher values produce thicker fog.
+ */
+HRL_API void HRL_SetFogDensity(HRL_id scene, float density);
+
+/**
+ * @brief Sets the start and end distances for linear fog.
+ * Objects beyond _end are fully fogged; objects before _start are unaffected.
+ * @param scene  ID of the target scene.
+ * @param start  Distance at which fog begins (world units).
+ * @param end    Distance at which fog reaches full opacity (world units).
+ */
+HRL_API void HRL_SetFogLinearRange(HRL_id scene, float start, float end);
 
 
 /* ============================================================================
@@ -799,7 +933,12 @@ HRL_API HRL_id HRL_CreateFont(const char* data, size_t _data_size);
  */
 HRL_API void HRL_DeleteFont(HRL_id _fontid);
 
-	HRL_API int HRL_IsValidFont(HRL_id _id);
+/**
+ * @brief Returns whether the given ID refers to a live font object.
+ * @param _id ID to test.
+ * @return HRL_TRUE if valid, HRL_FALSE otherwise.
+ */
+HRL_API int HRL_IsValidFont(HRL_id _id);
 
 
 #ifdef __cplusplus

@@ -57,13 +57,13 @@ namespace example
 	void DrawDebugExamples(HRL_id sceneId)
 	{
 		// cercle creux
-		HRL_DrawDebugCircle(sceneId, HRL_DebugHollow,
+		HRL_DrawDebugCircle(sceneId, HRL_DEBUG_SOLID,
 			0.f, 0.f, 0.f,
 			1.f, 16,
 			1.f, 0.f, 0.f); // rouge
 
 		// cercle plein
-		HRL_DrawDebugCircle(sceneId, HRL_DebugSolid,
+		HRL_DrawDebugCircle(sceneId, HRL_DEBUG_SOLID,
 			3.f, 0.f, 0.f,
 			0.5f, 16,
 			0.f, 1.f, 0.f); // vert
@@ -73,7 +73,7 @@ namespace example
 			float vx[] = { -0.5f,  0.5f, 0.5f, -0.5f };
 			float vy[] = { -0.5f, -0.5f, 0.5f,  0.5f };
 			float vz[] = {  0.f,   0.f,  0.f,   0.f  };
-			HRL_DrawDebugPolygon(sceneId, HRL_DebugHollow, vx, vy, vz, 4, 0.f, 0.f, 1.f); // bleu
+			HRL_DrawDebugPolygon(sceneId, HRL_DEBUG_SOLID, vx, vy, vz, 4, 0.f, 0.f, 1.f); // bleu
 		}
 
 		// carré plein
@@ -81,11 +81,11 @@ namespace example
 			float vx[] = {  2.f,  3.f, 3.f,  2.f };
 			float vy[] = { -0.5f, -0.5f, 0.5f, 0.5f };
 			float vz[] = {  0.f,  0.f,  0.f,  0.f };
-			HRL_DrawDebugPolygon(sceneId, HRL_DebugSolid, vx, vy, vz, 4, 1.f, 1.f, 0.f); // jaune
+			HRL_DrawDebugPolygon(sceneId, HRL_DEBUG_SOLID, vx, vy, vz, 4, 1.f, 1.f, 0.f); // jaune
 		}
 
 		// capsule
-		HRL_DrawDebugCapsule(sceneId, HRL_DebugHollow,
+		HRL_DrawDebugCapsule(sceneId, HRL_DEBUG_SOLID,
 			-2.f, -1.f, 0.f,   // A
 			-2.f,  1.f, 0.f,   // B
 			0.4f, 16,

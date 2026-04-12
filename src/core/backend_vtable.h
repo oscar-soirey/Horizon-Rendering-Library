@@ -64,6 +64,9 @@ typedef struct {
 	void(*RHI_CreatePostProcess)(HRL_id material, int priority);
 	void(*RHI_DeletePostProcess)(HRL_id post);
 
+	//Effects//
+	void(*RHI_FogPropertyChanged)(HRL_id scene, hrl_fog_t* fog);
+
 	//Debug//
 	void(*RHI_DrawDebug)(const DebugRenderer&, float line_thickness);
 
