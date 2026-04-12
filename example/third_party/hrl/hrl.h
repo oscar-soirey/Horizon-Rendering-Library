@@ -112,8 +112,9 @@ typedef uint32_t HRL_uint;
 
 //Debug Views
 #define HRL_DebugViewNone								0x0060
-#define HRL_DebugViewNormal							0x0061
-#define HRL_DebugViewLights							0x0062
+#define HRL_DebugViewUnlit							0x0061
+#define HRL_DebugViewNormal							0x0062
+#define HRL_DebugViewLights							0x0063
 
 
 //errors
@@ -276,7 +277,7 @@ HRL_API HRL_id HRL_CreateMeshFromFile(HRL_id _sceneid, HRL_uint _type, const cha
  */
 HRL_API void HRL_DeleteMesh(HRL_id _meshid);
 
-HRL_API int HRL_IsValidMesh(HRL_id _id);
+	HRL_API int HRL_IsValidMesh(HRL_id _id);
 
 /**
  * @brief Assigns a material to a mesh, controlling how it is shaded.
@@ -328,7 +329,7 @@ HRL_API HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_uint _type);
  */
 HRL_API void HRL_DeleteLight(HRL_id _lightid);
 
-HRL_API int HRL_IsValidLight(HRL_id _id);
+	HRL_API int HRL_IsValidLight(HRL_id _id);
 
 /**
  * @brief Sets the RGB color emitted by a light.
@@ -381,7 +382,7 @@ HRL_API HRL_id HRL_CreateTexture(const char* _data, size_t _bufferSize);
  */
 HRL_API void HRL_DeleteTexture(HRL_id _textureid);
 
-HRL_API int HRL_IsValidTexture(HRL_id _id);
+	HRL_API int HRL_IsValidTexture(HRL_id _id);
 
 HRL_API void HRL_ReloadTexture(HRL_id _textureid, const char* _data, size_t _bufferSize);
 
@@ -442,7 +443,7 @@ HRL_API HRL_id HRL_CreateScene(int _renderOnScreen);
  */
 HRL_API void HRL_DeleteScene(HRL_id _sceneid);
 
-HRL_API int HRL_IsValidScene(HRL_id _id);
+	HRL_API int HRL_IsValidScene(HRL_id _id);
 
 /**
  * @brief Resizes the off-screen render texture of a scene.
@@ -464,12 +465,12 @@ HRL_API void HRL_EnableColorPickingBuffer(HRL_id _scene, HRL_uint _enable);
  * ============================================================================ */
 
 /**
- * @brief Attaches a post-process pass to a scene using a custom material.
+ * @brief Attaches a post-process pass to a viewport using a custom material.
  * Passes are applied in creation order after the scene is rendered.
  * @param _matid Material containing the full-screen shader to apply.
  * @return HRL_id of the new post-process object, or HRL_InvalidID on failure.
  */
-HRL_API HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid, int priority);
+HRL_API HRL_id HRL_CreatePostProcess(HRL_id _viewport, HRL_id _matid, int priority);
 
 /**
  * @brief Removes and destroys a post-process pass.
@@ -500,7 +501,7 @@ HRL_API HRL_id HRL_CreateShader(const char* _vertData, size_t _vertSize, const c
  */
 HRL_API void HRL_DeleteShader(HRL_id _shaderid);
 
-HRL_API int HRL_IsValidShader(HRL_id _id);
+	HRL_API int HRL_IsValidShader(HRL_id _id);
 
 
 /* ============================================================================
@@ -521,7 +522,7 @@ HRL_API HRL_id HRL_CreateMaterial(HRL_id _shaderid);
  */
 HRL_API void HRL_DeleteMaterial(HRL_id _matid);
 
-HRL_API int HRL_IsValidMaterial(HRL_id _id);
+	HRL_API int HRL_IsValidMaterial(HRL_id _id);
 
 /**
  * @brief Sets an integer uniform on a material.
@@ -578,7 +579,7 @@ HRL_API HRL_id HRL_CreateViewport(HRL_id _sceneid, HRL_id _cameraid, float x, fl
  */
 HRL_API void HRL_DeleteViewport(HRL_id _viewportid);
 
-HRL_API int HRL_IsValidViewport(HRL_id _id);
+	HRL_API int HRL_IsValidViewport(HRL_id _id);
 
 /**
  * @brief Reassigns the camera used by a viewport.
@@ -610,7 +611,7 @@ HRL_API HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_uint _type);
  */
 HRL_API void HRL_DeleteCamera(HRL_id _camid);
 
-HRL_API int HRL_IsValidCamera(HRL_id _id);
+	HRL_API int HRL_IsValidCamera(HRL_id _id);
 
 /**
  * @brief Changes the projection type of an existing camera at runtime.
@@ -798,7 +799,7 @@ HRL_API HRL_id HRL_CreateFont(const char* data, size_t _data_size);
  */
 HRL_API void HRL_DeleteFont(HRL_id _fontid);
 
-HRL_API int HRL_IsValidFont(HRL_id _id);
+	HRL_API int HRL_IsValidFont(HRL_id _id);
 
 
 #ifdef __cplusplus

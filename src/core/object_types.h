@@ -2,9 +2,12 @@
 #define HRL_OBJECT_TYPES
 
 #include "../hrl.h"
+
+#include <map>
 #include <unordered_map>
-#include <glm/glm.hpp>
 #include <vector>
+
+#include <glm/glm.hpp>
 #include <stb/stb_truetype.h>
 
 typedef uint64_t HRL_BackendHandle;
@@ -57,13 +60,11 @@ typedef struct {
 //POST PROCESS
 typedef struct {
   HRL_id material_;
-  int priority;
 }HRL_PostProcess;
 
 //MATERIAL
 typedef struct {
   HRL_id shader_;
-
   std::unordered_map<std::string, int> intParams_;
   std::unordered_map<std::string, HRL_id> textureParams_;
   std::unordered_map<std::string, float> floatParams_;
@@ -92,6 +93,9 @@ typedef struct {
   float y_;
   float width_;
   float height_;
+
+  //ordered by priority
+  std::map<int, HRL_PostProcess*> post_processes;
 }HRL_Viewport;
 
 
@@ -133,7 +137,6 @@ typedef struct {
   std::unordered_map<HRL_id, HRL_Light*> lights;
   std::unordered_map<HRL_id, HRL_Viewport*> viewports;
   std::unordered_map<HRL_id, HRL_Camera*> cameras;
-  std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
 }hrl_scene_t;
 
 typedef struct {

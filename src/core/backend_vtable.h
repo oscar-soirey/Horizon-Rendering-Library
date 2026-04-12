@@ -13,6 +13,8 @@ typedef struct {
 	void(*RHI_InitContext)(HRL_uint width, HRL_uint height, void* loader);
 	void(*RHI_Shutdown)();
 
+	void(*RHI_WindowResizeCallback)(int width, int height);
+
 	//Draw & batching//
 	void(*RHI_BeginFrame)();
 
@@ -32,9 +34,6 @@ typedef struct {
 
 	//Lights//
 	void(*RHI_UpdateLights)(const std::vector<HRL_Light*>& lights);
-
-	//Window//
-	void(*RHI_WindowResizeCallback)(int width, int height);
 
 	//Textures//
 	HRL_id(*RHI_CreateTexture)(const char* imageContent, const size_t imageSize);

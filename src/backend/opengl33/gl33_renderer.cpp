@@ -20,10 +20,15 @@ extern HRL_Context* GetPrivateContext();
 
 //UTILS
 static void InitTextureAndBindToFBO(GLuint _texture, GLuint _fbo, int width, int height);
-static void BatchSprites(const std::unordered_map<HRL_id, HRL_Mesh*>&, std::vector<GL_RenderBatch>& batches);
+
 static void BindMaterial(HRL_Material* mat);
+static void BatchSprites(const std::unordered_map<HRL_id, HRL_Mesh*>&, std::vector<GL_RenderBatch>& batches);
+
 static glm::mat4 CalculateProjectionMatrix();
 static glm::mat4 CalculateViewMatrix();
+
+static void DrawSprites(const std::vector<GL_RenderBatch>& render_batches);
+static void DrawPostProcessQuad(GLuint src_texture, HRL_PostProcess* pp);
 
 
 
@@ -71,6 +76,9 @@ typedef struct {
 	//cached matrices
 	glm::mat4 proj_mat;
 	glm::mat4 view_mat;
+
+	//debug
+	size_t current_debug_buffer_size=0;
 } GL33_State;
 static GL33_State* ctx_;
 
@@ -244,31 +252,40 @@ void GL33_Shutdown()
 }
 
 
+void GL33_WindowResizeCallback(int width, int height)
+{
+	for (int i = 0; i < 2; i++)
+	{
+		glBindTexture(GL_TEXTURE_2D, bck_->post_textures[i]);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+	}
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+
 
 void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 {
-	//Changer pour calculer que quand un sprite est ajouté ou modifié
-	std::vector<GL_RenderBatch> render_batches;
-
-	//if render on screen, fbo equals 0
 	auto scene_it = bck_->gpu_scenes.find(scene_id);
 	if (scene_it == bck_->gpu_scenes.end())
 	{
 		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "GL33_DrawScene: tried to draw scene with invalid gpu ID");
 		return;
 	}
-	glBindFramebuffer(GL_FRAMEBUFFER, scene_it->second->fbo);
-	//clear framebuffer
+
+	GLuint scene_fbo = scene_it->second->fbo;
+
+	//clear scene once (évite les artefacts entre viewports)
+	glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
 
-	//For each viewport
 	for (const auto& v : scene->viewports)
 	{
 		//bind viewport to context
 		ctx_->viewport = v.second;
-		auto winW = (float)GetWindowWidth();
-		auto winH = (float)GetWindowHeight();
+		float winW = (float)GetWindowWidth();
+		float winH = (float)GetWindowHeight();
 		glViewport(
 			(GLsizei)(v.second->x_ * winW),
 			(GLsizei)(v.second->y_ * winH),
@@ -276,68 +293,52 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			(GLsizei)(v.second->height_ * winH)
 		);
 
-		//uses viewport & camera
+		std::vector<GL_RenderBatch> render_batches;
 		BatchSprites(scene->meshes, render_batches);
 
-		//calculate matrices based on viewport
 		ctx_->proj_mat = CalculateProjectionMatrix();
 		ctx_->view_mat = CalculateViewMatrix();
 
-		for (const auto& rb : render_batches)
+		bool has_post_process = !v.second->post_processes.empty();
+
+		// ---- STEP 1 : rendu de la scène ----
+		// Si post-process : on rend dans post_fbo[0] (source du ping-pong)
+		// Sinon           : on rend directement dans scene_fbo
+		GLuint initial_target = has_post_process ? bck_->post_fbo[0] : scene_fbo;
+		glBindFramebuffer(GL_FRAMEBUFFER, initial_target);
+		if (has_post_process)
 		{
-			auto it_mat = GetPrivateContext()->materials.find(rb.mat);
-			if (it_mat == GetPrivateContext()->materials.end())
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+		}
+		DrawSprites(render_batches);
+
+		// ---- STEP 2 : chaîne de post-process (ping-pong) ----
+		if (has_post_process)
+		{
+			int src = 0;
+
+			for (const auto& [priority, pp] : v.second->post_processes)
 			{
-				SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "GL33_DrawScene: tried to bind material, invalid ID");
-				return;
+				int dst = 1 - src;
+
+				glBindFramebuffer(GL_FRAMEBUFFER, bck_->post_fbo[dst]);
+				glClear(GL_COLOR_BUFFER_BIT);
+				DrawPostProcessQuad(bck_->post_textures[src], pp);
+
+				src = dst;
 			}
 
-			BindMaterial(it_mat->second);
-
-			std::vector<float> vertices_data;
-			std::vector<float> instance_data;
-
-			for (int i=0; i < rb.instance_count; i++)
-			{
-				auto inst = rb.instances[i];
-
-				//add vertex data
-				float uMin = inst.region[0];
-				float vMin = inst.region[1];
-				float uMax = inst.region[2];
-				float vMax = inst.region[3];
-				float vertices[] = {
-					-0.5f, -0.5f,  uMin, vMin,
-					 0.5f, -0.5f,  uMax, vMin,
-					 0.5f,  0.5f,  uMax, vMax,
-					-0.5f,  0.5f,  uMin, vMax
-				};
-				vertices_data.insert(vertices_data.end(), vertices, vertices + 16);
-
-				//add instance model data
-				float* model_p = glm::value_ptr(inst.model);
-				instance_data.insert(instance_data.end(), model_p, model_p + 16);
-			}
-
-			glBindVertexArray(bck_->vao[BUFFER_SPRITE]);
-
-			//SPRITE VBO
-			glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_SPRITE]);
-			//allocate to target size
-			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(vertices_data.size() * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
-			glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(vertices_data.size() * sizeof(float)), vertices_data.data());
-
-			//SPRITE INSTANCE VBO
-			glBindBuffer(GL_ARRAY_BUFFER, bck_->sprite_inst_model_vbo);
-			//allocate to target size
-			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(instance_data.size() * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
-			glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(instance_data.size() * sizeof(float)), instance_data.data());
-
-			glDisable(GL_DEPTH_TEST); //disable when 2D, enable when 3D
-			glEnable(GL_BLEND);
-			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-			glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, rb.instance_count);
+			// ---- STEP 3 : blit direct vers scene_fbo ----
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, bck_->post_fbo[src]);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene_fbo);
+			//GPU copy, zero overhead
+			glBlitFramebuffer(
+					0, 0, GetWindowWidth(), GetWindowHeight(),
+					0, 0, GetWindowWidth(), GetWindowHeight(),
+					GL_COLOR_BUFFER_BIT,
+					GL_NEAREST
+			);
 		}
 	}
 }
@@ -494,6 +495,105 @@ static void BatchSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, st
 		}
 	}
 }
+
+//RENDERING
+static void DrawSprites(const std::vector<GL_RenderBatch>& render_batches)
+{
+	for (const auto& rb : render_batches)
+	{
+		auto it_mat = GetPrivateContext()->materials.find(rb.mat);
+		if (it_mat == GetPrivateContext()->materials.end())
+		{
+			SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "DrawSprites: tried to bind material, invalid ID");
+			return;
+		}
+
+		BindMaterial(it_mat->second);
+
+		std::vector<float> vertices_data;
+		std::vector<float> instance_data;
+
+		for (int i = 0; i < rb.instance_count; i++)
+		{
+			auto inst = rb.instances[i];
+
+			float uMin = inst.region[0];
+			float vMin = inst.region[1];
+			float uMax = inst.region[2];
+			float vMax = inst.region[3];
+			float vertices[] = {
+				-0.5f, -0.5f,  uMin, vMin,
+				 0.5f, -0.5f,  uMax, vMin,
+				 0.5f,  0.5f,  uMax, vMax,
+				-0.5f,  0.5f,  uMin, vMax
+			};
+			vertices_data.insert(vertices_data.end(), vertices, vertices + 16);
+
+			float* model_p = glm::value_ptr(inst.model);
+			instance_data.insert(instance_data.end(), model_p, model_p + 16);
+		}
+
+		glBindVertexArray(bck_->vao[BUFFER_SPRITE]);
+
+		glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_SPRITE]);
+		glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(vertices_data.size() * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
+		glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(vertices_data.size() * sizeof(float)), vertices_data.data());
+
+		glBindBuffer(GL_ARRAY_BUFFER, bck_->sprite_inst_model_vbo);
+		glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(instance_data.size() * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
+		glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(instance_data.size() * sizeof(float)), instance_data.data());
+
+		glDisable(GL_DEPTH_TEST);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+		glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, rb.instance_count);
+	}
+}
+
+static void DrawPostProcessQuad(GLuint src_texture, HRL_PostProcess* pp)
+{
+	auto mat_it = GetPrivateContext()->materials.find(pp->material_);
+	if (mat_it == GetPrivateContext()->materials.end())
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "DrawPostProcessQuad: invalid material ID");
+		return;
+	}
+	HRL_Material* mat = mat_it->second;
+
+	auto shader_it = bck_->shaders.find(mat->shader_);
+	if (shader_it == bck_->shaders.end())
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "DrawPostProcessQuad: invalid shader ID");
+		return;
+	}
+	GL33_Shader* shader = shader_it->second;
+	shader->Use();
+
+	//texture de la passe précédente (ou de la scène)
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, src_texture);
+	shader->SetInt("uScene", 0);
+	shader->SetVec2("uScreenSize",{ctx_->viewport->x_ * (float)GetWindowWidth(), ctx_->viewport->y_ * (float)GetWindowHeight()});
+
+	//uniforms utilisateur (ex: saturation, brightness...)
+	for (const auto& [name, value] : mat->floatParams_)
+		shader->SetFloat(name, value);
+	for (const auto& [name, value] : mat->intParams_)
+		shader->SetInt(name, value);
+	for (const auto& [name, value] : mat->vec2Params_)
+		shader->SetVec2(name, value);
+	for (const auto& [name, value] : mat->vec3Params_)
+		shader->SetVec3(name, value);
+	for (const auto& [name, value] : mat->vec4Params_)
+		shader->SetVec4(name, value);
+
+	glBindVertexArray(bck_->vao[BUFFER_QUAD]);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+}
+
 
 //MATRICES
 static glm::mat4 CalculateProjectionMatrix()
@@ -769,7 +869,7 @@ void GL33_SetTextureMaxFilter(HRL_id id, HRL_uint _filter)
 
 
 //POST PROCESSING
-void GL33_CreatePostProcess(HRL_id mat, int priority)
+void GL33_CreatePostProcess(HRL_id post, int priority)
 {
 
 }
@@ -808,7 +908,65 @@ void GL33_GetModelMatrix(HRL_Mesh *mesh, float *aa)
 //DEBUG
 void GL33_DrawDebug(const DebugRenderer &_renderer, float line_thickness)
 {
+	auto it = bck_->shaders.find(HRL_DebugShader);
+	if (it == bck_->shaders.end())
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_FATAL, "GL33_DrawDebug error : debug shader doesn't exists");
+		return;
+	}
+	auto* s = it->second;
+	//on set CurrentShader pour spécifier que les prochains calls utiliseront ce shader
+	ctx_->shader = s;
+	s->Use();
 
+	s->SetMat4("projection", ctx_->proj_mat);
+	s->SetMat4("view", ctx_->view_mat);
+
+	//bind vao and initialize opengl evironement
+	glBindVertexArray(bck_->vao[BUFFER_DEBUG]);
+	glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_DEBUG]);
+
+	glEnable(GL_DEPTH_TEST);
+
+	//remplacer par une seule fonction dans la vtable pour eviter de le faire a chaque frames
+	glLineWidth(line_thickness);
+
+	// lignes
+	if (!_renderer.lines.empty())
+	{
+		size_t size = _renderer.lines.size() * sizeof(DebugVertex);
+
+		//réalloue si le buffer est trop petit
+		if (size > ctx_->current_debug_buffer_size)
+		{
+			glBufferData(GL_ARRAY_BUFFER, (GLsizei)size, _renderer.lines.data(), GL_STREAM_DRAW);
+			ctx_->current_debug_buffer_size = size;
+		}
+		else
+		{
+			glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizei)size, _renderer.lines.data());
+		}
+
+		glDrawArrays(GL_LINES, 0, (GLsizei)_renderer.lines.size());
+	}
+
+	// triangles
+	if (!_renderer.triangles.empty())
+	{
+		size_t size = _renderer.triangles.size() * sizeof(DebugVertex);
+
+		if (size > ctx_->current_debug_buffer_size)
+		{
+			glBufferData(GL_ARRAY_BUFFER, (GLsizei)size, _renderer.triangles.data(), GL_STREAM_DRAW);
+			ctx_->current_debug_buffer_size = size;
+		}
+		else
+		{
+			glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizei)size, _renderer.triangles.data());
+		}
+
+		glDrawArrays(GL_TRIANGLES, 0, (GLsizei)_renderer.triangles.size());
+	}
 }
 
 

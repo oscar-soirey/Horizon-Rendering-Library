@@ -11,6 +11,8 @@ void GL33_Init();
 void GL33_InitContext(HRL_uint _width, HRL_uint _height, void* loader);
 void GL33_Shutdown();
 
+void GL33_WindowResizeCallback(int width, int height);
+
 void GL33_ResetFramebuffer();
 
 void GL33_DrawScene(hrl_scene_t* scene, HRL_id scene_id);

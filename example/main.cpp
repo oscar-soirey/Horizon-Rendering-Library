@@ -192,10 +192,21 @@ int main()
     HRL_SetMeshScale(text_sprite, w/20, h/20, 1.f);
   }
 
+  //Post Process
+  {
+    HRL_id pp_material = HRL_CreateMaterial(HRL_DefaultPostProcessShader);
+    HRL_MaterialSetFloat(pp_material, "saturation", 1.5f);
+    HRL_id pp = HRL_CreatePostProcess(viewport, pp_material, 1);
+  }
+
 
 
   while (!glfwWindowShouldClose(win))
   {
+    if (glfwGetKey(win, GLFW_KEY_F5) == GLFW_PRESS)
+    {
+      HRL_DrawDebugCircle(scene, HRL_DebugSolid, 0.f,0.f,0.f, 30.f, 16, 1.f, 0.f,1.f);
+    }
     CalculateDeltaTime();
 
     HRL_EndFrame();
@@ -204,7 +215,7 @@ int main()
     glfwSwapBuffers(win);
     glfwPollEvents();
 
-    printf("FPS : %f\n", 1/dt);
+    //printf("FPS : %f\n", 1/dt);
 
     //movement de la camera
     ProcessCameraMovement(win);

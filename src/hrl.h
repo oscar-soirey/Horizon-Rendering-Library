@@ -112,8 +112,9 @@ typedef uint32_t HRL_uint;
 
 //Debug Views
 #define HRL_DebugViewNone								0x0060
-#define HRL_DebugViewNormal							0x0061
-#define HRL_DebugViewLights							0x0062
+#define HRL_DebugViewUnlit							0x0061
+#define HRL_DebugViewNormal							0x0062
+#define HRL_DebugViewLights							0x0063
 
 
 //errors
@@ -464,12 +465,12 @@ HRL_API void HRL_EnableColorPickingBuffer(HRL_id _scene, HRL_uint _enable);
  * ============================================================================ */
 
 /**
- * @brief Attaches a post-process pass to a scene using a custom material.
+ * @brief Attaches a post-process pass to a viewport using a custom material.
  * Passes are applied in creation order after the scene is rendered.
  * @param _matid Material containing the full-screen shader to apply.
  * @return HRL_id of the new post-process object, or HRL_InvalidID on failure.
  */
-HRL_API HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid, int priority);
+HRL_API HRL_id HRL_CreatePostProcess(HRL_id _viewport, HRL_id _matid, int priority);
 
 /**
  * @brief Removes and destroys a post-process pass.

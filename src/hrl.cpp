@@ -271,6 +271,7 @@ void HRL_WindowResizeCallback(int _width, int _height)
 {
 	ctx_.window_width  = _width;
 	ctx_.window_height = _height;
+	g_Backend.RHI_WindowResizeCallback(_width, _height);
 }
 
 
@@ -723,13 +724,14 @@ void HRL_EnableColorPickingBuffer(HRL_id _sceneid, int _enable)
 
 
 
+
 //Post Process//
-HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid, int priority)
+HRL_id HRL_CreatePostProcess(HRL_id _viewport, HRL_id _matid, int priority)
 {
-	auto it_scene = ctx_.scenes.find(_sceneid);
-	if (it_scene == ctx_.scenes.end())
+	auto it_viewport = ctx_.viewports.find(_viewport);
+	if (it_viewport == ctx_.viewports.end())
 	{
-		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreatePostProcess: invalid scene ID");
+		SetErrorCode(HRL_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreatePostProcess: invalid viewport ID");
 		return HRL_InvalidID;
 	}
 
@@ -740,16 +742,15 @@ HRL_id HRL_CreatePostProcess(HRL_id _sceneid, HRL_id _matid, int priority)
 		return HRL_InvalidID;
 	}
 
-	auto p = new HRL_PostProcess();
-	p->material_ = _matid;
-	p->priority  = priority;
+	auto pp = new HRL_PostProcess();
+	pp->material_ = _matid;
 
 	HRL_id newId = GenerateHRL_ID();
 
-	g_Backend.RHI_CreatePostProcess(_matid, priority);
+	ctx_.post_processes.emplace(newId, pp);
+	it_viewport->second->post_processes.emplace(priority, pp);
 
-	it_scene->second->post_processes.emplace(newId, p);
-	ctx_.post_processes.emplace(newId, p);
+	g_Backend.RHI_CreatePostProcess(_matid, priority);
 
 	return newId;
 }
@@ -763,12 +764,12 @@ void HRL_DeletePostProcess(HRL_id _postid)
 	}
 
 	//retire de la scene propriétaire
-	for (auto& [scene_id, scene] : ctx_.scenes)
+	for (auto& [scene_id, viewports] : ctx_.viewports)
 	{
-		auto sit = scene->post_processes.find(_postid);
-		if (sit != scene->post_processes.end())
+		auto sit = viewports->post_processes.find(_postid);
+		if (sit != viewports->post_processes.end())
 		{
-			scene->post_processes.erase(sit);
+			viewports->post_processes.erase(sit);
 			break;
 		}
 	}
@@ -777,6 +778,8 @@ void HRL_DeletePostProcess(HRL_id _postid)
 	delete it->second;
 	ctx_.post_processes.erase(it);
 }
+
+
 
 
 //Shaders//

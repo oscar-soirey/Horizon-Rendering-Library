@@ -11,6 +11,8 @@ HRL_vtable GetOpenGL33Backend()
 	vtable.RHI_InitContext = GL33_InitContext;
 	vtable.RHI_Shutdown = GL33_Shutdown;
 
+	vtable.RHI_WindowResizeCallback = GL33_WindowResizeCallback;
+
 	vtable.RHI_ResetFramebuffer = GL33_ResetFramebuffer;
 
 	vtable.RHI_RenderScene = GL33_DrawScene;
