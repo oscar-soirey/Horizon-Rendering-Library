@@ -92,7 +92,7 @@ void ProcessCameraRotation(GLFWwindow* win)
   lastMouseX = mouseX;
   lastMouseY = mouseY;
 
-  yaw   += offsetX;
+  yaw   += offsetX*0.5f;
   pitch += offsetY;
 
   // clamp pitch pour éviter de regarder trop haut/bas
@@ -135,7 +135,7 @@ int main()
   glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
   //désactiver la v-sync
-  //glfwSwapInterval(0);
+  glfwSwapInterval(0);
 
 
   HRL_RegisterErrorCallback(ErrorCallback);
@@ -234,7 +234,7 @@ int main()
   }
 
   //tree texture
-  {
+  {/**
     size_t al_size;
     std::string al_data = example::OpenFile("tree/albedo.jpg", &al_size);
     HRL_id al_texture = HRL_CreateTexture(al_data.c_str(), al_size);
@@ -270,7 +270,7 @@ int main()
     HRL_SetMeshMaterial(tree_mesh, tree_material);
     HRL_SetMeshScale(tree_mesh, 20.f, 10.f, 1.f);
     HRL_SetMeshLocation(tree_mesh, 10.f, 0.f, 0.f);
-  }
+  */}
 
   //Enable fog
   HRL_SetFogEnabled(scene, false);
@@ -293,7 +293,7 @@ int main()
     glfwSwapBuffers(win);
     glfwPollEvents();
 
-    //printf("FPS : %f\n", 1/dt);
+    printf("FPS : %f\n", 1/dt);
 
     //movement de la camera
     ProcessCameraMovement(win);

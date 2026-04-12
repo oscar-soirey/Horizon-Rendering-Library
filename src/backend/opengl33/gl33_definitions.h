@@ -60,7 +60,8 @@ typedef struct {
 
 typedef struct {
 	GLuint fbo;
-	GLuint texture;
+	//contains scene texture and brightness texture
+	GLuint textures[2];
 	int width, height;
 }GL_Scene;
 

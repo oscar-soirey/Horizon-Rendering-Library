@@ -1,5 +1,5 @@
 HRL API :
-Everything is mandatory, if you don't create it, it does't exists
+Everything is mandatory, if you don't create it, it doesn't exists
 
 Initialization : 
 Init

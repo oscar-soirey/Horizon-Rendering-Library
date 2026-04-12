@@ -1,7 +1,6 @@
 Dev plan :
 
 API features :
-- Post Processing
 - Animations frame par frame
 
 HRL Core features :
@@ -11,6 +10,3 @@ HRL Core features :
 Optimisation :
 - Batching simple
 - Culling simple pour les sprites
-
-Documentation & Debug :
-- Ajouter des logs en cas d'oubli du dev user (actif que dans une configuration debug), par exemple : WARNING: Scene 3 has no viewport, skipped

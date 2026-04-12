@@ -28,7 +28,7 @@ static glm::mat4 CalculateProjectionMatrix();
 static glm::mat4 CalculateViewMatrix();
 
 static void DrawSprites(const std::vector<GL_RenderBatch>& render_batches);
-static void DrawPostProcessQuad(GLuint src_texture, HRL_PostProcess* pp);
+static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_PostProcess* pp);
 
 
 
@@ -49,6 +49,9 @@ struct GL33_Backend {
 	GLuint sprite_inst_model_vbo;
 
 	GLuint ubo[UBO_COUNT];
+
+	//Brightness shader and FBO
+	GL33_Shader* extract_brightness_shader=nullptr;
 
 	//contains the render technique of the scene
 	std::unordered_map<HRL_id, GL_Scene*> gpu_scenes;
@@ -193,8 +196,8 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		res_sprite_vert_glsl_len,
 		(const char*)res_sprite_frag_glsl,
 		res_sprite_frag_glsl_len);
-
 	bck_->shaders.emplace(HRL_SPRITE_SHADER, sprite_shader);
+	sprite_shader->SetFloat("BrightThreshold", 0.8f);
 
 	//DEBUG SHADER
 	auto* debug_shader = new GL33_Shader();
@@ -245,6 +248,7 @@ void GL33_Shutdown()
 	//DELETE POST PROCESS OBJECTS
 	glDeleteFramebuffers(2, bck_->post_fbo);
 	glDeleteTextures(2, bck_->post_textures);
+
 	//DELETE BUFFERS
 	glDeleteVertexArrays(BUFFER_COUNT, bck_->vao);
 	glDeleteBuffers(BUFFER_COUNT, bck_->vbo);
@@ -257,10 +261,18 @@ void GL33_Shutdown()
 
 void GL33_WindowResizeCallback(int width, int height)
 {
+	//Resize post process textures and brightness textures
 	for (int i = 0; i < 2; i++)
 	{
 		glBindTexture(GL_TEXTURE_2D, bck_->post_textures[i]);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+	}
+	for (const auto& s : bck_->gpu_scenes)
+	{
+		glBindTexture(GL_TEXTURE_2D, s.second->textures[0]);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glBindTexture(GL_TEXTURE_2D, s.second->textures[1]);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	}
 	glBindTexture(GL_TEXTURE_2D, 0);
 }
@@ -277,17 +289,15 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 	}
 
 	GLuint scene_fbo = scene_it->second->fbo;
-
 	ctx_->current_fog = &scene->fog;
 
-	//clear scene once (évite les artefacts entre viewports)
+	// clear scene_fbo (les 2 attachments)
 	glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
 
 	for (const auto& v : scene->viewports)
 	{
-		//bind viewport to context
 		ctx_->viewport = v.second;
 		float winW = (float)GetWindowWidth();
 		float winH = (float)GetWindowHeight();
@@ -304,45 +314,61 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		ctx_->proj_mat = CalculateProjectionMatrix();
 		ctx_->view_mat = CalculateViewMatrix();
 
-		bool has_post_process = !v.second->post_processes.empty();
-
-		// ---- STEP 1 : rendu de la scène ----
-		// Si post-process : on rend dans post_fbo[0] (source du ping-pong)
-		// Sinon           : on rend directement dans scene_fbo
-		GLuint initial_target = has_post_process ? bck_->post_fbo[0] : scene_fbo;
-		glBindFramebuffer(GL_FRAMEBUFFER, initial_target);
-		if (has_post_process)
-		{
-			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-			glClear(GL_COLOR_BUFFER_BIT);
-		}
+		// ---- STEP 1 : rendu de la scène dans scene_fbo ----
+		// le sprite shader écrit simultanément dans ATTACHMENT0 (scène) et ATTACHMENT1 (bright)
+		glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
 		DrawSprites(render_batches);
 
-		// ---- STEP 2 : chaîne de post-process (ping-pong) ----
+		bool has_post_process = !v.second->post_processes.empty();
+
 		if (has_post_process)
 		{
-			int src = 0;
+			// ---- STEP 2 : copie ATTACHMENT0 vers post_fbo[0] pour démarrer le ping-pong ----
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
+			glReadBuffer(GL_COLOR_ATTACHMENT0);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bck_->post_fbo[0]);
+			glBlitFramebuffer(
+				0, 0, (int)winW, (int)winH,
+				0, 0, (int)winW, (int)winH,
+				GL_COLOR_BUFFER_BIT,
+				GL_NEAREST
+			);
 
+			// ---- STEP 3 : chaîne de post-process (ping-pong) ----
+			int src = 0;
 			for (const auto& [priority, pp] : v.second->post_processes)
 			{
 				int dst = 1 - src;
 
 				glBindFramebuffer(GL_FRAMEBUFFER, bck_->post_fbo[dst]);
 				glClear(GL_COLOR_BUFFER_BIT);
-				DrawPostProcessQuad(bck_->post_textures[src], pp);
+				DrawPostProcessQuad(bck_->post_textures[src], scene_it->second->textures[1], pp);
 
 				src = dst;
 			}
 
-			// ---- STEP 3 : blit direct vers scene_fbo ----
+			// ---- STEP 4 : blit dernier post-process vers l'écran ----
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, bck_->post_fbo[src]);
-			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene_fbo);
-			//GPU copy, zero overhead
+			glReadBuffer(GL_COLOR_ATTACHMENT0);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 			glBlitFramebuffer(
-					0, 0, GetWindowWidth(), GetWindowHeight(),
-					0, 0, GetWindowWidth(), GetWindowHeight(),
-					GL_COLOR_BUFFER_BIT,
-					GL_NEAREST
+				0, 0, (int)winW, (int)winH,
+				0, 0, (int)winW, (int)winH,
+				GL_COLOR_BUFFER_BIT,
+				GL_NEAREST
+			);
+		}
+		else
+		{
+			// ---- pas de post-process : blit direct scene → écran ----
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
+			glReadBuffer(GL_COLOR_ATTACHMENT0);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+			glBlitFramebuffer(
+				0, 0, (int)winW, (int)winH,
+				0, 0, (int)winW, (int)winH,
+				GL_COLOR_BUFFER_BIT,
+				GL_NEAREST
 			);
 		}
 	}
@@ -359,7 +385,8 @@ static void InitTextureAndBindToFBO(GLuint _texture, GLuint _fbo, int width, int
 	//on initialise avec les bonnes valeurs la texture
 	glBindTexture(GL_TEXTURE_2D, _texture);
 
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+	//HDR Texture (RGBA16F)
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
@@ -572,7 +599,7 @@ static void DrawSprites(const std::vector<GL_RenderBatch>& render_batches)
 	}
 }
 
-static void DrawPostProcessQuad(GLuint src_texture, HRL_PostProcess* pp)
+static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_PostProcess* pp)
 {
 	auto mat_it = GetPrivateContext()->materials.find(pp->material_);
 	if (mat_it == GetPrivateContext()->materials.end())
@@ -595,6 +622,11 @@ static void DrawPostProcessQuad(GLuint src_texture, HRL_PostProcess* pp)
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, src_texture);
 	shader->SetInt("uScene", 0);
+
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, bright_texture);
+	shader->SetInt("uBrightScene", 1);
+
 	shader->SetVec2("uScreenSize",{ctx_->viewport->x_ * (float)GetWindowWidth(), ctx_->viewport->y_ * (float)GetWindowHeight()});
 
 	//uniforms utilisateur (ex: saturation, brightness...)
@@ -617,10 +649,7 @@ static void DrawPostProcessQuad(GLuint src_texture, HRL_PostProcess* pp)
 
 
 //EFFECTS
-void GL33_FogPropertyChanged(HRL_id scene, hrl_fog_t* fog_ptr)
-{
-
-}
+void GL33_FogPropertyChanged(HRL_id scene, hrl_fog_t* fog_ptr) {}
 
 
 
@@ -709,36 +738,46 @@ void GL33_UpdateLights(const std::vector<HRL_Light*>& _lights)
 
 
 
+
+
+
 //SCENES
 void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 {
 	auto* scene = new GL_Scene();
-	if (_renderOnScreen)
-	{
-		//le framebuffer est 0 (ecran)
-		scene->fbo = 0;
-	}
-	else
-	{
-		glGenTextures(1, &scene->texture);
-		glBindTexture(GL_TEXTURE_2D, scene->texture);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 512, 512, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+	scene->width = 512;
+	scene->height = 512;
 
-		scene->width = 512;
-		scene->height = 512;
 
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	//EXTRACT BRIGHTNESS
+	glGenFramebuffers(1, &scene->fbo);
+	glGenTextures(2, scene->textures);
 
-		glGenFramebuffers(1, &scene->fbo);
-		glBindFramebuffer(GL_FRAMEBUFFER, scene->fbo);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene->texture, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, scene->fbo);
 
-		GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-		assert(status == GL_FRAMEBUFFER_COMPLETE && "Framebuffer incomplete!");
-	}
+	glBindTexture(GL_TEXTURE_2D, scene->textures[0]);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 512, 512, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	glBindTexture(GL_TEXTURE_2D, scene->textures[1]);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 512, 512, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene->textures[0], 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, scene->textures[1], 0);
+	GLenum attachments[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+	glDrawBuffers(2, attachments);
+
+	GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	assert(status == GL_FRAMEBUFFER_COMPLETE && "OpenGL 33 Backend: Scene framebuffer incomplete!");
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	//les HRL_id sont partagés entre le backend et l'api
 	bck_->gpu_scenes.emplace(_newSceneid, scene);
@@ -752,12 +791,10 @@ void GL33_DeleteScene(HRL_id _sceneid)
 		return;
 	}
 
-	if (it->second->fbo != 0)
-	{
-		//scene is not rendered at screen
-		glDeleteTextures(1, &it->second->texture);
-		glDeleteFramebuffers(1, &it->second->fbo);
-	}
+	//scene is not rendered at screen
+	glDeleteTextures(2, it->second->textures);
+	glDeleteFramebuffers(1, &it->second->fbo);
+
 	delete it->second;
 	bck_->gpu_scenes.erase(it);
 }
@@ -775,9 +812,12 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
 		return;
 	}
 
-	GLuint tex = it->second->texture;
-	glBindTexture(GL_TEXTURE_2D, tex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, _width, _height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+	for (const auto& t : it->second->textures)
+	{
+		glBindTexture(GL_TEXTURE_2D, t);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, _width, _height, 0, GL_RGBA, GL_FLOAT, nullptr);
+	}
+	glBindTexture(GL_TEXTURE_2D, 0);
 
 	it->second->width = _width;
 	it->second->height = _height;
@@ -810,7 +850,7 @@ void GL33_DeleteShader(HRL_id _id)
 	auto it = bck_->shaders.find(_id);
 	if (it == bck_->shaders.end())
 	{
-		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteShader error : Shader ID doesn't exists");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteShader error: Shader ID doesn't exists");
 		return;
 	}
 	delete it->second;
@@ -857,7 +897,7 @@ void GL33_DeleteTexture(HRL_id _id)
   auto it = bck_->textures.find(_id);
   if (it == bck_->textures.end())
   {
-    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteTexture error : Texture ID doesn't exists");
+    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "DeleteTexture error: Texture ID doesn't exists");
     return;
   }
   delete it->second;
@@ -868,7 +908,7 @@ void GL33_GetTextureSize(HRL_id id, int *width, int *height)
   auto it = bck_->textures.find(id);
   if (it == bck_->textures.end())
   {
-    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_GetTextureSize error : Texture ID doesn't exists");
+    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_GetTextureSize error: Texture ID doesn't exists");
     return;
   }
   *width = (int)it->second->GetWidth();
@@ -879,7 +919,7 @@ void GL33_SetTextureMinFilter(HRL_id id, HRL_uint _filter)
   auto it = bck_->textures.find(id);
   if (it == bck_->textures.end())
   {
-    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMinFilter error : Texture ID doesn't exists");
+    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMinFilter error: Texture ID doesn't exists");
     return;
   }
   it->second->SetMinFilter(_filter);
@@ -889,7 +929,7 @@ void GL33_SetTextureMaxFilter(HRL_id id, HRL_uint _filter)
   auto it = bck_->textures.find(id);
   if (it == bck_->textures.end())
   {
-    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMaxFilter error : Texture ID doesn't exists");
+    SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_SetTextureMaxFilter error: Texture ID doesn't exists");
     return;
   }
   it->second->SetMaxFilter(_filter);
@@ -940,7 +980,7 @@ void GL33_DrawDebug(const DebugRenderer &_renderer, float line_thickness)
 	auto it = bck_->shaders.find(HRL_DEBUG_SHADER);
 	if (it == bck_->shaders.end())
 	{
-		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_FATAL, "GL33_DrawDebug error : debug shader doesn't exists");
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_FATAL, "GL33_DrawDebug error: debug shader doesn't exists");
 		return;
 	}
 	auto* s = it->second;
@@ -1029,7 +1069,7 @@ unsigned int HRL_GL_GetTextureGL_ID(HRL_id _textureid)
 	auto it = bck_->textures.find(_textureid);
 	if (it == bck_->textures.end())
 	{
-		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetTextureGL_ID error : Texture ID doesn't exists");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetTextureGL_ID error: Texture ID doesn't exists");
 		return GL_INVALID_VALUE;
 	}
 
@@ -1040,7 +1080,7 @@ unsigned int HRL_GL_GetShaderGL_ID(HRL_id _shaderid)
 	auto it = bck_->shaders.find(_shaderid);
 	if (it == bck_->shaders.end())
 	{
-		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetShaderGL_ID error : Shader ID doesn't exists");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetShaderGL_ID error: Shader ID doesn't exists");
 		return GL_INVALID_VALUE;
 	}
 
@@ -1051,9 +1091,9 @@ unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid)
 	auto it = bck_->gpu_scenes.find(_sceneid);
 	if (it == bck_->gpu_scenes.end())
 	{
-		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneTextureGL_ID : scene ID is not valid");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneTextureGL_ID: scene ID is not valid");
 		return GL_INVALID_VALUE;
 	}
 
-	return it->second->texture;
+	return it->second->textures[0];
 }

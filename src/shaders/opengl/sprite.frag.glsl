@@ -1,5 +1,8 @@
 #version 330 core
 
+layout(location = 0) out vec4 FragColor;    //COLOR_ATTACHMENT0
+layout(location = 1) out vec4 BrightColor;  //COLOR_ATTACHMENT1
+
 #define MAX_LIGHTS              32
 
 #define HRL_PointLight          (uint(0x0011))
@@ -10,8 +13,6 @@
 const int FOG_LINEAR = 0x0090; // transition linéaire entre FogStart et FogEnd
 const int FOG_EXP    = 0x0091; // exponentiel doux,  contrôlé par FogDensity
 const int FOG_EXP2   = 0x0092; // exponentiel carré, plus réaliste
-
-out vec4 FragColor;
 
 in vec3 fragPos;
 in vec2 uv;
@@ -25,6 +26,8 @@ uniform sampler2D T_Alpha;
 
 uniform vec3 TintColor;
 uniform vec3 CamPos;
+
+uniform float BrightThreshold;
 
 // ── Fog uniforms (passer a un UBO) ──────────────────────────────────────────────────────────────
 uniform int   FogEnabled;   // active / désactive le fog
@@ -151,5 +154,14 @@ void main()
     // distance calculée ici pour ne pas la recalculer dans applyFog
     float dist = length(CamPos - fragPos);
 
-    FragColor = applyFog(vec4(result, alpha), dist);
+
+    vec4 color = applyFog(vec4(result, alpha), dist);
+    float brightness = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+
+    FragColor = color;  //complete scene
+
+    if (brightness > BrightThreshold)
+        BrightColor = color;
+    else
+        BrightColor = vec4(0.0, 0.0, 0.0, 1.0);
 }

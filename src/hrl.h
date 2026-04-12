@@ -725,30 +725,7 @@ HRL_API void HRL_SetCameraRotation(HRL_id _camid, float pitch, float yaw, float 
 
 /* ============================================================================
  *  EFFECTS
- * ============================================================================ */
-
-//BLOOM
-/**
- * @brief Enables or disables the bloom post-process effect for a scene. Disabled by default.
- * @param scene  ID of the target scene.
- * @param enable HRL_TRUE to enable, HRL_FALSE to disable.
- */
-HRL_API void HRL_SetBloomEnabled(HRL_id scene, int enable);
-
-/**
- * @brief Sets the bloom intensity for a scene.
- * @param scene    ID of the target scene.
- * @param strength Bloom blend factor. Higher values produce a more pronounced glow.
- */
-HRL_API void HRL_SetBloomStrength(HRL_id scene, float strength);
-
-/**
- * @brief Sets the luminance threshold above which pixels contribute to bloom.
- * @param scene     ID of the target scene.
- * @param threshold Brightness cutoff in [0..1]. Pixels below this value are unaffected.
- */
-HRL_API void HRL_SetBloomThreshold(HRL_id scene, float threshold);
-
+ * ============================================================================ *
 //FOG
 /**
  * @brief Enables or disables the fog effect for a scene.
