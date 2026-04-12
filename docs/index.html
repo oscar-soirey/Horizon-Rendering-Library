@@ -144,6 +144,12 @@
   <a class="sub" href="#gl-getscenetextureid">HRL_GL_GetSceneTextureGL_ID</a>
   <a class="sub" href="#gl-getscenecolorbuffer">HRL_GL_GetSceneColorBufferGL_ID</a>
 
+  <div class="sidebar-section-label">Language Bindings</div>
+  <a href="#bindings">Overview</a>
+  <a class="sub" href="#bindings-python">Python</a>
+  <a class="sub" href="#bindings-csharp">C#</a>
+  <a class="sub" href="#bindings-rust">Rust</a>
+
   <div class="sidebar-section-label">Project</div>
   <a href="#contributors">Contributors</a>
   <a href="#credits">Credits</a>
@@ -233,11 +239,7 @@
     glfwSwapBuffers(window);
 }
 
-<span class="cm">// 4. Cleanup — reverse dependency order</span>
-<span class="fn">HRL_DeleteMesh</span>(mesh);
-<span class="fn">HRL_DeleteMaterial</span>(mat);   <span class="fn">HRL_DeleteTexture</span>(tex);
-<span class="fn">HRL_DeleteShader</span>(shader);  <span class="fn">HRL_DeleteCamera</span>(cam);
-<span class="fn">HRL_DeleteViewport</span>(vp);    <span class="fn">HRL_DeleteScene</span>(scene);
+<span class="cm">// 4. Cleanup — HRL_Shutdown destroys everything automatically</span>
 <span class="fn">HRL_Shutdown</span>();</code></pre>
   </div>
 
@@ -308,7 +310,7 @@
           <div class="fn-sig"><span class="ret">void</span> <span class="name">HRL_Shutdown</span>()</div>
         </div>
         <div class="fn-card-body">
-          <p>Releases all internal HRL resources and shuts down the rendering context. Call after destroying all user-created objects and before closing the application window.</p>
+          <p>Releases all HRL resources and shuts down the rendering context. <strong>You do not need to manually delete individual objects before calling this</strong> — <code>HRL_Shutdown</code> automatically destroys all remaining meshes, materials, textures, shaders, cameras, viewports, and scenes. Simply call it when your application is ready to close.</p>
         </div>
       </div>
     </div>
@@ -1280,6 +1282,128 @@
     </div>
   </div>
 
+  <!-- LANGUAGE BINDINGS -->
+  <div class="doc-section" id="bindings">
+    <h2>HRL for… <span class="section-tag">Language Bindings</span></h2>
+    <p>HRL exposes a stable C API that can be consumed from any language with a C FFI. Official bindings are provided for Python, C#, and Rust. All bindings wrap the same underlying <code>libhrldll.dll</code> / <code>libhrl.so</code> shared library — the C API is the source of truth.</p>
+
+    <div class="info-box note">
+      <span class="icon">ℹ</span>
+      <span>All binding packages ship with their own copy of the HRL shared library. You do not need to build HRL from source to use a binding.</span>
+    </div>
+
+    <!-- PYTHON -->
+    <div id="bindings-python">
+      <h3>Python <span class="section-tag">SWIG</span></h3>
+      <p>The Python binding is generated with SWIG and wraps the full public API. It requires Python 3.8+ and ships as a standard importable module alongside <code>_hrl.pyd</code> and <code>libhrldll.dll</code>.</p>
+<pre><code><span class="kw">import</span> hrl
+
+hrl.<span class="fn">HRL_Init</span>(hrl.<span class="ty">HRL_OpenGL45</span>)
+hrl.<span class="fn">HRL_InitContext</span>(<span class="num">1280</span>, <span class="num">720</span>, loader_ptr)
+
+scene  = hrl.<span class="fn">HRL_CreateScene</span>(hrl.<span class="ty">HRL_True</span>)
+cam    = hrl.<span class="fn">HRL_CreateCamera</span>(scene, hrl.<span class="ty">HRL_Ortho</span>)
+vp     = hrl.<span class="fn">HRL_CreateViewport</span>(scene, cam, <span class="num">0</span>, <span class="num">0</span>, <span class="num">1</span>, <span class="num">1</span>)
+
+<span class="cm"># Binary file buffers are passed as Python bytes objects</span>
+<span class="kw">with</span> open(<span class="str">"atlas.png"</span>, <span class="str">"rb"</span>) <span class="kw">as</span> f:
+    data = f.read()
+    tex  = hrl.<span class="fn">HRL_CreateTexture</span>(data, len(data))
+
+<span class="kw">while</span> running:
+    hrl.<span class="fn">HRL_BeginFrame</span>()
+    hrl.<span class="fn">HRL_EndFrame</span>()
+
+hrl.<span class="fn">HRL_Shutdown</span>()</code></pre>
+      <table class="doc-table">
+        <thead><tr><th>Type mapping</th><th>C type</th><th>Python type</th></tr></thead>
+        <tbody>
+          <tr><td>Handle</td><td>HRL_id</td><td>int</td></tr>
+          <tr><td>Binary buffer</td><td>const char*, size_t</td><td>bytes + len()</td></tr>
+          <tr><td>Output pointer</td><td>int*, HRL_Severity*</td><td>returned as tuple</td></tr>
+          <tr><td>Function pointer</td><td>HRL_ErrorCallback</td><td>not yet supported — pass None</td></tr>
+          <tr><td>void* loader</td><td>void*</td><td>int (via ctypes.cast)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section-divider"></div>
+
+    <!-- C# -->
+    <div id="bindings-csharp">
+      <h3>C# <span class="section-tag">SWIG / P/Invoke</span></h3>
+      <p>The C# binding is generated with SWIG and targets .NET 6+. It is suited for use in Unity-free desktop tools, custom editors, or any .NET application that needs a rendering layer. The native library is loaded automatically on first use.</p>
+<pre><code><span class="kw">using</span> HRL;
+
+Hrl.<span class="fn">HRL_Init</span>(Hrl.<span class="ty">HRL_OpenGL45</span>);
+Hrl.<span class="fn">HRL_InitContext</span>(<span class="num">1280</span>, <span class="num">720</span>, loaderPtr);
+
+<span class="kw">var</span> scene = Hrl.<span class="fn">HRL_CreateScene</span>(Hrl.<span class="ty">HRL_True</span>);
+<span class="kw">var</span> cam   = Hrl.<span class="fn">HRL_CreateCamera</span>(scene, Hrl.<span class="ty">HRL_Ortho</span>);
+<span class="kw">var</span> vp    = Hrl.<span class="fn">HRL_CreateViewport</span>(scene, cam, <span class="num">0</span>, <span class="num">0</span>, <span class="num">1</span>, <span class="num">1</span>);
+
+<span class="kw">byte</span>[] pngBytes = File.ReadAllBytes(<span class="str">"atlas.png"</span>);
+<span class="kw">var</span> tex = Hrl.<span class="fn">HRL_CreateTexture</span>(pngBytes, (<span class="kw">uint</span>)pngBytes.Length);
+
+<span class="kw">while</span> (running) {
+    Hrl.<span class="fn">HRL_BeginFrame</span>();
+    Hrl.<span class="fn">HRL_EndFrame</span>();
+}
+
+Hrl.<span class="fn">HRL_Shutdown</span>();</code></pre>
+      <table class="doc-table">
+        <thead><tr><th>Type mapping</th><th>C type</th><th>C# type</th></tr></thead>
+        <tbody>
+          <tr><td>Handle</td><td>HRL_id</td><td>uint</td></tr>
+          <tr><td>Binary buffer</td><td>const char*, size_t</td><td>byte[] + uint length</td></tr>
+          <tr><td>Output pointer</td><td>int*, HRL_Severity*</td><td>out int, out HRL_Severity</td></tr>
+          <tr><td>Boolean</td><td>HRL_True / HRL_False</td><td>HRL.HRL_True (int constant)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section-divider"></div>
+
+    <!-- RUST -->
+    <div id="bindings-rust">
+      <h3>Rust <span class="section-tag">bindgen</span></h3>
+      <p>The Rust binding is generated with <code>bindgen</code> and exposes a low-level <code>unsafe</code> FFI layer under the <code>hrl_sys</code> crate. A safe wrapper crate <code>hrl</code> is planned. Add the crate to your <code>Cargo.toml</code> and ensure the shared library is on the dynamic linker path.</p>
+<pre><code><span class="kw">use</span> hrl_sys::*;
+
+<span class="kw">unsafe</span> {
+    <span class="fn">HRL_Init</span>(<span class="ty">HRL_OpenGL45</span>);
+    <span class="fn">HRL_InitContext</span>(<span class="num">1280</span>, <span class="num">720</span>, loader_ptr <span class="kw">as</span> *<span class="kw">mut</span> _);
+
+    <span class="kw">let</span> scene = <span class="fn">HRL_CreateScene</span>(<span class="ty">HRL_True</span> <span class="kw">as</span> i32);
+    <span class="kw">let</span> cam   = <span class="fn">HRL_CreateCamera</span>(scene, <span class="ty">HRL_Ortho</span>);
+    <span class="kw">let</span> vp    = <span class="fn">HRL_CreateViewport</span>(scene, cam, <span class="num">0.0</span>, <span class="num">0.0</span>, <span class="num">1.0</span>, <span class="num">1.0</span>);
+
+    <span class="kw">let</span> png = std::fs::read(<span class="str">"atlas.png"</span>).unwrap();
+    <span class="kw">let</span> tex = <span class="fn">HRL_CreateTexture</span>(png.as_ptr() <span class="kw">as</span> *<span class="kw">const</span> i8, png.len());
+
+    <span class="kw">while</span> running {
+        <span class="fn">HRL_BeginFrame</span>();
+        <span class="fn">HRL_EndFrame</span>();
+    }
+
+    <span class="fn">HRL_Shutdown</span>();
+}</code></pre>
+      <table class="doc-table">
+        <thead><tr><th>Type mapping</th><th>C type</th><th>Rust type</th></tr></thead>
+        <tbody>
+          <tr><td>Handle</td><td>HRL_id</td><td>u32</td></tr>
+          <tr><td>Binary buffer</td><td>const char*, size_t</td><td>*const i8, usize</td></tr>
+          <tr><td>Output pointer</td><td>int*</td><td>*mut i32</td></tr>
+          <tr><td>String</td><td>const char*</td><td>CStr / *const c_char</td></tr>
+        </tbody>
+      </table>
+      <div class="info-box warn">
+        <span class="icon">⚠</span>
+        <span>The Rust binding is entirely <code>unsafe</code>. All HRL handles are plain integers with no lifetime tracking. The safe wrapper crate will address this in a future release.</span>
+      </div>
+    </div>
+  </div>
+
   <!-- CONTRIBUTORS -->
   <div class="doc-section" id="contributors">
     <h2>Contributors <span class="section-tag">Project</span></h2>
@@ -1322,8 +1446,7 @@
     </div>
   </div>
 
-
-    <!-- CREDITS -->
+  <!-- THIRD PARTY -->
   <div class="doc-section" id="third-party">
     <h2>Third-Party Libs <span class="section-tag">Project</span></h2>
     <p>HRL use third-party libs</p>
