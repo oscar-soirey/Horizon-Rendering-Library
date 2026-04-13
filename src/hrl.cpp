@@ -98,7 +98,7 @@ std::vector<HRL_Light*> GetLightsVector(/*HRL_id _scene*/)
 
 /// API Implementation ///
 
-void HRL_Init(HRL_uint _api)
+void HRL_Init(HRL_E_APIs _api)
 {
 	switch (_api)
 	{
@@ -275,7 +275,7 @@ void HRL_WindowResizeCallback(int _width, int _height)
 }
 
 
-HRL_Error HRL_GetLastError(const char** _detail, HRL_Severity* _severity)
+HRL_EError HRL_GetLastError(const char** _detail, HRL_ESeverity* _severity)
 {
 	//on stocke dans une var statique pour eviter un use after free
 	static std::string detail;
@@ -299,7 +299,7 @@ constexpr const char* errors_str[]={
 constexpr int HRL_ERROR_BASE = 0x0070;
 constexpr int HRL_ERROR_COUNT = sizeof(errors_str) / sizeof(errors_str[0]);
 
-const char* HRL_ErrorEnumToString(HRL_Error err)
+const char* HRL_ErrorEnumToString(HRL_EError err)
 {
 	int index = static_cast<int>(err) - HRL_ERROR_BASE;
 
@@ -318,7 +318,7 @@ constexpr const char* severity_str[]={
 constexpr int HRL_SEVERITY_BASE = 0x0080;
 constexpr int HRL_SEVERITY_COUNT = sizeof(severity_str) / sizeof(severity_str[0]);
 
-const char* HRL_SeverityEnumToString(HRL_Severity sev)
+const char* HRL_SeverityEnumToString(HRL_ESeverity sev)
 {
 	int index = static_cast<int>(sev) - HRL_SEVERITY_BASE;
 
@@ -328,7 +328,7 @@ const char* HRL_SeverityEnumToString(HRL_Severity sev)
 	return severity_str[index];
 }
 
-void HRL_RegisterErrorCallback(HRL_ErrorCallback _callback)
+void HRL_RegisterErrorCallback(HRL_CErrorCallback _callback)
 {
 	ctx_.error_callback = _callback;
 }
@@ -468,7 +468,7 @@ void HRL_SetSpriteDrawOrder(HRL_id _meshid, float _draworder)
 
 
 //Lights//
-HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_uint _type)
+HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_ELightType _type)
 {
 	auto it_scene = ctx_.scenes.find(_sceneid);
 	if (it_scene == ctx_.scenes.end())
@@ -614,11 +614,11 @@ void HRL_GetTextureSize(HRL_id _textureid, int *_width, int *_height)
 	}
 }
 
-void HRL_SetTextureMinFilter(HRL_id _textureid, HRL_uint _filter)
+void HRL_SetTextureMinFilter(HRL_id _textureid, HRL_EFilterType _filter)
 {
 	g_Backend.RHI_SetTextureMinFilter(_textureid, _filter);
 }
-void HRL_SetTextureMagFilter(HRL_id _textureid, HRL_uint _filter)
+void HRL_SetTextureMagFilter(HRL_id _textureid, HRL_EFilterType _filter)
 {
 	g_Backend.RHI_SetTextureMaxFilter(_textureid, _filter);
 }
@@ -988,7 +988,7 @@ void HRL_SetViewportRect(HRL_id _viewportid, float x, float y, float _width, flo
 
 
 
-HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_uint _type)
+HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_ECameraType _type)
 {
 	auto it_scene = ctx_.scenes.find(_sceneid);
 	if (it_scene == ctx_.scenes.end())
@@ -1047,7 +1047,7 @@ void HRL_DeleteCamera(HRL_id _camid)
 }
 
 
-void HRL_SetCameraType(HRL_id _camid, HRL_uint _type)
+void HRL_SetCameraType(HRL_id _camid, HRL_ECameraType _type)
 {
 	auto it = ctx_.cameras.find(_camid);
 	if (it == ctx_.cameras.end())
@@ -1155,12 +1155,12 @@ void HRL_SetFogEnabled(HRL_id scene, int enable)
 	g_Backend.RHI_FogPropertyChanged(scene, &it->second->fog);
 }
 
-void HRL_SetFogMode(HRL_id scene, HRL_uint mode)
+void HRL_SetFogMode(HRL_id scene, HRL_EFogType mode)
 {
 	auto it = ctx_.scenes.find(scene);
 	if (it == ctx_.scenes.end())
 	{
-		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetFogColor: invalid scene ID");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetFogMode: invalid scene ID");
 		return;
 	}
 	it->second->fog.mode = mode;
@@ -1255,7 +1255,7 @@ void HRL_DrawDebugSegment(HRL_id _sceneid, float a_x, float a_y, float a_z, floa
 	ctx_.debug_renderers[_sceneid].lines.emplace_back(b_x, b_y, b_z, r, g, b);
 }
 
-void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode, const float *vertices_x, const float *vertices_y, const float *vertices_z, int vertices_count, float r, float g, float b)
+void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_EDebugRenderingType _mode, const float *vertices_x, const float *vertices_y, const float *vertices_z, int vertices_count, float r, float g, float b)
 {
 	auto it = ctx_.scenes.find(_sceneid);
 	if (it == ctx_.scenes.end())
@@ -1294,7 +1294,7 @@ void HRL_DrawDebugPolygon(HRL_id _sceneid, HRL_uint _mode, const float *vertices
 	}
 }
 
-void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode, float center_x, float center_y, float center_z, float radius, int segments, float r, float g, float b)
+void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_EDebugRenderingType _mode, float center_x, float center_y, float center_z, float radius, int segments, float r, float g, float b)
 {
 	auto it = ctx_.scenes.find(_sceneid);
 	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugCircle: invalid scene ID"); return; }
@@ -1315,7 +1315,7 @@ void HRL_DrawDebugCircle(HRL_id _sceneid, HRL_uint _mode, float center_x, float 
 	HRL_DrawDebugPolygon(_sceneid, _mode, vx, vy, vz, seg, r, g, b);
 }
 
-void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_uint _mode, float a_x, float a_y, float a_z, float b_x, float b_y, float b_z, float radius, int segments, float r, float g, float b)
+void HRL_DrawDebugCapsule(HRL_id _sceneid, HRL_EDebugRenderingType _mode, float a_x, float a_y, float a_z, float b_x, float b_y, float b_z, float radius, int segments, float r, float g, float b)
 {
 	auto it = ctx_.scenes.find(_sceneid);
 	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DrawDebugCapsule: invalid scene ID"); return; }
@@ -1537,22 +1537,17 @@ void HRL_MaterialSetEmissiveColor(HRL_id matid, float r, float g, float b, float
 
 }
 
-HRL_id HRL_CreateMesh(HRL_id _sceneid, HRL_uint _type, float *_vertices)
+HRL_id HRL_CreateMesh(HRL_id _sceneid, HRL_EMeshType _type, const float *_vertices)
 {
 	return HRL_INVALID_ID;
 }
 
-void HRL_EnableColorPickingBuffer(HRL_id _scene, HRL_uint _enable)
-{
-
-}
-
-HRL_id HRL_CreateMeshFromFile(HRL_id _sceneid, HRL_uint _type, const char *_data, size_t _bufferSize)
+HRL_id HRL_CreateMeshFromFile(HRL_id _sceneid, HRL_EMeshType _type, const char *_data, size_t _bufferSize)
 {
 	return HRL_INVALID_ID;
 }
 
-void HRL_DrawSceneAsDebugMode(HRL_id _sceneid, HRL_uint mode)
+void HRL_DrawSceneAsDebugMode(HRL_id _sceneid, HRL_EDebugView mode)
 {
 
 }

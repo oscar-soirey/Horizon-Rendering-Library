@@ -215,14 +215,14 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 	bck_->fallback_textures[NORMAL_INT] = GL33_CreateTexture((const char*)res_default_normal_png, res_default_normal_png_len);
 	bck_->fallback_textures[SPECULAR_INT] = GL33_CreateTexture((const char*)res_default_specular_png, res_default_specular_png_len);
 	bck_->fallback_textures[ROUGHNESS_INT] = GL33_CreateTexture((const char*)res_default_roughness_png, res_default_roughness_png_len);
-	bck_->fallback_textures[METALIC_INT] = GL33_CreateTexture((const char*)res_default_metalic_png, res_default_metalic_png_len);
+	bck_->fallback_textures[METALLIC_INT] = GL33_CreateTexture((const char*)res_default_metallic_png, res_default_metallic_png_len);
 	bck_->fallback_textures[ALPHA_INT] = GL33_CreateTexture((const char*)res_default_alpha_png, res_default_alpha_png_len);
 
 	assert(bck_->fallback_textures[ALBEDO_INT] != HRL_INVALID_ID && "Failed to load fallback albedo");
 	assert(bck_->fallback_textures[NORMAL_INT] != HRL_INVALID_ID && "Failed to load fallback normal");
 	assert(bck_->fallback_textures[SPECULAR_INT] != HRL_INVALID_ID && "Failed to load fallback specular");
 	assert(bck_->fallback_textures[ROUGHNESS_INT] != HRL_INVALID_ID && "Failed to load fallback roughness");
-	assert(bck_->fallback_textures[METALIC_INT] != HRL_INVALID_ID && "Failed to load fallback metalic");
+	assert(bck_->fallback_textures[METALLIC_INT] != HRL_INVALID_ID && "Failed to load fallback metallic");
 	assert(bck_->fallback_textures[ALPHA_INT] != HRL_INVALID_ID && "Failed to load fallback alpha");
 
 
@@ -301,11 +301,12 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		ctx_->viewport = v.second;
 		float winW = (float)GetWindowWidth();
 		float winH = (float)GetWindowHeight();
+
 		glViewport(
-			(GLsizei)(v.second->x_ * winW),
-			(GLsizei)(v.second->y_ * winH),
-			(GLsizei)(v.second->width_ * winW),
-			(GLsizei)(v.second->height_ * winH)
+		 (GLsizei)(v.second->x_ * winW),
+		 (GLsizei)(v.second->y_ * winH),
+		 (GLsizei)(v.second->width_ * winW),
+		 (GLsizei)(v.second->height_ * winH)
 		);
 
 		std::vector<GL_RenderBatch> render_batches;
@@ -328,13 +329,17 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			glReadBuffer(GL_COLOR_ATTACHMENT0);
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bck_->post_fbo[0]);
 			glBlitFramebuffer(
-				0, 0, (int)winW, (int)winH,
-				0, 0, (int)winW, (int)winH,
-				GL_COLOR_BUFFER_BIT,
-				GL_NEAREST
+			 0, 0, (int)winW, (int)winH,
+			 0, 0, (int)winW, (int)winH,
+			 GL_COLOR_BUFFER_BIT,
+			 GL_NEAREST
 			);
 
 			// ---- STEP 3 : chaîne de post-process (ping-pong) ----
+
+			//to draw square on fullscreen
+			glViewport(0, 0, (int)winW, (int)winH);
+
 			int src = 0;
 			for (const auto& [priority, pp] : v.second->post_processes)
 			{
@@ -352,10 +357,10 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			glReadBuffer(GL_COLOR_ATTACHMENT0);
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 			glBlitFramebuffer(
-				0, 0, (int)winW, (int)winH,
-				0, 0, (int)winW, (int)winH,
-				GL_COLOR_BUFFER_BIT,
-				GL_NEAREST
+			 0, 0, (int)winW, (int)winH,
+			 0, 0, (int)winW, (int)winH,
+			 GL_COLOR_BUFFER_BIT,
+			 GL_NEAREST
 			);
 		}
 		else
@@ -363,13 +368,16 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			// ---- pas de post-process : blit direct scene → écran ----
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
 			glReadBuffer(GL_COLOR_ATTACHMENT0);
-			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-			glBlitFramebuffer(
-				0, 0, (int)winW, (int)winH,
-				0, 0, (int)winW, (int)winH,
-				GL_COLOR_BUFFER_BIT,
-				GL_NEAREST
-			);
+			if (scene->draw_on_screen)
+			{
+				glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+				glBlitFramebuffer(
+				 0, 0, (int)winW, (int)winH,
+				 0, 0, (int)winW, (int)winH,
+				 GL_COLOR_BUFFER_BIT,
+				 GL_NEAREST
+				);
+			}
 		}
 	}
 }
@@ -627,7 +635,7 @@ static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_P
 	glBindTexture(GL_TEXTURE_2D, bright_texture);
 	shader->SetInt("uBrightScene", 1);
 
-	shader->SetVec2("uScreenSize",{ctx_->viewport->x_ * (float)GetWindowWidth(), ctx_->viewport->y_ * (float)GetWindowHeight()});
+	shader->SetVec2("uScreenSize",{ctx_->viewport->width_ * (float)GetWindowWidth(), ctx_->viewport->height_ * (float)GetWindowHeight()});
 
 	//uniforms utilisateur (ex: saturation, brightness...)
 	for (const auto& [name, value] : mat->floatParams_)
@@ -745,8 +753,8 @@ void GL33_UpdateLights(const std::vector<HRL_Light*>& _lights)
 void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 {
 	auto* scene = new GL_Scene();
-	scene->width = 512;
-	scene->height = 512;
+	scene->width = (int)GetWindowWidth();
+	scene->height = (int)GetWindowHeight();
 
 
 	//EXTRACT BRIGHTNESS
@@ -756,14 +764,14 @@ void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 	glBindFramebuffer(GL_FRAMEBUFFER, scene->fbo);
 
 	glBindTexture(GL_TEXTURE_2D, scene->textures[0]);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 512, 512, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, scene->width, scene->height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
 	glBindTexture(GL_TEXTURE_2D, scene->textures[1]);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 512, 512, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, scene->width, scene->height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -914,7 +922,7 @@ void GL33_GetTextureSize(HRL_id id, int *width, int *height)
   *width = (int)it->second->GetWidth();
   *height = (int)it->second->GetHeight();
 }
-void GL33_SetTextureMinFilter(HRL_id id, HRL_uint _filter)
+void GL33_SetTextureMinFilter(HRL_id id, HRL_EFilterType _filter)
 {
   auto it = bck_->textures.find(id);
   if (it == bck_->textures.end())
@@ -924,7 +932,7 @@ void GL33_SetTextureMinFilter(HRL_id id, HRL_uint _filter)
   }
   it->second->SetMinFilter(_filter);
 }
-void GL33_SetTextureMaxFilter(HRL_id id, HRL_uint _filter)
+void GL33_SetTextureMaxFilter(HRL_id id, HRL_EFilterType _filter)
 {
   auto it = bck_->textures.find(id);
   if (it == bck_->textures.end())

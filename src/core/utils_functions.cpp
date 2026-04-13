@@ -7,7 +7,7 @@
 
 extern HRL_Context* GetPrivateContext();
 
-void SetErrorCode(HRL_Error e, HRL_Severity severity, const std::string& detail)
+void SetErrorCode(HRL_EError e, HRL_ESeverity severity, const std::string& detail)
 {
 	GetPrivateContext()->last_error.code = e;
 	GetPrivateContext()->last_error.severity = severity;

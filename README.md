@@ -43,16 +43,16 @@ HRL is a C/C++ rendering library designed to sit on top of multiple graphics bac
 
 ## Supported Backends
 
-| Constant         | Backend           |
-|------------------|-------------------|
-| `HRL_OpenGL33`   | OpenGL 3.3        |
-| `HRL_OpenGL45`   | OpenGL 4.5        |
-| `HRL_Vulkan`     | Vulkan            |
-| `HRL_D3D11`      | Direct3D 11       |
-| `HRL_D3D12`      | Direct3D 12       |
-| `HRL_Metal`      | Metal (Apple)     |
-| `HRL_NVN`        | NVN (Nintendo)    |
-| `HRL_GNM`        | GNM (PlayStation) |
+| Constant         | Backend           | Platform              |
+|------------------|-------------------|-----------------------|
+| `HRL_OpenGL33`   | OpenGL 3.3        | Windows, Linux, MacOS |
+| `HRL_OpenGL45`   | OpenGL 4.5        | Windows, Linux, MacOS |
+| `HRL_Vulkan`     | Vulkan            | Windows, Linux        |
+| `HRL_D3D11`      | Direct3D 11       | Windows, Xbox         |
+| `HRL_D3D12`      | Direct3D 12       | Windows, Xbox         |
+| `HRL_Metal`      | Metal             | Apple                 |
+| `HRL_NVN`        | NVN (Nintendo)    | Nintedo               |
+| `HRL_GNM`        | GNM (PlayStation) | Playstation           |
 
 ---
 
@@ -69,7 +69,7 @@ The consequences of this model are straightforward:
 - A material without a shader is invalid.
 - A scene with no camera produces no output.
 
-Every `HRL_Create*` function returns an `HRL_id`. Always check that the returned value is **not** `HRL_InvalidID` before using it.
+Every `HRL_Create*` function returns an `HRL_id`. Always check that the returned value is **not** `HRL_INVALID_ID` before using it.
 
 ---
 
@@ -77,7 +77,7 @@ Every `HRL_Create*` function returns an `HRL_id`. Always check that the returned
 
 A standard HRL application follows this structure:
 
-```
+```c
 HRL_Init(backend)
 HRL_InitContext(width, height, loader)
 │
@@ -92,7 +92,6 @@ HRL_InitContext(width, height, loader)
     ├── HRL_EndFrame()
     └── [ swap buffers via your windowing layer ]
 
-HRL_Delete* for all objects (in reverse dependency order)
 HRL_Shutdown()
 ```
 
@@ -133,7 +132,7 @@ Creates the rendering context. `loader` is your platform's function loader (e.g.
 ```c
 HRL_Shutdown();
 ```
-Releases all internal resources. Call after destroying all objects and before closing the window.
+Releases all internal resources. Call before closing the window.
 
 ---
 
@@ -333,14 +332,7 @@ while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
 }
 
-// 6. Cleanup (reverse dependency order)
-HRL_DeleteMesh(mesh);
-HRL_DeleteMaterial(material);
-HRL_DeleteTexture(texture);
-HRL_DeleteShader(shader);
-HRL_DeleteViewport(viewport);
-HRL_DeleteCamera(camera);
-HRL_DeleteScene(scene);
+// 6. Cleanup
 HRL_Shutdown();
 ```
 

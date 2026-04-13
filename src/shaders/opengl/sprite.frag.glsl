@@ -21,7 +21,7 @@ uniform sampler2D T_Albedo;
 uniform sampler2D T_Normal;
 uniform sampler2D T_Specular;
 uniform sampler2D T_Roughness;
-uniform sampler2D T_Metalic;
+uniform sampler2D T_Metallic;
 uniform sampler2D T_Alpha;
 
 uniform vec3 TintColor;
@@ -97,7 +97,7 @@ void main()
 {
     // ── Textures ──────────────────────────────────────────────────────────────
     vec3  albedo    = texture(T_Albedo,    uv).rgb;
-    float metallic  = texture(T_Metalic,   uv).r;
+    float metallic  = texture(T_Metallic,   uv).r;
     float roughness = clamp(texture(T_Roughness, uv).r, 0.05, 1.0);
     float specMap   = texture(T_Specular,  uv).r;
 

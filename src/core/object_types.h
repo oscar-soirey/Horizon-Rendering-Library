@@ -15,8 +15,8 @@ typedef uint64_t HRL_BackendHandle;
 
 //Errors
 typedef struct {
-  HRL_Error code;
-  HRL_Severity severity;
+  HRL_EError code;
+  HRL_ESeverity severity;
   std::string detail;
 }HRL_Internal_Error;
 
@@ -163,7 +163,7 @@ typedef struct {
 typedef struct {
   //errors
   HRL_Internal_Error last_error;
-  HRL_ErrorCallback error_callback;
+  HRL_CErrorCallback error_callback;
 
   //window dimensions
   uint32_t window_width;

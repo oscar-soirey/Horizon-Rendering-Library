@@ -18,12 +18,13 @@ uniform float saturation = 1.0;
 uniform float gamma = 1.0;
 uniform vec3 tintColor = vec3(1.0);
 uniform bool invertColor = false;
+uniform float bloomStrength = 1.0;
 
 //sigma faible → blur serré
-//float weights[5] = float[](0.2270270, 0.1945946, 0.1216216, 0.0540540, 0.0162162);
+float weights[5] = float[](0.2270270, 0.1945946, 0.1216216, 0.0540540, 0.0162162);
 
 //sigma plus grand → blur plus étalé et volumétrique
-float weights[9] = float[](0.1591, 0.1489, 0.1226, 0.0891, 0.0572, 0.0323, 0.0161, 0.0071, 0.0028);
+//float weights[9] = float[](0.1591, 0.1489, 0.1226, 0.0891, 0.0572, 0.0323, 0.0161, 0.0071, 0.0028);
 
 vec4 ApplyGaussianBlur(sampler2D tex)
 {
@@ -70,5 +71,5 @@ void main()
 
     vec4 bright_color_blur = ApplyGaussianBlur(uBrightScene);
 
-    frag_color = vec4(color, 1.0) + bright_color_blur;
+    frag_color = vec4(color, 1.0) + bright_color_blur * bloomStrength;
 }

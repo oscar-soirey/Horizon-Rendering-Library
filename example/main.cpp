@@ -5,7 +5,6 @@
 //Window
 #include <iosfwd>
 #include <glfw/glfw3.h>
-
 //Files
 #include <fstream>
 
@@ -101,7 +100,7 @@ void ProcessCameraRotation(GLFWwindow* win)
 }
 
 
-void ErrorCallback(HRL_Error code, HRL_Severity severity, const char* detail)
+void ErrorCallback(HRL_EError code, HRL_ESeverity severity, const char* detail)
 {
   printf("Error of type : %s, Severity : %s, Details : %s\n", HRL_ErrorEnumToString(code), HRL_SeverityEnumToString(severity), detail);
   if (severity >= HRL_SEVERITY_FATAL)
@@ -148,10 +147,11 @@ int main()
 
 
   //Create scene, camera & viewport
-  HRL_id scene = HRL_CreateScene(true);
+  HRL_id scene = HRL_CreateScene(false);
   HRL_id camera = HRL_CreateCamera(scene, HRL_PERSPECTIVE);
   HRL_SetCameraPerspectiveFov(camera, 90.f);
-  HRL_id viewport = HRL_CreateViewport(scene, camera, 0.f, 0.f, 1.f, 1.f);
+  HRL_id viewport = HRL_CreateViewport(scene, camera, 0.f, 0.f, 0.5f, 1.f);
+  HRL_id viewport2 = HRL_CreateViewport(scene, camera, 0.5f, 0.f, 0.5f, 1.f);
 
   //Create Light
   HRL_id light;
@@ -197,7 +197,8 @@ int main()
   {
     HRL_id pp_material = HRL_CreateMaterial(HRL_DEFAULT_POST_PROCESS_SHADER);
     HRL_MaterialSetFloat(pp_material, "saturation", 1.5f);
-    HRL_id pp = HRL_CreatePostProcess(viewport, pp_material, 1);
+    HRL_MaterialSetFloat(pp_material, "bloomStrength", 1.f);
+    //HRL_id pp = HRL_CreatePostProcess(viewport, pp_material, 1);
   }
 
   //Photorealistic texture
@@ -263,7 +264,7 @@ int main()
     HRL_MaterialSetTexture(tree_material, HRL_T_ALBEDO, al_texture);
     HRL_MaterialSetTexture(tree_material, HRL_T_NORMAL, normal_texture);
     HRL_MaterialSetTexture(tree_material, HRL_T_ROUGHNESS, roughness_texture);
-    //HRL_MaterialSetTexture(tree_material, HRL_T_Metalic, metalic_texture);
+    //HRL_MaterialSetTexture(tree_material, HRL_T_Metallic, metalic_texture);
 
 
     HRL_id tree_mesh = HRL_CreateMeshSprite(scene);

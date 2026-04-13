@@ -11,9 +11,9 @@ extern size_t res_default_albedo_png_len;
 extern unsigned char res_default_alpha_png[];
 extern size_t res_default_alpha_png_len;
 
-//res_default_metalic_png
-extern unsigned char res_default_metalic_png[];
-extern size_t res_default_metalic_png_len;
+//res_default_metallic_png
+extern unsigned char res_default_metallic_png[];
+extern size_t res_default_metallic_png_len;
 
 //res_default_normal_png
 extern unsigned char res_default_normal_png[];
@@ -50,10 +50,6 @@ extern size_t res_world_frag_metal_len;
 //res_world_vert_metal
 extern unsigned char res_world_vert_metal[];
 extern size_t res_world_vert_metal_len;
-
-//res_blur_frag_glsl
-extern unsigned char res_blur_frag_glsl[];
-extern size_t res_blur_frag_glsl_len;
 
 //res_debug_frag_glsl
 extern unsigned char res_debug_frag_glsl[];

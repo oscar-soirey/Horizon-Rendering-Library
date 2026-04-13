@@ -87,11 +87,11 @@ static const float fullscreen_quad_verts[16] = {
 #define NORMAL_INT (1)
 #define SPECULAR_INT (2)
 #define ROUGHNESS_INT (3)
-#define METALIC_INT (4)
+#define METALLIC_INT (4)
 #define ALPHA_INT (5)
 inline const char* tex_uniform_name[6]
 {
-	"T_Albedo", "T_Normal", "T_Specular", "T_Roughness", "T_Metalic", "T_Alpha"
+	"T_Albedo", "T_Normal", "T_Specular", "T_Roughness", "T_Metallic", "T_Alpha"
 };
 
 #endif

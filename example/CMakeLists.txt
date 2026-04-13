@@ -20,7 +20,6 @@ set_target_properties(hrl PROPERTIES IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/lib/
 add_library(glfw3 STATIC IMPORTED)
 set_target_properties(glfw3 PROPERTIES IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/lib/libglfw3.a")
 
-
 #Lie les libs proprement
 target_link_libraries(example PRIVATE
         -Wl,--whole-archive hrl -Wl,--no-whole-archive
