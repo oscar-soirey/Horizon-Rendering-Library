@@ -14,6 +14,8 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
 
+#include "core/widgets.h"
+
 //HRL PRIVATE
 extern HRL_Context* GetPrivateContext();
 
@@ -28,6 +30,7 @@ static glm::mat4 CalculateProjectionMatrix();
 static glm::mat4 CalculateViewMatrix();
 
 static void DrawSprites(const std::vector<GL_RenderBatch>& render_batches);
+static void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets);
 static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_PostProcess* pp);
 
 
@@ -36,7 +39,8 @@ static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_P
 #define BUFFER_QUAD			0
 #define BUFFER_SPRITE		1
 #define BUFFER_DEBUG		2
-#define BUFFER_COUNT		3
+#define BUFFER_UI				3
+#define BUFFER_COUNT		4
 
 #define UBO_LIGHTS			0
 #define UBO_COUNT				1
@@ -50,9 +54,6 @@ struct GL33_Backend {
 
 	GLuint ubo[UBO_COUNT];
 
-	//Brightness shader and FBO
-	GL33_Shader* extract_brightness_shader=nullptr;
-
 	//contains the render technique of the scene
 	std::unordered_map<HRL_id, GL_Scene*> gpu_scenes;
 
@@ -65,6 +66,9 @@ struct GL33_Backend {
 	//post process pass (ping pong method)
 	GLuint post_fbo[2];
 	GLuint post_textures[2];
+
+	//Widgets
+	GL33_Shader* ui_shader=nullptr;
 };
 static GL33_Backend* bck_;
 
@@ -173,6 +177,22 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)(3*sizeof(float)));
 	glEnableVertexAttribArray(1);
 
+	//UI
+	glBindVertexArray(bck_->vao[BUFFER_UI]);
+	glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_UI]);
+	//alloca buffer data (without values)
+	glBufferData(GL_ARRAY_BUFFER, 16*sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+	//layout(location = 0) in vec2
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
+	glEnableVertexAttribArray(0);
+	//layout(location = 1) in vec2
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
+	glEnableVertexAttribArray(1);
+	//ebo
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bck_->ebo[BUFFER_UI]);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(quad_indices), quad_indices, GL_STATIC_DRAW);
+
+
 	//RESET VAO BINDING
 	glBindVertexArray(0);
 
@@ -197,7 +217,7 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		(const char*)res_sprite_frag_glsl,
 		res_sprite_frag_glsl_len);
 	bck_->shaders.emplace(HRL_SPRITE_SHADER, sprite_shader);
-	sprite_shader->SetFloat("BrightThreshold", 0.8f);
+	sprite_shader->SetFloat("BrightThreshold", 0.75f);
 
 	//DEBUG SHADER
 	auto* debug_shader = new GL33_Shader();
@@ -208,6 +228,15 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		res_debug_frag_glsl_len
 	);
 	bck_->shaders.emplace(HRL_DEBUG_SHADER, debug_shader);
+
+	//UI SHADER
+	bck_->ui_shader = new GL33_Shader();
+	bck_->ui_shader->GL33_Create(
+		(const char*)res_ui_vert_glsl,
+		res_ui_vert_glsl_len,
+		(const char*)res_ui_frag_glsl,
+		res_ui_frag_glsl_len
+	);
 
 
 	//FALLBACK TEXTURES
@@ -244,6 +273,8 @@ void GL33_Shutdown()
 	{
 		delete t.second;
 	}
+
+	delete bck_->ui_shader;
 
 	//DELETE POST PROCESS OBJECTS
 	glDeleteFramebuffers(2, bck_->post_fbo);
@@ -294,7 +325,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 	// clear scene_fbo (les 2 attachments)
 	glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	for (const auto& v : scene->viewports)
 	{
@@ -346,7 +377,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 				int dst = 1 - src;
 
 				glBindFramebuffer(GL_FRAMEBUFFER, bck_->post_fbo[dst]);
-				glClear(GL_COLOR_BUFFER_BIT);
+				glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 				DrawPostProcessQuad(bck_->post_textures[src], scene_it->second->textures[1], pp);
 
 				src = dst;
@@ -379,6 +410,8 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 				);
 			}
 		}
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		DrawWidgets(v.second->widgets);
 	}
 }
 
@@ -606,6 +639,69 @@ static void DrawSprites(const std::vector<GL_RenderBatch>& render_batches)
 		glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, rb.instance_count);
 	}
 }
+
+void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets)
+{
+	bck_->ui_shader->Use();
+	glm::mat4 ui_proj = glm::ortho(0.f, 1.f, 1.f, 0.f, -1.f, 1.f);
+
+	glDisable(GL_DEPTH_TEST);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	for (const auto& [id, w] : widgets)
+	{
+		//call Logic before draw, maybe move this to another function to not mix function roles
+		w->Logic();
+
+		//p = position, s = scale. x and y for axles
+		std::vector<HRL_Widget::WidgetDrawInfos> geometries;
+		w->GetDrawInfos(geometries);
+
+		for (const auto& g : geometries)
+		{
+			auto texture_it = bck_->textures.find(g.texture);
+			if (texture_it == bck_->textures.end())
+			{
+				//SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "GL33: DrawWidgets, tried to draw a widget geometry with invlid texture ID");
+				//continue;
+
+				auto it_fallback = bck_->textures.find(bck_->fallback_textures[ALBEDO_INT]);
+				if (it_fallback == bck_->textures.end())
+				{
+					continue;
+				}
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, it_fallback->second->GetGL_ID());
+				bck_->ui_shader->SetInt("uTexture", 0);
+			}
+			else
+			{
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, texture_it->second->GetGL_ID());
+				bck_->ui_shader->SetInt("uTexture", 0);
+			}
+
+			float vertices[16] = {
+				// x            y             u     v
+				g.px,          g.py,          0.0f, 1.0f,  // 0 bottom-left
+				g.px + g.sx,   g.py,          1.0f, 1.0f,  // 1 bottom-right
+				g.px + g.sx,   g.py + g.sy,   1.0f, 0.0f,  // 2 top-right
+				g.px,          g.py + g.sy,   0.0f, 0.0f,  // 3 top-left
+			};
+
+			bck_->ui_shader->SetMat4("projection", ui_proj);
+
+			bck_->ui_shader->SetVec4("uTintColor", {g.r, g.g, g.b,g.a});
+
+			glBindVertexArray(bck_->vao[BUFFER_UI]);
+			glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_UI]);
+			glBufferSubData(GL_ARRAY_BUFFER, 0, 16*sizeof(float), vertices);
+			glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+		}
+	}
+}
+
 
 static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_PostProcess* pp)
 {

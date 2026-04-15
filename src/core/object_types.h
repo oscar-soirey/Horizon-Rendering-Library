@@ -13,6 +13,8 @@
 
 typedef uint64_t HRL_BackendHandle;
 
+class HRL_Widget;
+
 //Errors
 typedef struct {
   HRL_EError code;
@@ -97,6 +99,8 @@ typedef struct {
 
   //ordered by priority
   std::map<int, HRL_PostProcess*> post_processes;
+
+  std::unordered_map<HRL_id, HRL_Widget*> widgets;
 }HRL_Viewport;
 
 
@@ -146,6 +150,14 @@ typedef struct {
   float range_end = 100.f;
 }hrl_fog_t;
 
+
+//Widget
+typedef struct {
+  glm::vec2 position;
+  glm::vec2 size;
+}hrl_widget_t;
+
+
 //objects//
 typedef struct {
   int draw_on_screen;
@@ -159,6 +171,7 @@ typedef struct {
   //Effects
   hrl_fog_t fog;
 }hrl_scene_t;
+
 
 typedef struct {
   //errors
@@ -178,6 +191,7 @@ typedef struct {
   std::unordered_map<HRL_id, HRL_Viewport*> viewports;
   std::unordered_map<HRL_id, HRL_Camera*> cameras;
   std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
+  std::unordered_map<HRL_id, HRL_Widget*> widgets;
 
   //global ressources
   std::unordered_map<HRL_id, HRL_Material*> materials;
@@ -187,7 +201,12 @@ typedef struct {
   //sorted by scenes
   std::unordered_map<HRL_id, DebugRenderer> debug_renderers;
   float debug_line_thickness = 1.f;
-} HRL_Context;
+
+
+  //HUD
+  float mouseX;
+  float mouseY;
+}HRL_Context;
 
 
 #endif

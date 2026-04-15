@@ -118,6 +118,7 @@ add_library(hrldll SHARED
 
         #core
         src/core/utils_functions.cpp
+        src/core/widgets.cpp
 
         #opengl
         src/backend/opengl33/gl33_backend.cpp

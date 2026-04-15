@@ -9,6 +9,7 @@
 #include "core/backend_vtable.h"
 #include "core/object_types.h"
 #include "core/utils_functions.h"
+#include "core/widgets.h"
 
 #include "backend/opengl33/gl33_backend.h"
 
@@ -1550,4 +1551,149 @@ HRL_id HRL_CreateMeshFromFile(HRL_id _sceneid, HRL_EMeshType _type, const char *
 void HRL_DrawSceneAsDebugMode(HRL_id _sceneid, HRL_EDebugView mode)
 {
 
+}
+
+
+
+void HRL_MouseMovedCallback(float x, float y)
+{
+	ctx_.mouseX = x;
+	ctx_.mouseY = y;
+}
+
+HRL_id HRL_CreateWidget(HRL_id viewport, HRL_EWidgetType type)
+{
+	auto it = ctx_.viewports.find(viewport);
+	if (it == ctx_.viewports.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateWidget: invalid viewport ID");
+		return HRL_INVALID_ID;
+	}
+	HRL_id newId = GenerateHRL_ID();
+	HRL_Widget* widget = nullptr;
+	switch (type)
+	{
+		case HRL_WIDGET_BUTTON:
+		{
+			widget = new HRL_WidgetButton{};
+			break;
+		}
+		default: { break; }
+	}
+
+	ctx_.widgets.emplace(newId, widget);
+	it->second->widgets.emplace(newId, widget);
+	return newId;
+}
+
+void HRL_DeleteWidget(HRL_id widget)
+{
+
+}
+
+void HRL_SetWidgetPosition(HRL_id widget, float x, float y)
+{
+	auto it = ctx_.widgets.find(widget);
+	if (it == ctx_.widgets.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetWidgetPosition: invalid widget ID");
+		return;
+	}
+	it->second->SetPosition(x, y);
+}
+
+void HRL_SetWidgetSize(HRL_id widget, float width, float height)
+{
+	auto it = ctx_.widgets.find(widget);
+	if (it == ctx_.widgets.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetWidgetSize: invalid widget ID");
+		return;
+	}
+	it->second->SetScale(width, height);
+}
+
+
+//BUTTON WIDGET
+void HRL_SetButtonBackgroundTexture(HRL_id widget, HRL_EWidgetState state, HRL_id texture)
+{
+	auto it = ctx_.widgets.find(widget);
+	if (it == ctx_.widgets.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetButtonBackgroundTexture: invalid widget ID");
+		return;
+	}
+	auto* widgetptr = dynamic_cast<HRL_WidgetButton*>(it->second);
+	if (!widgetptr)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetButtonBackgroundTexture: invalid widget class");
+		return;
+	}
+	if (!HRL_IsValidTexture(texture))
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetButtonBackgroundTexture: invalid texture ID");
+		return;
+	}
+	widgetptr->background_texture_ = texture;
+}
+
+void HRL_SetButtonBackgroundTintColor(HRL_id widget, HRL_EWidgetState state, float r, float g, float b, float a)
+{
+	auto it = ctx_.widgets.find(widget);
+	if (it == ctx_.widgets.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetButtonBackgroundTintColor: invalid widget ID");
+		return;
+	}
+	auto* widgetptr = dynamic_cast<HRL_WidgetButton*>(it->second);
+	if (!widgetptr)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetButtonBackgroundTintColor: invalid widget class");
+		return;
+	}
+	widgetptr->background_tint_color_ = {r,g,b,a};
+}
+
+void HRL_SetButtonText(HRL_id widget, const char *text)
+{
+	auto it = ctx_.widgets.find(widget);
+	if (it == ctx_.widgets.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetButtonBackgroundTintColor: invalid widget ID");
+		return;
+	}
+	auto* widgetptr = dynamic_cast<HRL_WidgetButton*>(it->second);
+	if (!widgetptr)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetButtonBackgroundTintColor: invalid widget class");
+		return;
+	}
+
+	widgetptr->text_text_ = text;
+	widgetptr->GenerateTextTexture();
+}
+
+void HRL_SetButtonTextFont(HRL_id widget, HRL_id font)
+{
+	auto it = ctx_.widgets.find(widget);
+	if (it == ctx_.widgets.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetButtonTextFont: invalid widget ID");
+		return;
+	}
+	auto* widgetptr = dynamic_cast<HRL_WidgetButton*>(it->second);
+	if (!widgetptr)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetButtonTextFont: invalid widget class");
+		return;
+	}
+
+	auto it_font = ctx_.fonts.find(font);
+	if (it_font == ctx_.fonts.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetButtonTextFont: invalid font ID");
+		return;
+	}
+	widgetptr->font_ = font;
+	widgetptr->GenerateTextTexture();
 }

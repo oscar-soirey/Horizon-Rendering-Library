@@ -66,6 +66,7 @@ typedef uint32_t HRL_uint;
 #define HRL_T_SPECULAR								"T_Specular"
 #define HRL_T_ROUGHNESS								"T_Roughness"
 #define HRL_T_METALLIC								"T_Metallic"
+#define HRL_T_AMBIENT_OCCLUSION				"T_AO"
 #define HRL_T_ALPHA										"T_Alpha"
 #define HRL_T_EMISSIVE								"T_Emissive"
 #define HRL_T_SHADOW_MAP							"T_ShadowMap"
@@ -943,6 +944,10 @@ extern "C" {
 
 	/* Work in progress road to 0.5 release */
 
+	/**
+	 * 
+	 * @param x Coordinates in pixels relative to the screen
+	 */
 	HRL_API void HRL_MouseMovedCallback(float x, float y);
 
 	HRL_API HRL_id HRL_CreateWidget(HRL_id viewport, HRL_EWidgetType type);
@@ -979,7 +984,7 @@ extern "C" {
 	HRL_API void HRL_SetButtonClickable(HRL_id widget, int clickable);
 
 	HRL_API void HRL_SetButtonText(HRL_id widget, const char* text);
-	HRL_API void HRL_SetButtonTextTintColor(HRL_id widget, HRL_EWidgetState state, float r, float g, float b);
+	HRL_API void HRL_SetButtonTextTintColor(HRL_id widget, HRL_EWidgetState state, float r, float g, float b, float a);
 	HRL_API void HRL_SetButtonTextFont(HRL_id widget, HRL_id font);
 	/**
 	 *
@@ -988,6 +993,8 @@ extern "C" {
 	 * @param texture The id of the texture to be set on background, pass 0 to set the image to white
 	 */
 	HRL_API void HRL_SetButtonBackgroundTexture(HRL_id widget, HRL_EWidgetState state, HRL_id texture);
+
+	HRL_API void HRL_SetButtonBackgroundTintColor(HRL_id widget, HRL_EWidgetState state, float r, float g, float b, float a);
 
 	/**
 	 * clicked : HRL_FALSE or HRL_TRUE = first click this frame, same for released
@@ -1007,7 +1014,7 @@ extern "C" {
 	HRL_API void HRL_SetLabelText(HRL_id widget, const char* text);
 	HRL_API void HRL_SetLabelFont(HRL_id widget, HRL_id font);
 
-	HRL_API void HRL_SetLabelTintColor(HRL_id widget, float r, float g, float b);
+	HRL_API void HRL_SetLabelTintColor(HRL_id widget, float r, float g, float b, float a);
 
 
 

@@ -5,10 +5,8 @@
 //Window
 #include <iosfwd>
 #include <glfw/glfw3.h>
-//Files
 #include <fstream>
 
-//Print
 #include <iostream>
 
 #include "src/example.h"
@@ -147,7 +145,7 @@ int main()
 
 
   //Create scene, camera & viewport
-  HRL_id scene = HRL_CreateScene(false);
+  HRL_id scene = HRL_CreateScene(true);
   HRL_id camera = HRL_CreateCamera(scene, HRL_PERSPECTIVE);
   HRL_SetCameraPerspectiveFov(camera, 90.f);
   HRL_id viewport = HRL_CreateViewport(scene, camera, 0.f, 0.f, 0.5f, 1.f);
@@ -178,11 +176,13 @@ int main()
   }
 
   //Text
+  HRL_id text_texture;
+  HRL_id jetbrains_font;
   {
     size_t font_size;
     std::string font_data = example::OpenFile("JetBrainsMono.ttf", &font_size);
-    HRL_id jetbrains_font = HRL_CreateFont(font_data.c_str(), font_size);
-    HRL_id text_texture = HRL_CreateTextureFromText("Hello world!", jetbrains_font, 55, 0.f, 1.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f);
+    jetbrains_font = HRL_CreateFont(font_data.c_str(), font_size);
+    text_texture = HRL_CreateTextureFromText("Hello world!", jetbrains_font, 55, 0.f, 1.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f);
     HRL_id text_material = HRL_CreateMaterial(HRL_SPRITE_SHADER);
     HRL_MaterialSetTexture(text_material, HRL_T_ALBEDO, text_texture);
     HRL_id text_sprite = HRL_CreateMeshSprite(scene);
@@ -198,7 +198,7 @@ int main()
     HRL_id pp_material = HRL_CreateMaterial(HRL_DEFAULT_POST_PROCESS_SHADER);
     HRL_MaterialSetFloat(pp_material, "saturation", 1.5f);
     HRL_MaterialSetFloat(pp_material, "bloomStrength", 1.f);
-    //HRL_id pp = HRL_CreatePostProcess(viewport, pp_material, 1);
+    HRL_id pp = HRL_CreatePostProcess(viewport, pp_material, 1);
   }
 
   //Photorealistic texture
@@ -273,18 +273,30 @@ int main()
     HRL_SetMeshLocation(tree_mesh, 10.f, 0.f, 0.f);
   */}
 
+  //Widgets
+  HRL_id btn;
+  {
+    btn = HRL_CreateWidget(viewport, HRL_WIDGET_BUTTON);
+    HRL_SetWidgetPosition(btn, 0.f, 0.f);
+    HRL_SetWidgetSize(btn, 0.2f, 0.2f);
+    //HRL_SetButtonBackgroundTexture(btn, HRL_WIDGET_STATE_IDLE, text_texture);
+    HRL_SetButtonBackgroundTintColor(btn, HRL_WIDGET_STATE_IDLE, 1.f, 1.f, 1.f, 1.f);
+    HRL_SetButtonTextFont(btn, jetbrains_font);
+    HRL_SetButtonText(btn, "bonjour!");
+  }
+
   //Enable fog
-  HRL_SetFogEnabled(scene, false);
+  HRL_SetFogEnabled(scene, true);
   HRL_SetFogMode(scene, HRL_FOG_EXPONENTIAL);
-  HRL_SetFogColor(scene, 0.1f, 0.1f, 0.1f);
+  HRL_SetFogColor(scene, 0.02f, 0.02f, 0.02f);
 
 
 
   while (!glfwWindowShouldClose(win))
   {
-    if (glfwGetKey(win, GLFW_KEY_F5) == GLFW_PRESS)
+    if (glfwGetKey(win, GLFW_KEY_F6) == GLFW_PRESS)
     {
-      HRL_DrawDebugCircle(scene, HRL_DEBUG_SOLID, 0.f,0.f,0.f, 30.f, 16, 1.f, 0.f,1.f);
+    HRL_SetButtonText(btn, "comment va tu?*ù^$&é(-è)²~[|{@^");
     }
     CalculateDeltaTime();
 
@@ -294,7 +306,9 @@ int main()
     glfwSwapBuffers(win);
     glfwPollEvents();
 
-    printf("FPS : %f\n", 1/dt);
+    glfwSetWindowTitle(win, std::to_string(1/dt).c_str());
+
+    //printf("FPS : %f\n", 1/dt);
 
     //movement de la camera
     ProcessCameraMovement(win);
@@ -322,6 +336,17 @@ int main()
       HRL_GetProjectionMatrix(proj);
       for (int col = 0; col < 4; col++)
         printf("%f %f %f %f\n", proj[col*4+0], proj[col*4+1], proj[col*4+2], proj[col*4+3]);
+    }
+
+    if (glfwGetKey(win, GLFW_KEY_F5) == GLFW_PRESS)
+    {
+      HRL_DrawDebugCircle(scene, HRL_DEBUG_SOLID, 0.f,0.f,0.f, 30.f, 16, 1.f, 0.f,1.f);
+      HRL_DrawDebugSegment(
+    scene,
+    0.0f, 0.0f, 0.0f,
+    10.0f, 0.0f, 0.0f,   // bien plus long
+    1.0f, 0.0f, 0.0f
+);
     }
   }
 
