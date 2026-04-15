@@ -49,15 +49,21 @@ struct HRL_MeshSprite : HRL_Mesh {
 //LIGHT
 typedef struct {
   HRL_uint type_;
-  float intensity_;
-  float attenuation_;
+  float intensity_=2.f;
+  float attenuation_=0.02f;
+
+  //cos(angle intérieur)
+  float innerCutoff=32.f;
+  //cos(angle extérieur)
+  float outerCutoff=40.f;
+
   /**
    * On utilise des vec4 pour eviter de poser des problemes de paddings pour certains backends
    */
-  glm::vec3 position_;
-  glm::vec3 rotation_;
+  glm::vec3 position_{0.f};
+  glm::vec3 rotation_{0.f};
 
-  glm::vec3 color_;
+  glm::vec3 color_{1.f};
 }HRL_Light;
 
 //POST PROCESS

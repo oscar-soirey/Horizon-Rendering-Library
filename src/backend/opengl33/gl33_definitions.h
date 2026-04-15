@@ -22,21 +22,21 @@ typedef struct {
 	//4 bytes
 	float attenuation;
 	//4 bytes
-	float padding1;
+	float innerCutoff;  //(anciennement padding1) cos(angle intérieur) — SpotLight
 	// }
 
 	//16 bytes {
 	//12 bytes
 	glm::vec3 position;
 	//4 bytes
-	float padding2;
+	float outerCutoff;  //(anciennement padding2) cos(angle extérieur) — SpotLight
 	// }
 
 	//16 bytes {
 	//12 bytes
 	glm::vec3 rotation;
 	//4 bytes
-	float padding3;
+	float padding3;  //direction (DirectionalLight / SpotLight)
 	// }
 
 	//16 bytes {

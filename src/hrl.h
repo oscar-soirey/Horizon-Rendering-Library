@@ -398,6 +398,15 @@ extern "C" {
 	 */
 	HRL_API void HRL_SetLightRotation(HRL_id _lightid, float pitch, float yaw, float roll);
 
+	/**
+	 * 
+	 * @param _lightid
+	 * @param inner_cutoff Degrees
+	 */
+	HRL_API void HRL_SetSpotLightInnerCutoff(HRL_id _lightid, float inner_cutoff);
+
+	HRL_API void HRL_SetSpotLightOuterCutoff(HRL_id _lightid, float outer_cutoff);
+
 
 	/* ============================================================================
 	 *  TEXTURES

@@ -643,7 +643,8 @@ static void DrawSprites(const std::vector<GL_RenderBatch>& render_batches)
 void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets)
 {
 	bck_->ui_shader->Use();
-	glm::mat4 ui_proj = glm::ortho(0.f, 1.f, 1.f, 0.f, -1.f, 1.f);
+	float aspect = (float)GetWindowWidth() / (float)GetWindowHeight();
+	glm::mat4 ui_proj = glm::ortho(0.f, aspect, 1.f, 0.f, -1.f, 1.f);
 
 	glDisable(GL_DEPTH_TEST);
 	glEnable(GL_BLEND);
@@ -819,12 +820,19 @@ void GL33_UpdateLights(const std::vector<HRL_Light*>& _lights)
 		gpu_lights[count].type = light->type_;
 		gpu_lights[count].intensity = light->intensity_;
 		gpu_lights[count].attenuation = light->attenuation_;
-		gpu_lights[count].padding1 = 0.f;
+
+		gpu_lights[count].innerCutoff = std::cos(glm::radians(light->innerCutoff));
 
 		gpu_lights[count].position = light->position_;
-		gpu_lights[count].padding2 = 0.f;
+		gpu_lights[count].outerCutoff = std::cos(glm::radians(light->outerCutoff));
 
-		gpu_lights[count].rotation = light->rotation_;
+		// yaw = rotation.y, pitch = rotation.x
+		glm::vec3 dir;
+		dir.x = cos(glm::radians(light->rotation_.y)) * cos(glm::radians(light->rotation_.x));
+		dir.y = sin(glm::radians(light->rotation_.x));
+		dir.z = sin(glm::radians(light->rotation_.y)) * cos(glm::radians(light->rotation_.x));
+		gpu_lights[count].rotation = glm::normalize(dir);
+
 		gpu_lights[count].padding3 = 0.f;
 
 		gpu_lights[count].color = light->color_;

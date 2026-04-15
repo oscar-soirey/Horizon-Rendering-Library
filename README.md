@@ -1,6 +1,6 @@
 # Horizon Rendering Library
 
-> **Version** `0.3` — A lightweight, explicit rendering abstraction layer.
+> **Version** `0.4` — A lightweight, explicit rendering abstraction layer.
 
 HRL is a C/C++ rendering library designed to sit on top of multiple graphics backends (OpenGL, Vulkan, D3D11/12, Metal, and more) behind a unified, stable API. It is built around a simple principle: **nothing exists until you create it, and everything you create must be explicitly destroyed.**
 
@@ -43,16 +43,16 @@ HRL is a C/C++ rendering library designed to sit on top of multiple graphics bac
 
 ## Supported Backends
 
-| Constant         | Backend           | Platform              |
-|------------------|-------------------|-----------------------|
-| `HRL_OpenGL33`   | OpenGL 3.3        | Windows, Linux, MacOS |
-| `HRL_OpenGL45`   | OpenGL 4.5        | Windows, Linux, MacOS |
-| `HRL_Vulkan`     | Vulkan            | Windows, Linux        |
-| `HRL_D3D11`      | Direct3D 11       | Windows, Xbox         |
-| `HRL_D3D12`      | Direct3D 12       | Windows, Xbox         |
-| `HRL_Metal`      | Metal             | Apple                 |
-| `HRL_NVN`        | NVN (Nintendo)    | Nintedo               |
-| `HRL_GNM`        | GNM (PlayStation) | Playstation           |
+| Constant         | Backend     | Platform              |
+|------------------|-------------|-----------------------|
+| `HRL_OpenGL33`   | OpenGL 3.3  | Windows, Linux, MacOS |
+| `HRL_OpenGL45`   | OpenGL 4.5  | Windows, Linux, MacOS |
+| `HRL_Vulkan`     | Vulkan      | Windows, Linux        |
+| `HRL_D3D11`      | Direct3D 11 | Windows, Xbox         |
+| `HRL_D3D12`      | Direct3D 12 | Windows, Xbox         |
+| `HRL_Metal`      | Metal       | Apple                 |
+| `HRL_NVN`        | NVN         | Nintedo               |
+| `HRL_GNM`        | GNM         | Playstation           |
 
 ---
 
@@ -92,7 +92,7 @@ HRL_InitContext(width, height, loader)
     ├── HRL_EndFrame()
     └── [ swap buffers via your windowing layer ]
 
-HRL_Shutdown()
+HRL_Shutdown() (clean every objects automatically)
 ```
 
 ---
@@ -318,7 +318,7 @@ HRL_SetCameraPosition(camera, 0.f, 0.f, -5.f);
 HRL_id shader   = HRL_CreateShader(vert_src, vert_len, frag_src, frag_len);
 HRL_id material = HRL_CreateMaterial(shader);
 HRL_id texture  = HRL_CreateTexture(png_data, png_size);
-HRL_MaterialSetTexture(material, "u_Albedo", texture);
+HRL_MaterialSetTexture(material, HRL_T_ALBEDO, texture);
 
 // 4. Mesh
 HRL_id mesh = HRL_CreateMeshFromFile(scene, HRL_3D_Mesh, obj_data, obj_size);

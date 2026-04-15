@@ -478,21 +478,16 @@ HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_ELightType _type)
 		return HRL_INVALID_ID;
 	}
 
-	if (_type == HRL_POINT_LIGHT || _type == HRL_DIRECTIONAL_LIGHT || _type == HRL_SPOT_LIGHT)
-	{
-		auto* l = new HRL_Light();
-		l->type_ = _type;
+	auto* l = new HRL_Light();
+	l->type_ = _type;
 
-		HRL_id newId = GenerateHRL_ID();
-		it_scene->second->lights.emplace(newId, l);
-		ctx_.lights.emplace(newId, l);
+	HRL_id newId = GenerateHRL_ID();
+	it_scene->second->lights.emplace(newId, l);
+	ctx_.lights.emplace(newId, l);
 
-		g_Backend.RHI_UpdateLights(GetLightsVector());
+	g_Backend.RHI_UpdateLights(GetLightsVector());
 
-		return newId;
-	}
-	SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_CreateLight: invalid light type");
-	return HRL_INVALID_ID;
+	return newId;
 }
 
 void HRL_DeleteLight(HRL_id _lightid)
@@ -588,6 +583,45 @@ void HRL_SetLightRotation(HRL_id _lightid, float pitch, float yaw, float roll)
 
 	g_Backend.RHI_UpdateLights(GetLightsVector());
 }
+
+void HRL_SetSpotLightInnerCutoff(HRL_id _lightid, float inner_cutoff)
+{
+	auto it = ctx_.lights.find(_lightid);
+	if (it == ctx_.lights.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetSpotLightInnerCutoff: invalid ID");
+		return;
+	}
+	if (it->second->type_ != HRL_SPOT_LIGHT)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetSpotLightInnerCutoff: light is not of type SpotLight");
+		return;
+	}
+
+	it->second->innerCutoff = inner_cutoff;
+
+	g_Backend.RHI_UpdateLights(GetLightsVector());
+}
+
+void HRL_SetSpotLightOuterCutoff(HRL_id _lightid, float outer_cutoff)
+{
+	auto it = ctx_.lights.find(_lightid);
+	if (it == ctx_.lights.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetSpotLightInnerCutoff: invalid ID");
+		return;
+	}
+	if (it->second->type_ != HRL_SPOT_LIGHT)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetSpotLightInnerCutoff: light is not of type SpotLight");
+		return;
+	}
+
+	it->second->outerCutoff = outer_cutoff;
+
+	g_Backend.RHI_UpdateLights(GetLightsVector());
+}
+
 
 
 
@@ -1695,5 +1729,24 @@ void HRL_SetButtonTextFont(HRL_id widget, HRL_id font)
 		return;
 	}
 	widgetptr->font_ = font;
+	widgetptr->GenerateTextTexture();
+}
+
+void HRL_SetButtonTextTintColor(HRL_id widget, HRL_EWidgetState state, float r, float g, float b, float a)
+{
+	auto it = ctx_.widgets.find(widget);
+	if (it == ctx_.widgets.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetButtonTextFont: invalid widget ID");
+		return;
+	}
+	auto* widgetptr = dynamic_cast<HRL_WidgetButton*>(it->second);
+	if (!widgetptr)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetButtonTextFont: invalid widget class");
+		return;
+	}
+
+	widgetptr->text_tint_color_ = {r, g, b, a};
 	widgetptr->GenerateTextTexture();
 }

@@ -11,6 +11,8 @@
 
 #include "src/example.h"
 
+#include <glm/glm.hpp>
+
 
 typedef struct {
   float x, y, z;
@@ -56,19 +58,72 @@ double lastMouseX = 0.0;
 double lastMouseY = 0.0;
 bool firstMouse = true;
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Vecteurs de direction dérivés des angles d'Euler (yaw / pitch)
+//  Convention : Z- = forward par défaut, Y = up
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct Vec3 { float x, y, z; };
+
+Vec3 GetForwardVector(float pitchDeg, float yawDeg)
+{
+  float p = glm::radians(pitchDeg);
+  float y = glm::radians(yawDeg);
+  return {
+    (float)(-cosf(y) * cosf(p)),
+    (float)( sinf(p)),
+    (float)( sinf(y) * cosf(p))
+};
+}
+
+Vec3 GetRightVector(float yawDeg)
+{
+  float y = glm::radians(yawDeg);
+  return {
+    -sinf(y),
+     0.f,
+     cosf(y)
+};
+}
+
+Vec3 GetUpVector(float pitchDeg, float yawDeg)
+{
+    // up = right × forward
+    Vec3 f = GetForwardVector(pitchDeg, yawDeg);
+    Vec3 r = GetRightVector(yawDeg);
+    return {
+        r.y * f.z - r.z * f.y,
+        r.z * f.x - r.x * f.z,
+        r.x * f.y - r.y * f.x
+    };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Déplacement caméra orienté
+// ─────────────────────────────────────────────────────────────────────────────
+
 void ProcessCameraMovement(GLFWwindow* win)
 {
-  auto deltaTime = (float)dt;
-  float velocity = cameraSpeed * deltaTime;
+    float velocity = cameraSpeed * (float)dt;
 
-  if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS)
-    camZ -= velocity;
-  if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS)
-    camZ += velocity;
-  if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS)
-    camX -= velocity;
-  if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS)
-    camX += velocity;
+    Vec3 forward = GetForwardVector(pitch, yaw);
+    Vec3 right   = GetRightVector(yaw);
+
+    // W / S — avant / arrière
+    if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS)
+    { camX += forward.x * velocity; camY += forward.y * velocity; camZ += forward.z * velocity; }
+    if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS)
+    { camX -= forward.x * velocity; camY -= forward.y * velocity; camZ -= forward.z * velocity; }
+
+    // A / D — gauche / droite (strafe)
+    if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS)
+    { camX -= right.x * velocity; camZ -= right.z * velocity; }
+    if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS)
+    { camX += right.x * velocity; camZ += right.z * velocity; }
+
+    // Q / E — monter / descendre (world up, indépendant du pitch)
+    if (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS) camY -= velocity;
+    if (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS) camY += velocity;
 }
 
 void ProcessCameraRotation(GLFWwindow* win)
@@ -89,7 +144,7 @@ void ProcessCameraRotation(GLFWwindow* win)
   lastMouseX = mouseX;
   lastMouseY = mouseY;
 
-  yaw   += offsetX*0.5f;
+  yaw += offsetX;   // au lieu de offsetX * 0.5f
   pitch += offsetY;
 
   // clamp pitch pour éviter de regarder trop haut/bas
@@ -156,10 +211,11 @@ int main()
   {
     light = HRL_CreateLight(scene, HRL_POINT_LIGHT);
     HRL_SetLightAttenuation(light, 0.02f);
-    HRL_SetLightLocation(light, 0.f, 0.f, 12.f);
     HRL_SetLightIntensity(light, 2.f);
     HRL_SetLightColor(light, 1.f, 1.f, 1.f);
-    HRL_SetLightRotation(light, 0.f, 0.f, 0.f);
+    HRL_SetLightLocation(light, 0.f, 0.f, 12.f);
+    HRL_SetLightRotation(light, 0,0,0);
+    HRL_SetSpotLightOuterCutoff(light, 33.f);
   }
 
   //Create scene objects
@@ -277,17 +333,24 @@ int main()
   HRL_id btn;
   {
     btn = HRL_CreateWidget(viewport, HRL_WIDGET_BUTTON);
-    HRL_SetWidgetPosition(btn, 0.f, 0.f);
+    HRL_SetWidgetPosition(btn, 0.5f, 0.5f);
     HRL_SetWidgetSize(btn, 0.2f, 0.2f);
-    //HRL_SetButtonBackgroundTexture(btn, HRL_WIDGET_STATE_IDLE, text_texture);
+    size_t btn_size;
+    std::string btn_data = example::OpenFile("button.png", &btn_size);
+    HRL_id btn_texture = HRL_CreateTexture(btn_data.c_str(), btn_size);
+    HRL_SetButtonBackgroundTexture(btn, HRL_WIDGET_STATE_IDLE, btn_texture);
+    int w, h;
+    HRL_GetTextureSize(btn_texture, &w, &h);
+    HRL_SetWidgetSize(btn, (float)w/800.f, (float)h/800.f);
     HRL_SetButtonBackgroundTintColor(btn, HRL_WIDGET_STATE_IDLE, 1.f, 1.f, 1.f, 1.f);
     HRL_SetButtonTextFont(btn, jetbrains_font);
     HRL_SetButtonText(btn, "bonjour!");
+    HRL_SetButtonTextTintColor(btn, HRL_WIDGET_STATE_IDLE, 0.1f, 0.1f, 0.1f, 1.f);
   }
 
   //Enable fog
   HRL_SetFogEnabled(scene, true);
-  HRL_SetFogMode(scene, HRL_FOG_EXPONENTIAL);
+  HRL_SetFogMode(scene, HRL_FOG_EXP_SQUARED);
   HRL_SetFogColor(scene, 0.02f, 0.02f, 0.02f);
 
 
@@ -316,6 +379,7 @@ int main()
     HRL_SetCameraLocation(camera, camX, camY, camZ);
     HRL_SetCameraRotation(camera, pitch, yaw, 0.f);
     HRL_SetLightLocation(light, camX, camY, camZ);
+    HRL_SetLightRotation(light, pitch, yaw, 0.f);
 
     //debug keys
     if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS)
@@ -342,11 +406,11 @@ int main()
     {
       HRL_DrawDebugCircle(scene, HRL_DEBUG_SOLID, 0.f,0.f,0.f, 30.f, 16, 1.f, 0.f,1.f);
       HRL_DrawDebugSegment(
-    scene,
-    0.0f, 0.0f, 0.0f,
-    10.0f, 0.0f, 0.0f,   // bien plus long
-    1.0f, 0.0f, 0.0f
-);
+      scene,
+        0.0f, 0.0f, 0.0f,
+        10.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f
+      );
     }
   }
 
