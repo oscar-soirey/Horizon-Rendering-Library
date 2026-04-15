@@ -23,7 +23,7 @@ extern HRL_Context* GetPrivateContext();
 //UTILS
 static void InitTextureAndBindToFBO(GLuint _texture, GLuint _fbo, int width, int height);
 
-static void BindMaterial(HRL_Material* mat);
+static void BindMaterial(HRL_Material* mat, HRL_id sprite_id);
 static void BatchSprites(const std::unordered_map<HRL_id, HRL_Mesh*>&, std::vector<GL_RenderBatch>& batches);
 
 static glm::mat4 CalculateProjectionMatrix();
@@ -327,6 +327,9 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+	GLuint zero[4] = {0,0,0,0};
+	glClearBufferuiv(GL_COLOR, 2, zero); // clear attachment 2
+
 	for (const auto& v : scene->viewports)
 	{
 		ctx_->viewport = v.second;
@@ -453,7 +456,7 @@ static void ApplyFallback(int index)
 	HRL_id fallback_hrl_id = bck_->fallback_textures[index];
 	glBindTexture(GL_TEXTURE_2D, bck_->textures[fallback_hrl_id]->GetGL_ID());
 }
-static void BindMaterial(HRL_Material* mat)
+static void BindMaterial(HRL_Material* mat, HRL_id sprite_id)
 {
 	auto it = bck_->shaders.find(mat->shader_);
 	if (it == bck_->shaders.end())
@@ -468,6 +471,8 @@ static void BindMaterial(HRL_Material* mat)
 
 	s->SetMat4("projection", ctx_->proj_mat);
 	s->SetMat4("view", ctx_->view_mat);
+	s->SetUint("uSpriteID", sprite_id);
+
 	s->SetVec3("CamPos", ctx_->viewport->camera_->position_);
 	s->SetVec3("TintColor", glm::vec3(1.f));
 
@@ -566,7 +571,7 @@ static void BatchSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, st
 
 			auto* sprite = static_cast<HRL_MeshSprite*>(mesh);
 
-			auto* inst = new GL_SpriteInstance(model, {sprite->region_[0], sprite->region_[1], sprite->region_[2], sprite->region_[3]});
+			auto* inst = new GL_SpriteInstance(model, {sprite->region_[0], sprite->region_[1], sprite->region_[2], sprite->region_[3]}, id);
 			GL_RenderBatch batch{inst, 1, mesh->material_};
 			batches.emplace_back(batch);
 
@@ -597,7 +602,7 @@ static void DrawSprites(const std::vector<GL_RenderBatch>& render_batches)
 			return;
 		}
 
-		BindMaterial(it_mat->second);
+		BindMaterial(it_mat->second, rb.instances->sprite_id);
 
 		std::vector<float> vertices_data;
 		std::vector<float> instance_data;
@@ -861,12 +866,13 @@ void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 	scene->height = (int)GetWindowHeight();
 
 
-	//EXTRACT BRIGHTNESS
+	//Gen scene textures (Scene color, Bright color (bloom), Color picking)
 	glGenFramebuffers(1, &scene->fbo);
-	glGenTextures(2, scene->textures);
+	glGenTextures(3, scene->textures);
 
 	glBindFramebuffer(GL_FRAMEBUFFER, scene->fbo);
 
+	//Color buffer
 	glBindTexture(GL_TEXTURE_2D, scene->textures[0]);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, scene->width, scene->height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -874,6 +880,7 @@ void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+	//Bright color buffer
 	glBindTexture(GL_TEXTURE_2D, scene->textures[1]);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, scene->width, scene->height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -881,10 +888,19 @@ void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+	//Color picking buffer
+	glBindTexture(GL_TEXTURE_2D, scene->textures[2]);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, scene->width, scene->height, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene->textures[0], 0);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, scene->textures[1], 0);
-	GLenum attachments[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
-	glDrawBuffers(2, attachments);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, scene->textures[2], 0);
+	GLenum attachments[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+	glDrawBuffers(3, attachments);
 
 	GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
 	assert(status == GL_FRAMEBUFFER_COMPLETE && "OpenGL 33 Backend: Scene framebuffer incomplete!");
@@ -1208,4 +1224,56 @@ unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid)
 	}
 
 	return it->second->textures[0];
+}
+
+unsigned int HRL_GL_GetSceneColorBufferGL_ID(HRL_id _sceneid)
+{
+	auto it = bck_->gpu_scenes.find(_sceneid);
+	if (it == bck_->gpu_scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneColorBufferGL_ID: scene ID is not valid");
+		return GL_INVALID_VALUE;
+	}
+	return it->second->textures[2];
+}
+
+HRL_id HRL_GL_GetHoveredObject(HRL_id _scene, int mouseX, int mouseY, HRL_EMeshType* mesh_type)
+{
+	auto it = bck_->gpu_scenes.find(_scene);
+	if (it == bck_->gpu_scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetHoveredObject: scene ID is not valid");
+		return GL_INVALID_VALUE;
+	}
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, it->second->fbo);
+	glReadBuffer(GL_COLOR_ATTACHMENT2);
+	glDisable(GL_MULTISAMPLE);
+	glDisable(GL_DITHER);
+
+	unsigned char pixel[4];
+
+	glReadPixels(mouseX, mouseY, 1, 1,
+		GL_RGBA,
+		GL_UNSIGNED_BYTE,
+		pixel
+	);
+
+	uint32_t id =
+		(pixel[0] << 16) |
+		(pixel[1] << 8) |
+		pixel[2];
+
+	auto it_mesh = GetPrivateContext()->meshes.find(id);
+	if (it_mesh == GetPrivateContext()->meshes.end())
+	{
+		return HRL_INVALID_ID;
+	}
+
+	if (mesh_type)
+	{
+		*mesh_type = it_mesh->second->type_;
+	}
+
+	return id;
 }

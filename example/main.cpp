@@ -215,7 +215,7 @@ int main()
     HRL_SetLightColor(light, 1.f, 1.f, 1.f);
     HRL_SetLightLocation(light, 0.f, 0.f, 12.f);
     HRL_SetLightRotation(light, 0,0,0);
-    HRL_SetSpotLightOuterCutoff(light, 33.f);
+    //HRL_SetSpotLightOuterCutoff(light, 33.f);
   }
 
   //Create scene objects
@@ -254,7 +254,7 @@ int main()
     HRL_id pp_material = HRL_CreateMaterial(HRL_DEFAULT_POST_PROCESS_SHADER);
     HRL_MaterialSetFloat(pp_material, "saturation", 1.5f);
     HRL_MaterialSetFloat(pp_material, "bloomStrength", 1.f);
-    HRL_id pp = HRL_CreatePostProcess(viewport, pp_material, 1);
+    //HRL_id pp = HRL_CreatePostProcess(viewport, pp_material, 1);
   }
 
   //Photorealistic texture
@@ -372,6 +372,10 @@ int main()
     glfwSetWindowTitle(win, std::to_string(1/dt).c_str());
 
     //printf("FPS : %f\n", 1/dt);
+
+    HRL_EMeshType type;
+    printf("id: %d ", HRL_GL_GetHoveredObject(scene, 400, 400, &type));
+    printf("type: %d\n", type);
 
     //movement de la camera
     ProcessCameraMovement(win);

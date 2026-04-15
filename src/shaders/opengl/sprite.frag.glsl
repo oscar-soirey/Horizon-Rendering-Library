@@ -9,6 +9,7 @@
 
 layout(location = 0) out vec4 FragColor;
 layout(location = 1) out vec4 BrightColor;
+layout(location = 2) out vec4 ColorPickingBuffer;   //writes the ID of the sprite using the color
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Constantes
@@ -32,6 +33,7 @@ const int FOG_EXP2   = 0x0092; // décroissance gaussienne, plus réaliste
 
 in vec3 fragPos;   // position du fragment en world-space
 in vec2 uv;        // coordonnées de texture
+flat in uint sprite_id; //id du sprite, utile pour le color picking buffer
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Textures PBR
@@ -166,6 +168,44 @@ vec3 evalBRDF(vec3 lightDir,
     return kD + kS;
 }
 
+
+
+//DEBUG
+vec3 DebugColorFromID(uint id)
+{
+    return vec3(
+    fract(float(id) * 0.618),
+    fract(float(id) * 0.381),
+    fract(float(id) * 0.173)
+    );
+}
+uint hash(uint x)
+{
+    x ^= x >> 16;
+    x *= uint(0x7feb352d);
+    x ^= x >> 15;
+    x *= uint(0x846ca68b);
+    x ^= x >> 16;
+    return x;
+}
+vec3 ColorFromID(uint id)
+{
+    uint h = hash(id);
+
+    float r = float((h      ) & 255u);
+    float g = float((h >> 8 ) & 255u);
+    float b = float((h >> 16) & 255u);
+
+    vec3 c = vec3(r, g, b) / 255.0;
+
+    // boost contraste (gamma simple)
+    c = pow(c, vec3(0.75));
+
+    return c;
+}
+
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Main
 // ─────────────────────────────────────────────────────────────────────────────
@@ -279,4 +319,13 @@ void main()
     BrightColor = (brightness > BrightThreshold)
     ? color
     : vec4(0.0, 0.0, 0.0, 1.0);
+
+
+    //Color picking buffer
+    ColorPickingBuffer = vec4(
+        float((sprite_id >> 16u) & 255u) / 255.0,
+        float((sprite_id >> 8u)  & 255u) / 255.0,
+        float(sprite_id & 255u) / 255.0,
+        alpha
+    );
 }

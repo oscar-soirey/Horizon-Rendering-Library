@@ -28,7 +28,7 @@ struct HRL_Mesh {
 
   HRL_id scene_;
 
-  HRL_uint type_;
+  HRL_EMeshType type_;
 
   HRL_id material_=HRL_INVALID_ID;
 

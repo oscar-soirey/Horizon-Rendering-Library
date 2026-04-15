@@ -109,6 +109,11 @@ void GL33_Shader::SetInt(const std::string &name, int value)
   glUniform1i(FindUniformLocation(name), value);
 }
 
+void GL33_Shader::SetUint(const std::string &name, uint32_t value)
+{
+  glUniform1ui(FindUniformLocation(name), value);
+}
+
 void GL33_Shader::SetFloat(const std::string &name, float value)
 {
   glUniform1f(FindUniformLocation(name), value);

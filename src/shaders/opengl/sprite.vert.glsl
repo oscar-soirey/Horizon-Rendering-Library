@@ -10,8 +10,11 @@ layout(location = 2) in mat4 amodel;
 uniform mat4 view;
 uniform mat4 projection;
 
+uniform uint uSpriteID;  //utile pour le color picking buffer
+
 out vec3 fragPos;
 out vec2 uv;
+flat out uint sprite_id;
 
 void main()
 {
@@ -20,6 +23,7 @@ void main()
     //on passe les coordonees fragment et uv au fragment shader
     fragPos = vec3(amodel * pos);
     uv = auv;
+    sprite_id = uSpriteID;
 
     //garder cet ordre
     gl_Position = projection * view * amodel * pos;

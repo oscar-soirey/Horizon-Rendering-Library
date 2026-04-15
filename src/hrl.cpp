@@ -608,12 +608,12 @@ void HRL_SetSpotLightOuterCutoff(HRL_id _lightid, float outer_cutoff)
 	auto it = ctx_.lights.find(_lightid);
 	if (it == ctx_.lights.end())
 	{
-		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetSpotLightInnerCutoff: invalid ID");
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetSpotLightOuterCutoff: invalid ID");
 		return;
 	}
 	if (it->second->type_ != HRL_SPOT_LIGHT)
 	{
-		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetSpotLightInnerCutoff: light is not of type SpotLight");
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetSpotLightOuterCutoff: light is not of type SpotLight");
 		return;
 	}
 

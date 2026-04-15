@@ -46,7 +46,9 @@
   HRL_API unsigned int HRL_GL_GetShaderGL_ID(HRL_id _shaderid);
 
 	HRL_API unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid);
+
   HRL_API unsigned int HRL_GL_GetSceneColorBufferGL_ID(HRL_id _sceneid);
+  HRL_API HRL_id HRL_GL_GetHoveredObject(HRL_id _scene, int mouseX, int mouseY, HRL_EMeshType* mesh_type);
 
 #ifdef __cplusplus
   }

@@ -50,6 +50,7 @@ typedef struct {
 typedef struct {
 	glm::mat4 model;
 	glm::vec4 region;
+	HRL_id sprite_id;
 }GL_SpriteInstance;
 
 typedef struct {
@@ -61,7 +62,7 @@ typedef struct {
 typedef struct {
 	GLuint fbo;
 	//contains scene texture and brightness texture
-	GLuint textures[2];
+	GLuint textures[3];
 	int width, height;
 }GL_Scene;
 

@@ -524,6 +524,16 @@ extern "C" {
 	 */
 	HRL_API void HRL_EnableColorPickingBuffer(HRL_id _scene, int _enable);
 
+	/**
+	 *
+	 * @param _scene
+	 * @param mesh_type
+	 * @param mouseX Relative mouse cursor position to the window
+	 * @param mouseY
+	 * @return
+	 */
+	HRL_API HRL_id HRL_GetHoveredObject(HRL_id _scene, int mouseX, int mouseY, HRL_EMeshType* mesh_type);
+
 
 	/* ============================================================================
 	 *  POST PROCESSING
