@@ -30,7 +30,7 @@ typedef struct {
 
 	//16 bytes
 	glm::vec3 color;
-	float padding4;
+	float shadowStrength; // 0 = no shadow darkening, 1 = full shadow
 
 	//64 bytes - world -> shadow texture coordinates for 2D shadow maps.
 	glm::mat4 shadowMatrix;
@@ -85,9 +85,10 @@ static const float fullscreen_quad_verts[16] = {
 #define ROUGHNESS_INT (3)
 #define METALLIC_INT (4)
 #define ALPHA_INT (5)
-inline const char* tex_uniform_name[6]
+#define SS_DISPLACEMENT_MAPPING_INT (6)
+inline const char* tex_uniform_name[7]
 {
-	"T_Albedo", "T_Normal", "T_Specular", "T_Roughness", "T_Metallic", "T_Alpha"
+	"T_Albedo", "T_Normal", "T_Specular", "T_Roughness", "T_Metallic", "T_Alpha", "SS_DISPLACEMENT_MAPPING"
 };
 
 #endif

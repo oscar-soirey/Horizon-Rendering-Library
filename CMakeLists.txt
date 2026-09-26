@@ -88,6 +88,7 @@ endfunction()
 
 generate_ressources_file_header()
 
+if(false)
 add_library(hrl STATIC
         #third-party
         third_party/glad/glad.c
@@ -108,6 +109,7 @@ add_library(hrl STATIC
         src/backend/opengl33/gl33_texture.cpp
         src/backend/opengl33/gi.cpp
 )
+endif()
 
 add_library(hrldll SHARED
         #third-party
@@ -132,11 +134,11 @@ add_library(hrldll SHARED
 )
 
 #compile dll declspec export
-target_compile_definitions(hrl PRIVATE HRL_NO_DLL)
+#target_compile_definitions(hrl PRIVATE HRL_NO_DLL)
 target_compile_definitions(hrldll PRIVATE HRL_BUILD_DLL)
 
 
 #link OpenGL
 find_package(OpenGL REQUIRED)
-target_link_libraries(hrl PRIVATE OpenGL::GL)
+#target_link_libraries(hrl PRIVATE OpenGL::GL)
 target_link_libraries(hrldll PRIVATE OpenGL::GL)

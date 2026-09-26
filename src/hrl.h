@@ -278,6 +278,71 @@ typedef enum HRL_EWidgetType{
 	HRL_WIDGET_PROGRESSBAR
 }HRL_EWidgetType;
 
+typedef enum HRL_EGizmoAxis {
+	HRL_GIZMO_AXIS_NONE = 0,
+	HRL_GIZMO_AXIS_X = 1 << 0,
+	HRL_GIZMO_AXIS_Y = 1 << 1,
+	HRL_GIZMO_AXIS_Z = 1 << 2
+} HRL_EGizmoAxis;
+
+typedef enum HRL_EGizmoMode {
+	HRL_GIZMO_MODE_TRANSLATE = 1 << 0,
+	HRL_GIZMO_MODE_ROTATE    = 1 << 1,
+	HRL_GIZMO_MODE_SCALE     = 1 << 2
+} HRL_EGizmoMode;
+
+typedef enum HRL_EGizmoSpace {
+	HRL_GIZMO_SPACE_WORLD = 0,
+	HRL_GIZMO_SPACE_LOCAL
+} HRL_EGizmoSpace;
+
+typedef enum HRL_EGizmoPart {
+	HRL_GIZMO_PART_NONE = 0,
+	HRL_GIZMO_PART_X,
+	HRL_GIZMO_PART_Y,
+	HRL_GIZMO_PART_Z,
+	HRL_GIZMO_PART_CENTER
+} HRL_EGizmoPart;
+
+typedef enum HRL_EGizmoOperation {
+	HRL_GIZMO_OPERATION_NONE      = 0,
+	HRL_GIZMO_OPERATION_TRANSLATE = HRL_GIZMO_MODE_TRANSLATE,
+	HRL_GIZMO_OPERATION_ROTATE    = HRL_GIZMO_MODE_ROTATE,
+	HRL_GIZMO_OPERATION_SCALE     = HRL_GIZMO_MODE_SCALE
+} HRL_EGizmoOperation;
+
+typedef void (*HRL_CGizmoChanged)(HRL_id gizmo, HRL_EGizmoPart part, void* user_data);
+
+/* ============================================================================
+ *  VFX / PARTICLE SYSTEMS
+ * ============================================================================ */
+
+typedef enum HRL_EVFXSimulationSpace {
+	HRL_VFX_SIMULATION_LOCAL = 0,
+	HRL_VFX_SIMULATION_WORLD
+} HRL_EVFXSimulationSpace;
+
+typedef enum HRL_EVFXRenderMode {
+	HRL_VFX_RENDER_BILLBOARD = 0,
+	HRL_VFX_RENDER_STRETCHED_BILLBOARD,
+	HRL_VFX_RENDER_MESH
+} HRL_EVFXRenderMode;
+
+typedef enum HRL_EVFXBlendMode {
+	HRL_VFX_BLEND_ALPHA = 0,
+	HRL_VFX_BLEND_ADDITIVE,
+	HRL_VFX_BLEND_MULTIPLY
+} HRL_EVFXBlendMode;
+
+typedef enum HRL_EVFXSpawnShape {
+	HRL_VFX_SHAPE_POINT = 0,
+	HRL_VFX_SHAPE_SPHERE,
+	HRL_VFX_SHAPE_BOX,
+	HRL_VFX_SHAPE_CYLINDER,
+	HRL_VFX_SHAPE_CONE
+} HRL_EVFXSpawnShape;
+
+
 typedef enum HRL_ESliderOrientation{
 	HRL_SLIDER_HORIZONTAL = 0,
 	HRL_SLIDER_VERTICAL
@@ -766,6 +831,13 @@ extern "C" {
 	HRL_API void HRL_SetLightShadowBias(HRL_id _lightid, float _bias);
 
 	/**
+	 * @brief Controls how dark a cast shadow is for this light.
+	 * @param _strength Value in [0..1]. 0 keeps the surface fully lit,
+	 *                  1 applies the full shadow term.
+	 */
+	HRL_API void HRL_SetLightShadowStrength(HRL_id _lightid, float _strength);
+
+	/**
 	 * @brief Sets the resolution of the private shadow map for a light.
 	 * Supported values are positive powers of two; the OpenGL backend may clamp
 	 * the requested value to the implementation limits.
@@ -1053,6 +1125,21 @@ extern "C" {
 	 */
 	HRL_API void HRL_MaterialSetTexture(HRL_id _matid, const char* _uniformName, HRL_id _textureid);
 
+	/** Predefined texture semantic for built-in materials. */
+#ifndef HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING
+#define HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING "SS_DISPLACEMENT_MAPPING"
+#endif
+
+#ifndef HRL_MATERIAL_PARAM_SS_DISPLACEMENT_STRENGTH
+#define HRL_MATERIAL_PARAM_SS_DISPLACEMENT_STRENGTH "SSDisplacementStrength"
+#endif
+#ifndef HRL_MATERIAL_PARAM_SS_DISPLACEMENT_SCALE
+#define HRL_MATERIAL_PARAM_SS_DISPLACEMENT_SCALE "SSDisplacementScale"
+#endif
+#ifndef HRL_MATERIAL_PARAM_SS_DISPLACEMENT_OPACITY
+#define HRL_MATERIAL_PARAM_SS_DISPLACEMENT_OPACITY "SSDisplacementOpacity"
+#endif
+
 	/**
 	 * @brief Sets a boolean uniform on a material (internally stored as int 0 or 1).
 	 */
@@ -1191,9 +1278,141 @@ extern "C" {
 	HRL_API void HRL_SetCameraRotation(HRL_id _camid, float pitch, float yaw, float roll);
 
 
+
+	/* ============================================================================
+	 * GIZMOS
+	 * ============================================================================ */
+
+	/**
+	 * @brief Creates an editor gizmo attached to a viewport, independently of HRL scene objects.
+	 * Its transform is expressed in the same world coordinate system as HRL meshes/lights/cameras.
+	 */
+	HRL_API HRL_id HRL_CreateGizmo(HRL_id _viewportid);
+	HRL_API void HRL_DeleteGizmo(HRL_id _gizmoid);
+	HRL_API int HRL_IsValidGizmo(HRL_id _gizmoid);
+
+	HRL_API void HRL_SetGizmoPosition(HRL_id _gizmoid, float x, float y, float z);
+	HRL_API void HRL_GetGizmoPosition(HRL_id _gizmoid, float* x, float* y, float* z);
+	HRL_API void HRL_SetGizmoRotation(HRL_id _gizmoid, float pitch, float yaw, float roll);
+	HRL_API void HRL_GetGizmoRotation(HRL_id _gizmoid, float* pitch, float* yaw, float* roll);
+	HRL_API void HRL_SetGizmoScale(HRL_id _gizmoid, float x, float y, float z);
+	HRL_API void HRL_GetGizmoScale(HRL_id _gizmoid, float* x, float* y, float* z);
+
+	HRL_API void HRL_SetGizmoMode(HRL_id _gizmoid, HRL_EGizmoMode _mode);
+	HRL_API HRL_EGizmoMode HRL_GetGizmoMode(HRL_id _gizmoid);
+	HRL_API void HRL_SetGizmoSpace(HRL_id _gizmoid, HRL_EGizmoSpace _space);
+	HRL_API HRL_EGizmoSpace HRL_GetGizmoSpace(HRL_id _gizmoid);
+
+	HRL_API void HRL_SetGizmoTranslateVisible(HRL_id _gizmoid, int _visible);
+	HRL_API void HRL_SetGizmoRotateVisible(HRL_id _gizmoid, int _visible);
+	HRL_API void HRL_SetGizmoScaleVisible(HRL_id _gizmoid, int _visible);
+	HRL_API void HRL_SetGizmoTranslateAxes(HRL_id _gizmoid, int _axis_mask);
+	HRL_API void HRL_SetGizmoRotateAxes(HRL_id _gizmoid, int _axis_mask);
+	HRL_API void HRL_SetGizmoScaleAxes(HRL_id _gizmoid, int _axis_mask);
+	HRL_API void HRL_SetGizmoSize(HRL_id _gizmoid, float _world_size);
+	HRL_API void HRL_SetGizmoScreenSize(HRL_id _gizmoid, float _pixels);
+	HRL_API void HRL_SetGizmoUseScreenSize(HRL_id _gizmoid, int _use_screen_size);
+	HRL_API void HRL_SetGizmoVisible(HRL_id _gizmoid, int _visible);
+	HRL_API void HRL_SetGizmoEnabled(HRL_id _gizmoid, int _enabled);
+
+	HRL_API void HRL_SetGizmoAxisColor(HRL_id _gizmoid, int _axis, float r, float g, float b, float a);
+	HRL_API void HRL_SetGizmoCenterColor(HRL_id _gizmoid, float r, float g, float b, float a);
+	HRL_API void HRL_SetGizmoHoverColor(HRL_id _gizmoid, float r, float g, float b, float a);
+	HRL_API HRL_EGizmoPart HRL_GetGizmoHoveredPart(HRL_id _gizmoid);
+	HRL_API HRL_EGizmoPart HRL_GetGizmoActivePart(HRL_id _gizmoid);
+	HRL_API HRL_EGizmoOperation HRL_GetGizmoHoveredOperation(HRL_id _gizmoid);
+	HRL_API HRL_EGizmoOperation HRL_GetGizmoActiveOperation(HRL_id _gizmoid);
+	HRL_API void HRL_SetGizmoRotateArcDegrees(HRL_id _gizmoid, float _degrees);
+	HRL_API void HRL_SetGizmoChangedCallback(HRL_id _gizmoid, HRL_CGizmoChanged _callback, void* _user_data);
+
+	/* ============================================================================
+	 *  VFX / PARTICLE SYSTEMS
+	 * ============================================================================ */
+
+	HRL_API HRL_id HRL_CreateVFXSystem(HRL_id _sceneid);
+	HRL_API void HRL_DeleteVFXSystem(HRL_id _systemid);
+	HRL_API int HRL_IsValidVFXSystem(HRL_id _systemid);
+
+	HRL_API void HRL_SetVFXSystemPosition(HRL_id _systemid, float x, float y, float z);
+	HRL_API void HRL_GetVFXSystemPosition(HRL_id _systemid, float* x, float* y, float* z);
+	HRL_API void HRL_SetVFXSystemRotation(HRL_id _systemid, float pitch, float yaw, float roll);
+	HRL_API void HRL_GetVFXSystemRotation(HRL_id _systemid, float* pitch, float* yaw, float* roll);
+	HRL_API void HRL_SetVFXSystemScale(HRL_id _systemid, float x, float y, float z);
+	HRL_API void HRL_GetVFXSystemScale(HRL_id _systemid, float* x, float* y, float* z);
+
+	HRL_API void HRL_PlayVFXSystem(HRL_id _systemid);
+	HRL_API void HRL_StopVFXSystem(HRL_id _systemid);
+	HRL_API void HRL_PauseVFXSystem(HRL_id _systemid);
+	HRL_API void HRL_ResetVFXSystem(HRL_id _systemid);
+	HRL_API void HRL_SetVFXSystemLooping(HRL_id _systemid, int _looping);
+	HRL_API void HRL_SetVFXSystemTimeScale(HRL_id _systemid, float _scale);
+	HRL_API void HRL_SetVFXSystemEnabled(HRL_id _systemid, int _enabled);
+	HRL_API void HRL_SetVFXSystemAutoUpdate(HRL_id _systemid, int _auto_update);
+	HRL_API void HRL_SetVFXSystemDuration(HRL_id _systemid, float _duration);
+
+	HRL_API HRL_id HRL_CreateVFXEmitter(HRL_id _systemid);
+	HRL_API void HRL_DeleteVFXEmitter(HRL_id _emitterid);
+	HRL_API int HRL_IsValidVFXEmitter(HRL_id _emitterid);
+
+	HRL_API void HRL_SetVFXEmitterEnabled(HRL_id _emitterid, int _enabled);
+	HRL_API void HRL_SetVFXEmitterPosition(HRL_id _emitterid, float x, float y, float z);
+	HRL_API void HRL_SetVFXEmitterRotation(HRL_id _emitterid, float pitch, float yaw, float roll);
+	HRL_API void HRL_SetVFXEmitterMaxParticles(HRL_id _emitterid, HRL_uint _max_particles);
+	HRL_API void HRL_SetVFXEmitterSpawnRate(HRL_id _emitterid, float _particles_per_second);
+	HRL_API void HRL_SetVFXEmitterBurst(HRL_id _emitterid, HRL_uint _count);
+	HRL_API void HRL_AddVFXBurst(HRL_id _emitterid, float _time, HRL_uint _count);
+	HRL_API void HRL_ClearVFXBursts(HRL_id _emitterid);
+	HRL_API void HRL_SetVFXEmitterLifetime(HRL_id _emitterid, float _min_lifetime, float _max_lifetime);
+	HRL_API void HRL_SetVFXEmitterSpawnShape(HRL_id _emitterid, HRL_EVFXSpawnShape _shape);
+	HRL_API void HRL_SetVFXEmitterShapeRadius(HRL_id _emitterid, float _radius);
+	HRL_API void HRL_SetVFXEmitterShapeSize(HRL_id _emitterid, float x, float y, float z);
+	HRL_API void HRL_SetVFXEmitterShapeAngle(HRL_id _emitterid, float _angle_degrees);
+	HRL_API void HRL_SetVFXEmitterInitialVelocity(HRL_id _emitterid,
+		float minX, float minY, float minZ, float maxX, float maxY, float maxZ);
+	HRL_API void HRL_SetVFXEmitterInitialSpeed(HRL_id _emitterid, float _min_speed, float _max_speed);
+	HRL_API void HRL_SetVFXEmitterInitialRotation(HRL_id _emitterid,
+		float minX, float minY, float minZ, float maxX, float maxY, float maxZ);
+	HRL_API void HRL_SetVFXEmitterAngularVelocity(HRL_id _emitterid,
+		float minX, float minY, float minZ, float maxX, float maxY, float maxZ);
+	HRL_API void HRL_SetVFXGravity(HRL_id _emitterid, float x, float y, float z);
+	HRL_API void HRL_SetVFXDrag(HRL_id _emitterid, float _drag);
+	HRL_API void HRL_SetVFXForce(HRL_id _emitterid, float x, float y, float z);
+	HRL_API void HRL_SetVFXNoise(HRL_id _emitterid, float _strength, float _frequency, float _scroll_speed);
+	HRL_API void HRL_SetVFXEmitterRenderMode(HRL_id _emitterid, HRL_EVFXRenderMode _mode);
+	HRL_API void HRL_SetVFXEmitterTexture(HRL_id _emitterid, HRL_id _textureid);
+	HRL_API void HRL_SetVFXEmitterMaterial(HRL_id _emitterid, HRL_id _materialid);
+	HRL_API void HRL_SetVFXEmitterMesh(HRL_id _emitterid, HRL_id _meshid);
+	HRL_API void HRL_SetVFXEmitterMeshScale(HRL_id _emitterid, float x, float y, float z);
+	HRL_API void HRL_SetVFXEmitterMeshRotation(HRL_id _emitterid, float pitch, float yaw, float roll);
+	HRL_API void HRL_SetVFXEmitterBlendMode(HRL_id _emitterid, HRL_EVFXBlendMode _mode);
+	HRL_API void HRL_SetVFXEmitterParticleSize(HRL_id _emitterid, float x, float y);
+	HRL_API void HRL_SetVFXEmitterStretch(HRL_id _emitterid, float _amount);
+	HRL_API void HRL_SetVFXEmitterSimulationSpace(HRL_id _emitterid, HRL_EVFXSimulationSpace _space);
+
+	HRL_API HRL_id HRL_CreateVFXColorCurve(HRL_id _emitterid);
+	HRL_API HRL_id HRL_CreateVFXFloatCurve(HRL_id _emitterid);
+	HRL_API void HRL_DeleteVFXCurve(HRL_id _curveid);
+	HRL_API int HRL_IsValidVFXCurve(HRL_id _curveid);
+	HRL_API void HRL_AddVFXColorKey(HRL_id _curveid, float _time, float r, float g, float b, float a);
+	HRL_API void HRL_AddVFXFloatKey(HRL_id _curveid, float _time, float _value);
+	HRL_API void HRL_ClearVFXColorKeys(HRL_id _curveid);
+	HRL_API void HRL_ClearVFXFloatKeys(HRL_id _curveid);
+	HRL_API void HRL_SetVFXEmitterColorCurve(HRL_id _emitterid, HRL_id _curveid);
+	HRL_API void HRL_SetVFXEmitterSizeCurve(HRL_id _emitterid, HRL_id _curveid);
+	HRL_API void HRL_SetVFXEmitterRotationCurve(HRL_id _emitterid, HRL_id _curveid);
+
+	HRL_API void HRL_SetVFXCollisionEnabled(HRL_id _emitterid, int _enabled);
+	HRL_API void HRL_SetVFXCollisionRestitution(HRL_id _emitterid, float _restitution);
+	HRL_API void HRL_SetVFXCollisionFriction(HRL_id _emitterid, float _friction);
+	HRL_API void HRL_SetVFXCollisionScene(HRL_id _emitterid, HRL_id _sceneid, int _enabled);
+
+	/** Advances VFX systems that have AutoUpdate disabled. */
+	HRL_API void HRL_UpdateVFX(float _delta_seconds);
+
 	/* ============================================================================
 	 *  EFFECTS
-	 * ============================================================================ *
+	 * ============================================================================ */
+
 	/* FOG */
 	/**
 	 * @brief Enables or disables the fog effect for a scene.
@@ -1518,6 +1737,20 @@ extern "C" {
 
 #ifdef __cplusplus
 } /* extern "C" */
+
+/*
+ * C++ convenience overload for the flag-style gizmo mode API.
+ *
+ * Because HRL_EGizmoMode is an enum, a C++ expression such as
+ *   HRL_GIZMO_MODE_TRANSLATE | HRL_GIZMO_MODE_ROTATE
+ * has an integral type and cannot be implicitly converted back to
+ * HRL_EGizmoMode. Keep the public C API unchanged while allowing the
+ * natural combined-flags syntax in C++. The underlying C function still
+ * performs the actual validation of the flags.
+ */
+static inline void HRL_SetGizmoMode(HRL_id _gizmoid, int _mode) {
+	HRL_SetGizmoMode(_gizmoid, static_cast<HRL_EGizmoMode>(_mode));
+}
 #endif
 
 

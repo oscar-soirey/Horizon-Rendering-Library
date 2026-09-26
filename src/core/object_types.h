@@ -143,6 +143,7 @@ typedef struct {
   HRL_id id_ = HRL_INVALID_ID;
   bool cast_shadows_ = false;
   float shadow_bias_ = 0.0015f;
+  float shadow_strength_ = 1.0f; // 0 = no shadow darkening, 1 = fully dark shadows
   int shadow_resolution_ = 2048;
 }HRL_Light;
 
@@ -280,6 +281,179 @@ typedef struct {
 }hrl_god_rays_t;
 
 
+// VFX / particle system
+struct HRL_VFXFloatKey {
+  float time = 0.f;
+  float value = 0.f;
+};
+
+struct HRL_VFXColorKey {
+  float time = 0.f;
+  glm::vec4 value = glm::vec4(1.f);
+};
+
+struct HRL_VFXCurve {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id emitter_ = HRL_INVALID_ID;
+  bool color_ = false;
+  std::vector<HRL_VFXFloatKey> float_keys_;
+  std::vector<HRL_VFXColorKey> color_keys_;
+};
+
+struct HRL_VFXBurst {
+  float time = 0.f;
+  HRL_uint count = 0;
+};
+
+struct HRL_VFXParticle {
+  glm::vec3 position{0.f};
+  glm::vec3 velocity{0.f};
+  glm::vec3 rotation{0.f};
+  glm::vec3 base_rotation{0.f};
+  glm::vec3 angular_velocity{0.f};
+  glm::vec2 size{1.f};
+  glm::vec4 color{1.f};
+  float age = 0.f;
+  float lifetime = 1.f;
+  uint32_t seed = 1u;
+};
+
+struct HRL_VFXEmitter {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id system_ = HRL_INVALID_ID;
+  bool enabled_ = true;
+
+  glm::vec3 position_{0.f};
+  glm::vec3 rotation_{0.f};
+
+  HRL_uint max_particles_ = 4096;
+  float spawn_rate_ = 20.f;
+  float spawn_accumulator_ = 0.f;
+  uint64_t spawned_total_ = 0;
+  uint32_t random_seed_ = 0x13579BDFu;
+
+  float min_lifetime_ = 1.f;
+  float max_lifetime_ = 1.f;
+
+  HRL_EVFXSpawnShape spawn_shape_ = HRL_VFX_SHAPE_POINT;
+  float shape_radius_ = 1.f;
+  glm::vec3 shape_size_{1.f};
+  float shape_angle_degrees_ = 25.f;
+
+  glm::vec3 min_initial_velocity_{0.f};
+  glm::vec3 max_initial_velocity_{0.f};
+  float min_initial_speed_ = 0.f;
+  float max_initial_speed_ = 0.f;
+  glm::vec3 min_initial_rotation_{0.f};
+  glm::vec3 max_initial_rotation_{0.f};
+  glm::vec3 min_angular_velocity_{0.f};
+  glm::vec3 max_angular_velocity_{0.f};
+
+  glm::vec3 gravity_{0.f};
+  float drag_ = 0.f;
+  glm::vec3 force_{0.f};
+  float noise_strength_ = 0.f;
+  float noise_frequency_ = 0.5f;
+  float noise_scroll_speed_ = 1.f;
+
+  HRL_EVFXRenderMode render_mode_ = HRL_VFX_RENDER_BILLBOARD;
+  HRL_EVFXBlendMode blend_mode_ = HRL_VFX_BLEND_ALPHA;
+  HRL_EVFXSimulationSpace simulation_space_ = HRL_VFX_SIMULATION_LOCAL;
+  HRL_id texture_ = HRL_INVALID_ID;
+  HRL_id material_ = HRL_INVALID_ID;
+  HRL_id mesh_ = HRL_INVALID_ID;
+  glm::vec3 mesh_scale_{1.f};
+  glm::vec3 mesh_rotation_offset_{0.f};
+  glm::vec2 particle_size_{0.1f, 0.1f};
+  float stretch_ = 0.f;
+
+  HRL_id color_curve_ = HRL_INVALID_ID;
+  HRL_id size_curve_ = HRL_INVALID_ID;
+  HRL_id rotation_curve_ = HRL_INVALID_ID;
+
+  bool collision_enabled_ = false;
+  float collision_restitution_ = 0.2f;
+  float collision_friction_ = 0.25f;
+  HRL_id collision_scene_ = HRL_INVALID_ID;
+
+  std::vector<HRL_VFXBurst> bursts_;
+  size_t next_burst_ = 0;
+  std::vector<HRL_VFXParticle> particles_;
+};
+
+struct HRL_VFXSystem {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id scene_ = HRL_INVALID_ID;
+  bool enabled_ = true;
+  bool playing_ = false;
+  bool paused_ = false;
+  bool looping_ = true;
+  bool auto_update_ = true;
+  float time_scale_ = 1.f;
+  float duration_ = 0.f;
+  float time_ = 0.f;
+  glm::vec3 position_{0.f};
+  glm::vec3 rotation_{0.f};
+  glm::vec3 scale_{1.f};
+  std::unordered_map<HRL_id, HRL_VFXEmitter*> emitters_;
+};
+
+//GIZMO
+struct HRL_Gizmo {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id scene_ = HRL_INVALID_ID;
+  HRL_id viewport_ = HRL_INVALID_ID;
+
+  glm::vec3 position_{0.f};
+  glm::vec3 rotation_{0.f};
+  glm::vec3 scale_{1.f};
+
+  HRL_EGizmoMode mode_ = HRL_GIZMO_MODE_TRANSLATE;
+  HRL_EGizmoSpace space_ = HRL_GIZMO_SPACE_WORLD;
+
+  bool visible_ = true;
+  bool enabled_ = true;
+  bool show_translate_ = true;
+  bool show_rotate_ = true;
+  bool show_scale_ = true;
+  int translate_axes_ = HRL_GIZMO_AXIS_X | HRL_GIZMO_AXIS_Y | HRL_GIZMO_AXIS_Z;
+  int rotate_axes_ = HRL_GIZMO_AXIS_X | HRL_GIZMO_AXIS_Y | HRL_GIZMO_AXIS_Z;
+  int scale_axes_ = HRL_GIZMO_AXIS_X | HRL_GIZMO_AXIS_Y | HRL_GIZMO_AXIS_Z;
+
+  float world_size_ = 1.f;
+  float screen_size_pixels_ = 96.f;
+  bool use_screen_size_ = true;
+
+  glm::vec4 axis_colors_[3] = {
+    glm::vec4(1.f, 0.2f, 0.2f, 1.f),
+    glm::vec4(0.25f, 1.f, 0.25f, 1.f),
+    glm::vec4(0.3f, 0.55f, 1.f, 1.f)
+  };
+  glm::vec4 center_color_{1.f, 0.85f, 0.2f, 1.f};
+  glm::vec4 hover_color_{1.f, 0.95f, 0.35f, 1.f};
+  float rotate_arc_degrees_ = 90.f;
+
+  HRL_EGizmoPart hovered_part_ = HRL_GIZMO_PART_NONE;
+  HRL_EGizmoPart active_part_ = HRL_GIZMO_PART_NONE;
+  HRL_EGizmoOperation hovered_operation_ = HRL_GIZMO_OPERATION_NONE;
+  HRL_EGizmoOperation active_operation_ = HRL_GIZMO_OPERATION_NONE;
+  bool dragging_ = false;
+
+  glm::vec3 drag_start_position_{0.f};
+  glm::vec3 drag_start_rotation_{0.f};
+  glm::vec3 drag_start_scale_{1.f};
+  glm::vec3 drag_start_axis_{1.f, 0.f, 0.f};
+  glm::vec3 drag_start_vector_{1.f, 0.f, 0.f};
+  glm::vec3 drag_plane_normal_{0.f, 1.f, 0.f};
+  float drag_start_axis_value_ = 0.f;
+  float drag_start_angle_ = 0.f;
+  float drag_start_radius_ = 0.f;
+  HRL_id drag_viewport_ = HRL_INVALID_ID;
+
+  HRL_CGizmoChanged changed_callback_ = nullptr;
+  void* changed_user_data_ = nullptr;
+};
+
 //Widget
 typedef struct {
   glm::vec2 position;
@@ -298,6 +472,8 @@ typedef struct {
   std::unordered_map<HRL_id, HRL_Mesh*> meshes;
   std::unordered_map<HRL_id, HRL_Light*> lights;
   std::unordered_map<HRL_id, HRL_VolumetricFog*> volumetric_fogs;
+  std::unordered_map<HRL_id, HRL_Gizmo*> gizmos;
+  std::unordered_map<HRL_id, HRL_VFXSystem*> vfx_systems;
 
   //Per-scene diagnostic rendering state.
   HRL_EDebugView debug_view = HRL_DEBUG_VIEW_NONE;
@@ -352,6 +528,10 @@ typedef struct {
   std::unordered_map<HRL_id, HRL_Mesh*> meshes;
   std::unordered_map<HRL_id, HRL_Light*> lights;
   std::unordered_map<HRL_id, HRL_VolumetricFog*> volumetric_fogs;
+  std::unordered_map<HRL_id, HRL_Gizmo*> gizmos;
+  std::unordered_map<HRL_id, HRL_VFXSystem*> vfx_systems;
+  std::unordered_map<HRL_id, HRL_VFXEmitter*> vfx_emitters;
+  std::unordered_map<HRL_id, HRL_VFXCurve*> vfx_curves;
   std::unordered_map<HRL_id, HRL_Viewport*> viewports;
   std::unordered_map<HRL_id, HRL_Camera*> cameras;
   std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
@@ -378,6 +558,11 @@ typedef struct {
   bool mouseLeftPressed = false;
   bool mouseLeftReleased = false;
   HRL_id mouseCaptureWidget = HRL_INVALID_ID;
+  HRL_id mouseCaptureGizmo = HRL_INVALID_ID;
+  HRL_EGizmoPart mouseCaptureGizmoPart = HRL_GIZMO_PART_NONE;
+
+  double vfx_last_frame_time = 0.0;
+  bool vfx_has_frame_time = false;
 }HRL_Context;
 
 

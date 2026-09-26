@@ -1,3 +1,5 @@
+- Added per-light shadow strength control via HRL_SetLightShadowStrength() (0 = no darkening, 1 = full shadow).
+- Added viewport gizmos independent from HRL scene objects. Gizmos have their own HRL ids, world/local space, translate/rotate/scale modes, per-axis visibility/colors, hover state, screen/world sizing, mouse interaction, transform getters and change callback support.
 - Widget sizing is now resize-safe: SetWidgetSize keeps the size captured at layout time in pixels, while positions/anchors remain normalized and responsive.
 - Finalized the widget system without removing the existing widget API: Button, Label, Image, Slider, Checkbox and ProgressBar are all creatable.
 - Added viewport-normalized anchors, visibility/enabled state, alpha and deterministic z-ordering.
@@ -285,3 +287,41 @@ Le chemin skeletal existant et les corrections de shadows ne sont pas modifiés 
 - Kept the public text/widget API unchanged.
 - Added UTF-8 decoding, kerning-aware layout, and derivative-based SDF smoothing.
 - The OpenGL UI shader distinguishes SDF text from normal textured widgets.
+
+2026-09-26 - Gizmo modes are now combinable bit flags. Translation, rotation and scale can be displayed together. Scale uses translation-like axis handles, while rotation uses quarter-wheel arcs. Added operation getters and configurable rotation arc size.
+
+- Gizmo rotation arcs now use quarter-wheels aligned to the positive neighboring axes: X rotates from +Y to +Z, Y from +Z to +X, and Z from +X to +Y. Render and picking use the same basis and radius.
+
+- Fixed C++ combined HRL gizmo mode calls by adding a flag-friendly overload for HRL_SetGizmoMode.
+
+## VFX / Particle systems
+
+Added a Niagara-like VFX layer with HRL IDs for systems, emitters and curves. Systems support automatic or manual simulation, looping, time scale and transforms. Emitters support spawn rate/bursts, lifetimes, shapes, velocity, gravity, drag, force, noise, curves, collisions, billboards, stretched billboards, mesh rendering and blend modes. Individual particles are internal simulation data rather than HRL objects. The OpenGL 3.3 backend renders billboard particles with GPU instancing.
+
+- VFX depth handling is now fully internal: transparent particles automatically depth-test against opaque geometry and never write depth.
+
+
+## VFX mesh particles
+
+- `HRL_VFX_RENDER_MESH` now renders a static HRL 3D mesh as a particle template using the mesh's regular 3D material.
+- Added `HRL_SetVFXEmitterMeshScale()` for per-emitter base model scale.
+- Added `HRL_SetVFXEmitterMeshRotation()` for per-emitter model orientation offset.
+- `HRL_SetVFXEmitterMesh()` validates that the supplied asset is a static `HRL_3D_MESH`.
+- Particle size, rotation, curves, simulation space, blending and VFX color still apply to mesh particles.
+
+## Default post-process shader parameters
+
+The built-in OpenGL post-process shader keeps all existing parameters and now also supports:
+
+- `exposure` (float, default 0; stops)
+- `hueShift` (float, degrees)
+- `sharpenStrength` (float, default 0)
+- `chromaticAberration` (float, pixels, default 0)
+- `filmGrainStrength` / `filmGrainScale` (float)
+- `vignetteStrength`, `vignetteRadius`, `vignetteSoftness` (float)
+- `vignetteColor` (vec3)
+- `fadeAmount` (float) and `fadeColor` (vec3)
+
+All are set through the existing `HRL_MaterialSet*` API on the post-process material. `uTime` is supplied internally by the OpenGL backend for animated default-shader effects.
+
+- Implemented Screen Space Displacement Mapping for built-in static and skinned 3D materials.

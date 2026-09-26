@@ -25,6 +25,7 @@
 #include <fstream>
 #include <string>
 #include <cstring>
+#include <chrono>
 
 #include "core/widgets.h"
 
@@ -37,17 +38,24 @@ struct FrustumPlaneSet;
 
 static void InitTextureAndBindToFBO(GLuint _texture, GLuint _fbo, int width, int height);
 
-static bool BindMaterial(HRL_Material* mat, HRL_id object_id, HRL_Mesh* mesh, const glm::mat4& model);
+static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* mesh, const glm::mat4& model);
+static bool MaterialUsesScreenSpaceDisplacement(const HRL_Material* material);
+static bool CaptureSceneColorForDisplacement(const GL_Scene* scene, GLuint destinationTexture);
+static void DrawScreenSpaceDisplacementMeshes(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum);
 
 static glm::mat4 CalculateModelMatrix(const HRL_Mesh* mesh);
 static glm::mat4 CalculateProjectionMatrix();
 static glm::mat4 CalculateViewMatrix();
 
 static void DrawSkySphere(const hrl_scene_t* scene);
-static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum);
+static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum, bool skip_screen_space_displacement = false);
 static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum);
 static void CreateSpriteGeometry();
+static void InitVFXRenderer();
+static void DrawVFX(const hrl_scene_t* scene);
 static void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport);
+static void DrawGizmos(const hrl_scene_t* scene, const HRL_Viewport* viewport, HRL_id viewport_id);
+static void GL33_DrawGizmoOverlay(const DebugRenderer& renderer, float line_thickness);
 static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_PostProcess* pp);
 static bool HasActiveVolumetricFog(const hrl_scene_t* scene)
 {
@@ -150,6 +158,18 @@ struct GL33_Backend {
 	GLuint sprite_instance_vbo = 0;
 	size_t sprite_instance_capacity = 0;
 
+	// Niagara-like VFX billboards. Particles remain CPU-side simulation data;
+	// this stream only contains the current frame render instances.
+	GLuint vfx_vao = 0;
+	GLuint vfx_vbo = 0;
+	GLuint vfx_ebo = 0;
+	GLuint vfx_instance_vbo = 0;
+	size_t vfx_instance_capacity = 0;
+	GL33_Shader* vfx_shader = nullptr;
+
+	GL33_Shader* ss_displacement_static_shader = nullptr;
+	GL33_Shader* ss_displacement_skinned_shader = nullptr;
+
 	GL33_Shader* shadow_2d_shader = nullptr;
 	GL33_Shader* shadow_point_shader = nullptr;
 	GL33_Shader* shadow_skeletal_2d_shader = nullptr;
@@ -207,6 +227,93 @@ typedef struct {
 	GL33_Shader* bound_shader = nullptr;
 } GL33_State;
 static GL33_State* ctx_;
+
+static const char* kVFXVertexShader = R"GLSL(
+#version 330 core
+layout(location = 0) in vec3 aPosition;
+layout(location = 2) in vec2 aTexCoord;
+layout(location = 3) in mat4 aInstanceModel;
+layout(location = 7) in vec4 aInstanceColor;
+
+uniform mat4 projection;
+uniform mat4 view;
+uniform mat4 model;
+uniform int uInstanced;
+uniform vec4 uTintColor;
+
+out vec2 uv;
+out vec4 tint;
+
+void main()
+{
+    uv = aTexCoord;
+    tint = (uInstanced != 0) ? aInstanceColor : uTintColor;
+    mat4 m = (uInstanced != 0) ? aInstanceModel : model;
+    gl_Position = projection * view * m * vec4(aPosition, 1.0);
+}
+)GLSL";
+
+static const char* kVFXFragmentShader = R"GLSL(
+#version 330 core
+in vec2 uv;
+in vec4 tint;
+
+uniform sampler2D uTexture;
+uniform int uUseTexture;
+
+out vec4 FragColor;
+
+void main()
+{
+    vec4 texel = (uUseTexture != 0) ? texture(uTexture, uv) : vec4(1.0);
+    vec4 result = texel * tint;
+    if (result.a <= 0.001) discard;
+    FragColor = result;
+}
+ )GLSL";
+
+static const char* kSSDisplacementFragmentShader = R"GLSL(
+#version 330 core
+layout(location = 0) out vec4 FragColor;
+layout(location = 1) out vec4 BrightColor;
+layout(location = 2) out vec4 ColorPickingBuffer;
+layout(location = 3) out vec4 GIAlbedoBuffer;
+layout(location = 4) out vec4 GINormalBuffer;
+
+in vec2 uv;
+flat in uint sprite_id;
+
+uniform sampler2D uScene;
+uniform sampler2D uDisplacementMap;
+uniform vec2 uScreenSize;
+uniform float uStrength;
+uniform float uScale;
+uniform float uOpacity;
+
+void main()
+{
+    vec2 screenSize = max(uScreenSize, vec2(1.0));
+    vec2 baseUV = gl_FragCoord.xy / screenSize;
+    vec2 mapUV = uv * max(abs(uScale), 0.0001);
+    vec2 displacement = texture(uDisplacementMap, mapUV).rg * 2.0 - 1.0;
+    vec2 displacedUV = clamp(baseUV + displacement * uStrength / screenSize, vec2(0.0), vec2(1.0));
+    vec4 baseScene = texture(uScene, baseUV);
+    vec4 displacedScene = texture(uScene, displacedUV);
+    float opacity = clamp(uOpacity, 0.0, 1.0);
+    FragColor = vec4(mix(baseScene.rgb, displacedScene.rgb, opacity), baseScene.a);
+    BrightColor = vec4(0.0);
+    GIAlbedoBuffer = vec4(0.0);
+    GINormalBuffer = vec4(0.0);
+
+    uint id = sprite_id;
+    ColorPickingBuffer = vec4(
+        float((id >> 16u) & 255u) / 255.0,
+        float((id >> 8u) & 255u) / 255.0,
+        float(id & 255u) / 255.0,
+        1.0
+    );
+}
+)GLSL";
 
 static const char* kSceneEffectsFragmentShader = R"GLSL(
 #version 330 core
@@ -828,6 +935,25 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		delete skinned_mesh_shader;
 	}
 
+	// SCREEN-SPACE DISPLACEMENT
+	bck_->ss_displacement_static_shader = new GL33_Shader();
+	if (bck_->ss_displacement_static_shader->GL33_Create(
+		(const char*)res_static_3dmesh_vert_glsl, res_static_3dmesh_vert_glsl_len,
+		kSSDisplacementFragmentShader, std::strlen(kSSDisplacementFragmentShader)) != 0)
+	{
+		delete bck_->ss_displacement_static_shader;
+		bck_->ss_displacement_static_shader = nullptr;
+	}
+
+	bck_->ss_displacement_skinned_shader = new GL33_Shader();
+	if (bck_->ss_displacement_skinned_shader->GL33_Create(
+		(const char*)res_skinned_3dmesh_vert_glsl, res_skinned_3dmesh_vert_glsl_len,
+		kSSDisplacementFragmentShader, std::strlen(kSSDisplacementFragmentShader)) != 0)
+	{
+		delete bck_->ss_displacement_skinned_shader;
+		bck_->ss_displacement_skinned_shader = nullptr;
+	}
+
 	//DEBUG SHADER
 	auto* debug_shader = new GL33_Shader();
 	debug_shader->GL33_Create(
@@ -925,6 +1051,7 @@ void main()
 		std::strlen(kUISDFFragmentShader)
 	);
 
+	InitVFXRenderer();
 
 	//FALLBACK TEXTURES
 	bck_->fallback_textures[ALBEDO_INT] = GL33_CreateTexture((const char*)res_default_albedo_png, res_default_albedo_png_len);
@@ -933,6 +1060,8 @@ void main()
 	bck_->fallback_textures[ROUGHNESS_INT] = GL33_CreateTexture((const char*)res_default_roughness_png, res_default_roughness_png_len);
 	bck_->fallback_textures[METALLIC_INT] = GL33_CreateTexture((const char*)res_default_metallic_png, res_default_metallic_png_len);
 	bck_->fallback_textures[ALPHA_INT] = GL33_CreateTexture((const char*)res_default_alpha_png, res_default_alpha_png_len);
+	// SS displacement mapping defaults to neutral/no-displacement (albedo fallback).
+	bck_->fallback_textures[SS_DISPLACEMENT_MAPPING_INT] = bck_->fallback_textures[ALBEDO_INT];
 
 	assert(bck_->fallback_textures[ALBEDO_INT] != HRL_INVALID_ID && "Failed to load fallback albedo");
 	assert(bck_->fallback_textures[NORMAL_INT] != HRL_INVALID_ID && "Failed to load fallback normal");
@@ -987,6 +1116,13 @@ void GL33_Shutdown()
 
 	delete bck_->ui_shader;
 	delete bck_->scene_effect_shader;
+	delete bck_->vfx_shader;
+	delete bck_->ss_displacement_static_shader;
+	delete bck_->ss_displacement_skinned_shader;
+	if (bck_->vfx_vao) glDeleteVertexArrays(1, &bck_->vfx_vao);
+	if (bck_->vfx_vbo) glDeleteBuffers(1, &bck_->vfx_vbo);
+	if (bck_->vfx_ebo) glDeleteBuffers(1, &bck_->vfx_ebo);
+	if (bck_->vfx_instance_vbo) glDeleteBuffers(1, &bck_->vfx_instance_vbo);
 	delete bck_->sky_shader;
 	delete bck_->shadow_2d_shader;
 	delete bck_->shadow_point_shader;
@@ -1200,14 +1336,38 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		glDepthMask(GL_TRUE);
 		glDepthFunc(GL_LESS);
 		glDisable(GL_BLEND);
-		DrawOpaqueMeshes(scene_id, scene->meshes, scene->debug_view, cameraFrustum);
+		DrawOpaqueMeshes(scene_id, scene->meshes, scene->debug_view, cameraFrustum, true);
 		DrawSprites(scene->meshes, cameraFrustum);
+		DrawVFX(scene);
 
-		// Debug primitives are rendered into the scene framebuffer.
+		// Resolve once so displacement samples a stable scene-color snapshot.
+		ResolveSceneMSAA(gpu_scene);
+
+		bool hasScreenSpaceDisplacement = false;
+		for (const auto& [meshId, mesh] : scene->meshes)
+		{
+			(void)meshId;
+			if (!mesh || mesh->material_ == HRL_INVALID_ID) continue;
+			auto matIt = GetPrivateContext()->materials.find(mesh->material_);
+			if (matIt != GetPrivateContext()->materials.end() && MaterialUsesScreenSpaceDisplacement(matIt->second))
+			{
+				hasScreenSpaceDisplacement = true;
+				break;
+			}
+		}
+
+		if (hasScreenSpaceDisplacement && scene->debug_view == HRL_DEBUG_VIEW_NONE &&
+			CaptureSceneColorForDisplacement(gpu_scene, bck_->post_textures[0]))
+		{
+			DrawScreenSpaceDisplacementMeshes(scene_id, scene, cameraFrustum);
+		}
+
+		// Debug primitives stay crisp and are rendered over the distortion.
 		auto debugIt = GetPrivateContext()->debug_renderers.find(scene_id);
 		if (debugIt != GetPrivateContext()->debug_renderers.end())
 			GL33_DrawDebug(debugIt->second, GetPrivateContext()->debug_line_thickness);
 
+		// Include the displacement pass in the final MSAA resolve.
 		ResolveSceneMSAA(gpu_scene);
 
 		bool has_post_process = !v.second->post_processes.empty();
@@ -1277,6 +1437,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			glBlitFramebuffer(0, 0, (int)winW, (int)winH, 0, 0, (int)winW, (int)winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		}
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		DrawGizmos(scene, v.second, [&](){ for (const auto& [vid, vp] : scene->viewports) if (vp == v.second) return vid; return (HRL_id)HRL_INVALID_ID; }());
 		DrawWidgets(v.second->widgets, v.second);
 	}
 }
@@ -1321,7 +1482,7 @@ static void ApplyFallback(int index)
 		glBindTexture(GL_TEXTURE_2D, fallback->second->GetGL_ID());
 }
 
-static bool BindMaterial(HRL_Material* mat, HRL_id object_id, HRL_Mesh* mesh, const glm::mat4& model)
+static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* mesh, const glm::mat4& model)
 {
 	auto it = bck_->shaders.find(mat->shader_);
 	if (it == bck_->shaders.end())
@@ -1506,7 +1667,178 @@ static void DrawSkySphere(const hrl_scene_t* scene)
 	glDepthMask(GL_TRUE);
 }
 
-static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum)
+static bool MaterialUsesScreenSpaceDisplacement(const HRL_Material* material)
+{
+    if (!material || !bck_) return false;
+    if (material->shader_ != HRL_MESH_3D_SHADER && material->shader_ != HRL_SKINNED_3D_MESH_SHADER)
+        return false;
+    auto texParam = material->textureParams_.find(HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING);
+    if (texParam == material->textureParams_.end() || texParam->second == HRL_INVALID_ID)
+        return false;
+    auto texIt = bck_->textures.find(texParam->second);
+    return texIt != bck_->textures.end() && texIt->second && texIt->second->GetGL_ID() != 0;
+}
+
+static bool CaptureSceneColorForDisplacement(const GL_Scene* scene, GLuint destinationTexture)
+{
+    if (!scene || scene->fbo == 0 || destinationTexture == 0 || scene->width <= 0 || scene->height <= 0)
+        return false;
+    GLint previousReadFbo = 0;
+    GLint previousTexture = 0;
+    GLint previousReadBuffer = 0;
+    GLint previousActiveTexture = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousReadFbo);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+    glGetIntegerv(GL_READ_BUFFER, &previousReadBuffer);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &previousActiveTexture);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, scene->fbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, destinationTexture);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, scene->width, scene->height);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)previousTexture);
+    glActiveTexture((GLenum)previousActiveTexture);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)previousReadFbo);
+    if (previousReadFbo != 0) glReadBuffer((GLenum)previousReadBuffer);
+    return true;
+}
+
+static void DrawScreenSpaceDisplacementMeshes(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum)
+{
+    (void)scene_id;
+    if (!scene || !ctx_ || !ctx_->viewport || !ctx_->viewport->camera_ || !bck_ ||
+        (!bck_->ss_displacement_static_shader && !bck_->ss_displacement_skinned_shader) ||
+        !bck_->post_textures[0])
+        return;
+
+    auto gpuSceneIt = bck_->gpu_scenes.find(scene_id);
+    if (gpuSceneIt == bck_->gpu_scenes.end() || !gpuSceneIt->second)
+        return;
+    const GL_Scene* gpuScene = gpuSceneIt->second;
+
+    struct DrawItem
+    {
+        HRL_id id;
+        HRL_Mesh* mesh;
+        HRL_Material* material;
+        const GL33_Backend::MeshLOD_GPU* staticGpu;
+        GL33_Backend::SkeletalMeshGPU* skeletalGpu;
+        glm::mat4 model;
+        float distance2;
+    };
+
+    std::vector<DrawItem> items;
+    items.reserve(scene->meshes.size());
+    const glm::vec3 cameraPos = ctx_->viewport->camera_->position_;
+
+    for (const auto& [id, mesh] : scene->meshes)
+    {
+        if (!mesh || (mesh->type_ != HRL_3D_MESH && mesh->type_ != HRL_3D_SKELETAL_MESH) || !IsFiniteBounds(mesh))
+            continue;
+        if (mesh->material_ == HRL_INVALID_ID)
+            continue;
+        auto matIt = GetPrivateContext()->materials.find(mesh->material_);
+        if (matIt == GetPrivateContext()->materials.end() || !MaterialUsesScreenSpaceDisplacement(matIt->second))
+            continue;
+        const glm::mat4 model = CalculateModelMatrix(mesh);
+        if (mesh->type_ != HRL_3D_SKELETAL_MESH && !IsMeshVisible(mesh, model, frustum))
+            continue;
+
+        GL33_Backend::SkeletalMeshGPU* skeletalGpu = nullptr;
+        const GL33_Backend::MeshLOD_GPU* staticGpu = nullptr;
+        if (mesh->type_ == HRL_3D_SKELETAL_MESH)
+        {
+            auto gpuIt = bck_->skeletal_meshes.find(id);
+            if (gpuIt == bck_->skeletal_meshes.end() || gpuIt->second.vao == 0)
+                continue;
+            skeletalGpu = &gpuIt->second;
+            UploadSkeletalBones(static_cast<HRL_SkeletalMesh*>(mesh), *skeletalGpu);
+        }
+        else
+        {
+            auto gpuIt = bck_->meshes.find(id);
+            if (gpuIt == bck_->meshes.end())
+                continue;
+            const int lod = SelectMeshLOD(mesh, model, ctx_->view_mat, ctx_->proj_mat, static_cast<float>(GetWindowHeight()));
+            staticGpu = GetMeshLOD_GPU(gpuIt->second, lod);
+            if (!staticGpu || staticGpu->vao == 0)
+                continue;
+        }
+
+        const glm::vec3 center = glm::vec3(model * glm::vec4(mesh->bounds_center_, 1.0f));
+        items.push_back({id, mesh, matIt->second, staticGpu, skeletalGpu, model, glm::dot(center - cameraPos, center - cameraPos)});
+    }
+
+    std::stable_sort(items.begin(), items.end(), [](const DrawItem& a, const DrawItem& b) { return a.distance2 > b.distance2; });
+
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);
+
+    for (const DrawItem& item : items)
+    {
+        GL33_Shader* shader = item.skeletalGpu ? bck_->ss_displacement_skinned_shader : bck_->ss_displacement_static_shader;
+        if (!shader)
+            continue;
+        shader->Use();
+        ctx_->shader = shader;
+        ctx_->bound_shader = shader;
+        ctx_->bound_material = nullptr;
+        shader->SetMat4("projection", ctx_->proj_mat);
+        shader->SetMat4("view", ctx_->view_mat);
+        shader->SetMat4("model", item.model);
+        shader->SetVec4("UVRegion", {item.mesh->region_[0], item.mesh->region_[1], item.mesh->region_[2], item.mesh->region_[3]});
+        shader->SetUint("uSpriteID", item.id);
+        shader->SetVec2("uScreenSize", {static_cast<float>(gpuScene->width), static_cast<float>(gpuScene->height)});
+
+        float strength = 12.0f;
+        float scale = 1.0f;
+        float opacity = 1.0f;
+        if (auto it = item.material->floatParams_.find(HRL_MATERIAL_PARAM_SS_DISPLACEMENT_STRENGTH); it != item.material->floatParams_.end()) strength = it->second;
+        if (auto it = item.material->floatParams_.find(HRL_MATERIAL_PARAM_SS_DISPLACEMENT_SCALE); it != item.material->floatParams_.end()) scale = it->second;
+        if (auto it = item.material->floatParams_.find(HRL_MATERIAL_PARAM_SS_DISPLACEMENT_OPACITY); it != item.material->floatParams_.end()) opacity = it->second;
+        shader->SetFloat("uStrength", strength);
+        shader->SetFloat("uScale", scale);
+        shader->SetFloat("uOpacity", opacity);
+
+        auto texParam = item.material->textureParams_.find(HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING);
+        if (texParam == item.material->textureParams_.end())
+            continue;
+        auto texIt = bck_->textures.find(texParam->second);
+        if (texIt == bck_->textures.end() || !texIt->second || texIt->second->GetGL_ID() == 0)
+            continue;
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, bck_->post_textures[0]);
+        shader->SetInt("uScene", 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, texIt->second->GetGL_ID());
+        shader->SetInt("uDisplacementMap", 1);
+
+        if (item.skeletalGpu)
+            glBindBufferBase(GL_UNIFORM_BUFFER, 1, item.skeletalGpu->bone_ubo);
+        glBindVertexArray(item.skeletalGpu ? item.skeletalGpu->vao : item.staticGpu->vao);
+        if (item.skeletalGpu)
+        {
+            if (item.skeletalGpu->indexed) glDrawElements(GL_TRIANGLES, item.skeletalGpu->index_count, GL_UNSIGNED_INT, nullptr);
+            else glDrawArrays(GL_TRIANGLES, 0, item.skeletalGpu->vertex_count);
+        }
+        else
+        {
+            if (item.staticGpu->indexed) glDrawElements(GL_TRIANGLES, item.staticGpu->index_count, GL_UNSIGNED_INT, nullptr);
+            else glDrawArrays(GL_TRIANGLES, 0, item.staticGpu->vertex_count);
+        }
+    }
+
+    glBindVertexArray(0);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+}
+
+static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum, bool skip_screen_space_displacement)
 {
 	glEnable(GL_DEPTH_TEST);
 	glDepthMask(GL_TRUE);
@@ -1545,6 +1877,9 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 
 		auto materialIt = GetPrivateContext()->materials.find(mesh->material_);
 		if (materialIt == GetPrivateContext()->materials.end())
+			continue;
+		if (skip_screen_space_displacement && debug_view == HRL_DEBUG_VIEW_NONE &&
+			MaterialUsesScreenSpaceDisplacement(materialIt->second))
 			continue;
 
 		GL33_Backend::SkeletalMeshGPU* skeletalGpu = nullptr;
@@ -1729,6 +2064,514 @@ static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, con
 	glDisable(GL_BLEND);
 }
 
+
+struct VFXRenderInstance
+{
+	glm::mat4 model{1.f};
+	glm::vec4 color{1.f};
+};
+
+static glm::mat4 MakeVFXSystemMatrix(const HRL_VFXSystem* system)
+{
+	glm::mat4 m(1.f);
+	m = glm::translate(m, system->position_);
+	m = glm::rotate(m, glm::radians(system->rotation_.x), glm::vec3(1.f,0.f,0.f));
+	m = glm::rotate(m, glm::radians(system->rotation_.y), glm::vec3(0.f,1.f,0.f));
+	m = glm::rotate(m, glm::radians(system->rotation_.z), glm::vec3(0.f,0.f,1.f));
+	m = glm::scale(m, system->scale_);
+	return m;
+}
+
+static glm::mat4 MakeVFXParticleModel(const HRL_VFXParticle& p, const glm::mat4& systemMatrix,
+	const glm::mat4& billboardBasis, bool stretched, float stretch)
+{
+	glm::vec3 worldPos = p.position;
+	if (systemMatrix != glm::mat4(1.f))
+		worldPos = glm::vec3(systemMatrix * glm::vec4(worldPos, 1.f));
+
+	glm::mat4 model = glm::translate(glm::mat4(1.f), worldPos);
+	glm::mat4 orient = billboardBasis;
+	if (stretched)
+	{
+		const glm::vec3 viewRight = glm::normalize(glm::vec3(billboardBasis[0]));
+		const glm::vec3 viewUp = glm::normalize(glm::vec3(billboardBasis[1]));
+		const glm::vec3 v = p.velocity;
+		const float projectedLength = glm::length(v - glm::vec3(billboardBasis[2]) * glm::dot(v, glm::vec3(billboardBasis[2])));
+		if (projectedLength > 1e-4f)
+		{
+			const glm::vec3 pv = glm::normalize(v - glm::vec3(billboardBasis[2]) * glm::dot(v, glm::vec3(billboardBasis[2])));
+			const float angle = std::atan2(glm::dot(pv, viewUp), glm::dot(pv, viewRight));
+			orient = glm::rotate(orient, angle, glm::vec3(billboardBasis[2]));
+		}
+	}
+	else
+	{
+		orient = glm::rotate(orient, glm::radians(p.rotation.z), glm::vec3(billboardBasis[2]));
+	}
+	model *= orient;
+	float sx = std::max(0.f, p.size.x);
+	float sy = std::max(0.f, p.size.y);
+	if (stretched) sx += glm::length(p.velocity) * std::max(0.f, stretch);
+	model = glm::scale(model, glm::vec3(sx, sy, 1.f));
+	return model;
+}
+
+static GLuint ResolveVFXTexture(const HRL_VFXEmitter* emitter)
+{
+	if (!emitter) return 0;
+	HRL_id textureId = emitter->texture_;
+	if (textureId == HRL_INVALID_ID && emitter->material_ != HRL_INVALID_ID)
+	{
+		auto matIt = GetPrivateContext()->materials.find(emitter->material_);
+		if (matIt != GetPrivateContext()->materials.end() && matIt->second && !matIt->second->textureParams_.empty())
+			textureId = matIt->second->textureParams_.begin()->second;
+	}
+	if (textureId != HRL_INVALID_ID)
+	{
+		auto texIt = bck_->textures.find(textureId);
+		if (texIt != bck_->textures.end() && texIt->second)
+			return texIt->second->GetGL_ID();
+	}
+	const auto fallbackIdIt = bck_->fallback_textures.find(ALBEDO_INT);
+	if (fallbackIdIt != bck_->fallback_textures.end())
+	{
+		auto fallback = bck_->textures.find(fallbackIdIt->second);
+		if (fallback != bck_->textures.end() && fallback->second) return fallback->second->GetGL_ID();
+	}
+	return 0;
+}
+
+static void InitVFXRenderer()
+{
+	if (!bck_) return;
+	const HRL_Vertex3D vertices[4] = {
+		{{-0.5f,-0.5f,0.f},{0.f,0.f,1.f},{0.f,0.f},{1.f,0.f,0.f},{0.f,1.f,0.f}},
+		{{ 0.5f,-0.5f,0.f},{0.f,0.f,1.f},{1.f,0.f},{1.f,0.f,0.f},{0.f,1.f,0.f}},
+		{{ 0.5f, 0.5f,0.f},{0.f,0.f,1.f},{1.f,1.f},{1.f,0.f,0.f},{0.f,1.f,0.f}},
+		{{-0.5f, 0.5f,0.f},{0.f,0.f,1.f},{0.f,1.f},{1.f,0.f,0.f},{0.f,1.f,0.f}}
+	};
+	const GLuint indices[6] = {0,1,2,2,3,0};
+	glGenVertexArrays(1, &bck_->vfx_vao);
+	glGenBuffers(1, &bck_->vfx_vbo);
+	glGenBuffers(1, &bck_->vfx_ebo);
+	glGenBuffers(1, &bck_->vfx_instance_vbo);
+	glBindVertexArray(bck_->vfx_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, bck_->vfx_vbo);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+	const GLsizei stride = static_cast<GLsizei>(sizeof(HRL_Vertex3D));
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (const void*)offsetof(HRL_Vertex3D, position));
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (const void*)offsetof(HRL_Vertex3D, uv));
+	glEnableVertexAttribArray(2);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bck_->vfx_ebo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ARRAY_BUFFER, bck_->vfx_instance_vbo);
+	bck_->vfx_instance_capacity = sizeof(VFXRenderInstance) * 256u;
+	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(bck_->vfx_instance_capacity), nullptr, GL_STREAM_DRAW);
+	const GLsizei instanceStride = static_cast<GLsizei>(sizeof(VFXRenderInstance));
+	for (int column = 0; column < 4; ++column)
+	{
+		const GLuint location = 3u + static_cast<GLuint>(column);
+		glVertexAttribPointer(location, 4, GL_FLOAT, GL_FALSE, instanceStride,
+			(const void*)(offsetof(VFXRenderInstance, model) + sizeof(glm::vec4) * column));
+		glEnableVertexAttribArray(location);
+		glVertexAttribDivisor(location, 1);
+	}
+	glVertexAttribPointer(7, 4, GL_FLOAT, GL_FALSE, instanceStride, (const void*)offsetof(VFXRenderInstance, color));
+	glEnableVertexAttribArray(7);
+	glVertexAttribDivisor(7, 1);
+	glBindVertexArray(0);
+
+	bck_->vfx_shader = new GL33_Shader();
+	if (bck_->vfx_shader->GL33_Create(kVFXVertexShader, std::strlen(kVFXVertexShader), kVFXFragmentShader, std::strlen(kVFXFragmentShader)) != 0)
+	{
+		delete bck_->vfx_shader;
+		bck_->vfx_shader = nullptr;
+	}
+}
+
+static void UploadVFXInstances(const std::vector<VFXRenderInstance>& instances)
+{
+	const size_t required = std::max<size_t>(sizeof(VFXRenderInstance), instances.size() * sizeof(VFXRenderInstance));
+	if (required > bck_->vfx_instance_capacity)
+	{
+		bck_->vfx_instance_capacity = std::max(required, bck_->vfx_instance_capacity * 2u);
+		glBindBuffer(GL_ARRAY_BUFFER, bck_->vfx_instance_vbo);
+		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(bck_->vfx_instance_capacity), nullptr, GL_STREAM_DRAW);
+	}
+	glBindBuffer(GL_ARRAY_BUFFER, bck_->vfx_instance_vbo);
+	if (!instances.empty())
+		glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(instances.size()*sizeof(VFXRenderInstance)), instances.data());
+}
+
+static void DrawVFX(const hrl_scene_t* scene)
+{
+	if (!scene || scene->vfx_systems.empty() || !bck_ || !bck_->vfx_shader || !ctx_ || !ctx_->viewport || !ctx_->viewport->camera_)
+		return;
+
+	struct Batch
+	{
+		HRL_EVFXBlendMode blend = HRL_VFX_BLEND_ALPHA;
+		GLuint texture = 0;
+		std::vector<VFXRenderInstance> instances;
+	};
+
+	std::vector<Batch> batches;
+	batches.reserve(16);
+	std::vector<std::pair<float, VFXRenderInstance>> sorted;
+	const glm::mat4 inverseView = glm::inverse(ctx_->view_mat);
+	const glm::mat4 billboardBasis = glm::mat4(glm::mat3(inverseView));
+	const glm::vec3 cameraPos = ctx_->viewport->camera_->position_;
+
+	for (const auto& [sid, system] : scene->vfx_systems)
+	{
+		(void)sid;
+		if (!system || !system->enabled_) continue;
+		const glm::mat4 systemMatrix = MakeVFXSystemMatrix(system);
+		for (const auto& [eid, emitter] : system->emitters_)
+		{
+			(void)eid;
+			if (!emitter || !emitter->enabled_ || emitter->render_mode_ == HRL_VFX_RENDER_MESH || emitter->particles_.empty()) continue;
+			sorted.clear();
+			sorted.reserve(emitter->particles_.size());
+			for (const auto& particle : emitter->particles_)
+			{
+				VFXRenderInstance inst;
+				inst.model = MakeVFXParticleModel(
+					particle,
+					emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL ? systemMatrix : glm::mat4(1.f),
+					billboardBasis,
+					emitter->render_mode_ == HRL_VFX_RENDER_STRETCHED_BILLBOARD,
+					emitter->stretch_);
+				inst.color = particle.color;
+				const glm::vec3 pos = glm::vec3(inst.model[3]);
+				sorted.emplace_back(glm::dot(pos - cameraPos, pos - cameraPos), inst);
+			}
+			if (emitter->blend_mode_ == HRL_VFX_BLEND_ALPHA)
+				std::stable_sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+			Batch batch;
+			batch.blend = emitter->blend_mode_;
+			batch.texture = ResolveVFXTexture(emitter);
+			batch.instances.reserve(sorted.size());
+			for (const auto& pair : sorted) batch.instances.push_back(pair.second);
+			if (!batch.instances.empty()) batches.push_back(std::move(batch));
+		}
+	}
+
+	bck_->vfx_shader->Use();
+	bck_->vfx_shader->SetMat4("projection", ctx_->proj_mat);
+	bck_->vfx_shader->SetMat4("view", ctx_->view_mat);
+	bck_->vfx_shader->SetInt("uInstanced", 1);
+	bck_->vfx_shader->SetInt("uTexture", 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindVertexArray(bck_->vfx_vao);
+	glDisable(GL_CULL_FACE);
+
+	// Automatic VFX depth policy: depth-test against opaque scene geometry,
+	// but never write depth. The application never configures depth for VFX.
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
+	glDepthMask(GL_FALSE);
+
+	for (auto& batch : batches)
+	{
+		if (batch.instances.empty()) continue;
+		glEnable(GL_BLEND);
+		switch (batch.blend)
+		{
+		case HRL_VFX_BLEND_ADDITIVE: glBlendFunc(GL_SRC_ALPHA, GL_ONE); break;
+		case HRL_VFX_BLEND_MULTIPLY: glBlendFunc(GL_DST_COLOR, GL_ZERO); break;
+		case HRL_VFX_BLEND_ALPHA:
+		default: glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); break;
+		}
+		glBindTexture(GL_TEXTURE_2D, batch.texture);
+		bck_->vfx_shader->SetInt("uUseTexture", batch.texture != 0 ? 1 : 0);
+		UploadVFXInstances(batch.instances);
+		glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(batch.instances.size()));
+	}
+
+	// Mesh particles use their HRL static mesh as a template. The template's
+	// scene transform is intentionally ignored; each particle gets its own
+	// transform while reusing the mesh's material (or a compatible emitter
+	// material override).
+	ctx_->bound_material = nullptr;
+	ctx_->bound_shader = nullptr;
+
+	for (const auto& [sid, system] : scene->vfx_systems)
+	{
+		(void)sid;
+		if (!system || !system->enabled_) continue;
+		const glm::mat4 systemMatrix = MakeVFXSystemMatrix(system);
+
+		for (const auto& [eid, emitter] : system->emitters_)
+		{
+			(void)eid;
+			if (!emitter || !emitter->enabled_ ||
+				emitter->render_mode_ != HRL_VFX_RENDER_MESH ||
+				emitter->mesh_ == HRL_INVALID_ID ||
+				emitter->particles_.empty())
+				continue;
+
+			auto meshIt = GetPrivateContext()->meshes.find(emitter->mesh_);
+			if (meshIt == GetPrivateContext()->meshes.end() || !meshIt->second ||
+				meshIt->second->type_ != HRL_3D_MESH)
+				continue;
+
+			auto gpuIt = bck_->meshes.find(emitter->mesh_);
+			if (gpuIt == bck_->meshes.end()) continue;
+			const HRL_Mesh& mesh = *meshIt->second;
+			const int lodLevel = SelectMeshLOD(meshIt->second, CalculateModelMatrix(&mesh),
+				ctx_->view_mat, ctx_->proj_mat, (float)GetWindowHeight());
+			const GL33_Backend::MeshLOD_GPU* gpu = GetMeshLOD_GPU(gpuIt->second, lodLevel);
+			if (!gpu || gpu->vao == 0 || gpu->vertex_count <= 0) continue;
+
+			HRL_Material* material = nullptr;
+			if (emitter->material_ != HRL_INVALID_ID)
+			{
+				auto matIt = GetPrivateContext()->materials.find(emitter->material_);
+				if (matIt != GetPrivateContext()->materials.end() && matIt->second &&
+					(matIt->second->shader_ == HRL_MESH_3D_SHADER))
+					material = matIt->second;
+			}
+			if (!material && mesh.material_ != HRL_INVALID_ID)
+			{
+				auto matIt = GetPrivateContext()->materials.find(mesh.material_);
+				if (matIt != GetPrivateContext()->materials.end()) material = matIt->second;
+			}
+			if (!material || (material->shader_ != HRL_MESH_3D_SHADER))
+				continue;
+
+			std::vector<std::pair<float, const HRL_VFXParticle*>> ordered;
+			ordered.reserve(emitter->particles_.size());
+			for (const auto& particle : emitter->particles_)
+			{
+				glm::vec3 worldPos = particle.position;
+				if (emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL)
+					worldPos = glm::vec3(systemMatrix * glm::vec4(worldPos, 1.f));
+				const glm::vec3 d = worldPos - cameraPos;
+				ordered.emplace_back(glm::dot(d, d), &particle);
+			}
+			if (emitter->blend_mode_ == HRL_VFX_BLEND_ALPHA)
+				std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+
+			if (emitter->blend_mode_ == HRL_VFX_BLEND_ADDITIVE) glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+			else if (emitter->blend_mode_ == HRL_VFX_BLEND_MULTIPLY) glBlendFunc(GL_DST_COLOR, GL_ZERO);
+			else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+			for (const auto& entry : ordered)
+			{
+				const HRL_VFXParticle& particle = *entry.second;
+				glm::vec3 worldPos = particle.position;
+				if (emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL)
+					worldPos = glm::vec3(systemMatrix * glm::vec4(worldPos, 1.f));
+
+				glm::mat4 model(1.f);
+				model = glm::translate(model, worldPos);
+				model = glm::translate(model, mesh.pivot_point_);
+				model = glm::rotate(model, glm::radians(particle.rotation.x + emitter->mesh_rotation_offset_.x), glm::vec3(1.f, 0.f, 0.f));
+				model = glm::rotate(model, glm::radians(particle.rotation.y + emitter->mesh_rotation_offset_.y), glm::vec3(0.f, 1.f, 0.f));
+				model = glm::rotate(model, glm::radians(particle.rotation.z + emitter->mesh_rotation_offset_.z), glm::vec3(0.f, 0.f, 1.f));
+				model = glm::translate(model, -mesh.pivot_point_);
+				model = glm::scale(model, emitter->mesh_scale_ * std::max(0.f, particle.size.x));
+
+				if (!BindMaterial(material, emitter->id_, &mesh, model)) continue;
+				if (ctx_->shader) ctx_->shader->SetVec3("TintColor", glm::vec3(particle.color));
+
+				if (emitter->texture_ != HRL_INVALID_ID && material->shader_ == HRL_MESH_3D_SHADER)
+				{
+					auto texIt = bck_->textures.find(emitter->texture_);
+					if (texIt != bck_->textures.end() && texIt->second)
+					{
+						glActiveTexture(GL_TEXTURE0);
+						glBindTexture(GL_TEXTURE_2D, texIt->second->GetGL_ID());
+					}
+				}
+
+
+				glBindVertexArray(gpu->vao);
+				if (gpu->indexed && gpu->index_count > 0) glDrawElements(GL_TRIANGLES, gpu->index_count, GL_UNSIGNED_INT, nullptr);
+				else glDrawArrays(GL_TRIANGLES, 0, gpu->vertex_count);
+			}
+		}
+	}
+
+	bck_->vfx_shader->Use();
+	bck_->vfx_shader->SetInt("uInstanced", 1);
+	glDepthMask(GL_TRUE);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
+	glDisable(GL_BLEND);
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glBindVertexArray(0);
+}
+
+static glm::vec3 GizmoAxisRenderer(const HRL_Gizmo* g, int axis)
+{
+    glm::vec3 v(0.f); v[axis] = 1.f;
+    if (g->space_ == HRL_GIZMO_SPACE_WORLD) return v;
+    glm::mat4 r(1.f);
+    r = glm::rotate(r, glm::radians(g->rotation_.x), glm::vec3(1,0,0));
+    r = glm::rotate(r, glm::radians(g->rotation_.y), glm::vec3(0,1,0));
+    r = glm::rotate(r, glm::radians(g->rotation_.z), glm::vec3(0,0,1));
+    return glm::normalize(glm::vec3(r * glm::vec4(v,0.f)));
+}
+
+static float GizmoSizeRenderer(const HRL_Gizmo* g, const HRL_Viewport* viewport)
+{
+    if (!g || !viewport || !viewport->camera_) return 1.f;
+    if (!g->use_screen_size_) return std::max(0.0001f, g->world_size_);
+    const float winH = std::max(1.f, static_cast<float>(GetWindowHeight()) * viewport->height_);
+    const float depth = std::max(0.001f, std::abs(glm::vec3(ctx_->view_mat * glm::vec4(g->position_,1.f)).z));
+    if (viewport->camera_->type_ == HRL_PERSPECTIVE) {
+        const float worldHeight = 2.f * depth * std::tan(glm::radians(viewport->camera_->value_) * 0.5f);
+        return std::max(0.0001f, g->screen_size_pixels_ * worldHeight / winH);
+    }
+    return std::max(0.0001f, g->screen_size_pixels_ * viewport->camera_->value_ / winH);
+}
+
+static void GizmoPushLine(DebugRenderer& d, const glm::vec3& a, const glm::vec3& b, const glm::vec4& c)
+{
+    d.lines.emplace_back(a.x,a.y,a.z,c.x,c.y,c.z);
+    d.lines.emplace_back(b.x,b.y,b.z,c.x,c.y,c.z);
+}
+
+static void GizmoPushArc(DebugRenderer& d, const glm::vec3& center, const glm::vec3& normal,
+    const glm::vec3& u, float radius, float start, float sweep, int segments, const glm::vec4& color)
+{
+    glm::vec3 v = glm::normalize(glm::cross(normal, u));
+    sweep = glm::clamp(sweep, 0.17453292519943295769f, 2.9670597283903604f);
+    segments = std::max(6, segments);
+    glm::vec3 prev = center + (std::cos(start)*u + std::sin(start)*v) * radius;
+    for (int i=1; i<=segments; ++i) {
+        const float a = start + sweep * float(i) / float(segments);
+        glm::vec3 cur = center + (std::cos(a)*u + std::sin(a)*v) * radius;
+        GizmoPushLine(d, prev, cur, color);
+        prev = cur;
+    }
+}
+
+static void DrawGizmos(const hrl_scene_t* scene, const HRL_Viewport* viewport, HRL_id viewport_id)
+{
+    if (!scene || !viewport || !viewport->camera_ || viewport_id == HRL_INVALID_ID || scene->gizmos.empty()) return;
+    DebugRenderer overlay;
+    const float winW = static_cast<float>(GetWindowWidth());
+    const float winH = static_cast<float>(GetWindowHeight());
+    glViewport(
+        static_cast<GLint>(viewport->x_ * winW),
+        static_cast<GLint>(viewport->y_ * winH),
+        std::max(1, static_cast<int>(viewport->width_ * winW)),
+        std::max(1, static_cast<int>(viewport->height_ * winH)));
+
+    for (const auto& [id, g] : scene->gizmos) {
+        (void)id;
+        if (!g || !g->visible_ || g->viewport_ != viewport_id) continue;
+        const float size = GizmoSizeRenderer(g, viewport);
+        const glm::vec3 center = g->position_;
+
+        if ((static_cast<int>(g->mode_) & static_cast<int>(HRL_GIZMO_MODE_TRANSLATE)) && g->show_translate_) {
+            for (int axis=0; axis<3; ++axis) {
+                if (!(g->translate_axes_ & (1<<axis))) continue;
+                const glm::vec3 dir = GizmoAxisRenderer(g, axis);
+                const glm::vec3 end = center + dir * size;
+                const glm::vec4 col = (g->hovered_operation_ == HRL_GIZMO_OPERATION_TRANSLATE && g->hovered_part_ == static_cast<HRL_EGizmoPart>(axis+1)) ? g->hover_color_ : g->axis_colors_[axis];
+                GizmoPushLine(overlay, center, end, col);
+                glm::vec3 side = glm::cross(dir, glm::normalize(viewport->camera_->position_ - center));
+                if (glm::length(side) < 1e-4f) side = glm::cross(dir, glm::vec3(0,1,0));
+                side = glm::normalize(side);
+                const float head = size * 0.14f;
+                GizmoPushLine(overlay, end, end - dir*head + side*head*0.55f, col);
+                GizmoPushLine(overlay, end, end - dir*head - side*head*0.55f, col);
+            }
+            if (g->hovered_operation_ == HRL_GIZMO_OPERATION_TRANSLATE && g->hovered_part_ == HRL_GIZMO_PART_CENTER) {
+                const glm::vec3 forward = GetForwardVector(viewport->camera_->rotation_);
+                glm::vec3 right = glm::cross(forward, glm::vec3(0,1,0));
+                if (glm::length(right) < 1e-4f) right = glm::cross(forward, glm::vec3(1,0,0));
+                right = glm::normalize(right);
+                const glm::vec3 up = glm::normalize(glm::cross(right, forward));
+                const float box=size*0.16f;
+                const glm::vec4 col=g->hover_color_;
+                GizmoPushLine(overlay, center-right*box-up*box, center+right*box-up*box, col);
+                GizmoPushLine(overlay, center+right*box-up*box, center+right*box+up*box, col);
+                GizmoPushLine(overlay, center+right*box+up*box, center-right*box+up*box, col);
+                GizmoPushLine(overlay, center-right*box+up*box, center-right*box-up*box, col);
+            }
+        }
+
+        // Scale intentionally mirrors translation geometry: one axis per handle, with a square endpoint.
+        if ((static_cast<int>(g->mode_) & static_cast<int>(HRL_GIZMO_MODE_SCALE)) && g->show_scale_) {
+            for (int axis=0; axis<3; ++axis) {
+                if (!(g->scale_axes_ & (1<<axis))) continue;
+                const glm::vec3 dir=GizmoAxisRenderer(g,axis);
+                glm::vec3 side=(std::abs(dir.y)<0.9f)?glm::normalize(glm::cross(dir,glm::vec3(0,1,0))):glm::normalize(glm::cross(dir,glm::vec3(1,0,0)));
+                const glm::vec3 up=glm::normalize(glm::cross(side,dir));
+                const glm::vec3 end=center+dir*size;
+                const float h=size*0.10f;
+                const glm::vec4 col=(g->hovered_operation_==HRL_GIZMO_OPERATION_SCALE&&g->hovered_part_==static_cast<HRL_EGizmoPart>(axis+1))?g->hover_color_:g->axis_colors_[axis];
+                GizmoPushLine(overlay,center,end,col);
+                GizmoPushLine(overlay,end-side*h-up*h,end+side*h-up*h,col);
+                GizmoPushLine(overlay,end+side*h-up*h,end+side*h+up*h,col);
+                GizmoPushLine(overlay,end+side*h+up*h,end-side*h+up*h,col);
+                GizmoPushLine(overlay,end-side*h+up*h,end-side*h-up*h,col);
+            }
+        }
+
+        // Rotation uses three separate quarter wheels. They remain independently pickable.
+        if ((static_cast<int>(g->mode_) & static_cast<int>(HRL_GIZMO_MODE_ROTATE)) && g->show_rotate_) {
+            const float sweep=glm::radians(glm::clamp(g->rotate_arc_degrees_,15.f,170.f));
+            for (int axis=0; axis<3; ++axis) {
+                if (!(g->rotate_axes_ & (1<<axis))) continue;
+                const glm::vec3 n=GizmoAxisRenderer(g,axis);
+                // Keep every quarter-wheel aligned to the next positive axis:
+                // X: +Y -> +Z, Y: +Z -> +X, Z: +X -> +Y.
+                const glm::vec3 u=GizmoAxisRenderer(g,(axis+1)%3);
+                const float start=0.f;
+                const glm::vec4 col=(g->hovered_operation_==HRL_GIZMO_OPERATION_ROTATE&&g->hovered_part_==static_cast<HRL_EGizmoPart>(axis+1))?g->hover_color_:g->axis_colors_[axis];
+                GizmoPushArc(overlay,center,n,u,size,start,sweep,20,col);
+            }
+        }
+
+        if ((static_cast<int>(g->mode_) & (static_cast<int>(HRL_GIZMO_MODE_ROTATE) | static_cast<int>(HRL_GIZMO_MODE_SCALE))) != 0) {
+            const float s=size*0.06f;
+            const glm::vec4 col=g->center_color_;
+            GizmoPushLine(overlay,center-glm::vec3(s,0,0),center+glm::vec3(s,0,0),col);
+            GizmoPushLine(overlay,center-glm::vec3(0,s,0),center+glm::vec3(0,s,0),col);
+            GizmoPushLine(overlay,center-glm::vec3(0,0,s),center+glm::vec3(0,0,s),col);
+        }
+    }
+    if (!overlay.lines.empty())
+        GL33_DrawGizmoOverlay(overlay, std::max(1.5f, GetPrivateContext()->debug_line_thickness + 0.5f));
+}
+
+static void GL33_DrawGizmoOverlay(const DebugRenderer& renderer, float line_thickness)
+{
+    if (renderer.lines.empty()) return;
+    auto shaderIt=bck_->shaders.find(HRL_DEBUG_SHADER);
+    if(shaderIt==bck_->shaders.end()) return;
+    GL33_Shader* shader=shaderIt->second;
+    shader->Use();
+    shader->SetMat4("projection",ctx_->proj_mat);
+    shader->SetMat4("view",ctx_->view_mat);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glLineWidth(std::max(1.0f,line_thickness));
+    glBindVertexArray(bck_->vao[BUFFER_DEBUG]);
+    glBindBuffer(GL_ARRAY_BUFFER,bck_->vbo[BUFFER_DEBUG]);
+    const size_t bytes=renderer.lines.size()*sizeof(DebugVertex);
+    if(bytes>ctx_->current_debug_buffer_size){
+        glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)bytes,renderer.lines.data(),GL_STREAM_DRAW);
+        ctx_->current_debug_buffer_size=bytes;
+    }else{
+        glBufferSubData(GL_ARRAY_BUFFER,0,(GLsizeiptr)bytes,renderer.lines.data());
+    }
+    glDrawArrays(GL_LINES,0,(GLsizei)renderer.lines.size());
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
+
 void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport)
 {
 	if (!viewport || widgets.empty())
@@ -1779,7 +2622,7 @@ void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const H
 	}
 
 	// A press is captured by the highest-z interactive widget under the cursor.
-	if (privateContext->mouseLeftPressed && privateContext->mouseCaptureWidget == HRL_INVALID_ID)
+	if (privateContext->mouseLeftPressed && privateContext->mouseCaptureWidget == HRL_INVALID_ID && privateContext->mouseCaptureGizmo == HRL_INVALID_ID)
 	{
 		for (auto it = sortedWidgets.rbegin(); it != sortedWidgets.rend(); ++it)
 		{
@@ -2048,6 +2891,11 @@ static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_P
 	GL33_Shader* shader = shader_it->second;
 	shader->Use();
 
+	// HRL-owned post-process time for animated default-shader effects (e.g. film grain).
+	static const auto postStartTime = std::chrono::steady_clock::now();
+	const double postTimeSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - postStartTime).count();
+	shader->SetFloat("uTime", static_cast<float>(postTimeSeconds));
+
 	//texture de la passe précédente (ou de la scène)
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, src_texture);
@@ -2193,6 +3041,7 @@ void GL33_UpdateLights(const std::vector<HRL_Light*>& _lights)
 	{
 		gpu_lights[i].shadowMatrix = glm::mat4(1.f);
 		gpu_lights[i].shadowParams = glm::vec4(0.f, 0.f, -1.f, 0.f);
+		gpu_lights[i].shadowStrength = 1.f;
 	}
 	size_t count = 0;
 
@@ -2223,7 +3072,7 @@ void GL33_UpdateLights(const std::vector<HRL_Light*>& _lights)
 		gpu_lights[count].padding3 = 0.f;
 
 		gpu_lights[count].color = light->color_;
-		gpu_lights[count].padding4 = 0.f;
+		gpu_lights[count].shadowStrength = light->shadow_strength_;
 
 		++count;
 	}
@@ -2546,6 +3395,7 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 	{
 		gpu_lights[i].shadowMatrix = glm::mat4(1.f);
 		gpu_lights[i].shadowParams = glm::vec4(0.f, 0.f, -1.f, 0.f);
+		gpu_lights[i].shadowStrength = 1.f;
 	}
 	if (!scene)
 		return;
@@ -2567,6 +3417,7 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 		dst.outerCutoff = std::cos(glm::radians(light->outerCutoff));
 		dst.rotation = GetLightDirection(light);
 		dst.color = light->color_;
+		dst.shadowStrength = light->shadow_strength_;
 
 		if (activeSlots)
 		{

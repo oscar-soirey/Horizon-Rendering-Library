@@ -90,7 +90,7 @@ struct Light
     float padding3;
 
     vec3 color;
-    float padding4;
+    float shadowStrength;
 
     mat4 shadowMatrix;
     vec4 shadowParams; // x=bias, y=far plane, z=slot, w=type (1=2D, 2=cube)
@@ -363,6 +363,12 @@ float ShadowCompareCube(int slot, vec3 direction, float referenceDepth)
     return visible / 9.0;
 }
 
+float ApplyShadowStrength(Light light, float shadow)
+{
+    float strength = clamp(light.shadowStrength, 0.0, 1.0);
+    return mix(1.0, shadow, strength);
+}
+
 float ComputeShadow(Light light, vec3 worldPos, vec3 normalWorld, vec3 lightDir)
 {
     if (light.shadowParams.z < -0.5)
@@ -383,17 +389,19 @@ float ComputeShadow(Light light, vec3 worldPos, vec3 normalWorld, vec3 lightDir)
             return 1.0;
 
         coord.z -= bias;
-        if (slot == 0) return ShadowCompare2D_0(coord);
-        if (slot == 1) return ShadowCompare2D_1(coord);
-        if (slot == 2) return ShadowCompare2D_2(coord);
-        return ShadowCompare2D_3(coord);
+        float rawShadow;
+        if (slot == 0) rawShadow = ShadowCompare2D_0(coord);
+        else if (slot == 1) rawShadow = ShadowCompare2D_1(coord);
+        else if (slot == 2) rawShadow = ShadowCompare2D_2(coord);
+        else rawShadow = ShadowCompare2D_3(coord);
+        return ApplyShadowStrength(light, rawShadow);
     }
 
     float farPlane = max(light.shadowParams.y, 0.001);
     vec3 toLight = worldPos - light.position;
     float referenceDepth = length(toLight) / farPlane;
     referenceDepth = max(referenceDepth - bias, 0.0);
-    return ShadowCompareCube(slot, toLight, referenceDepth);
+    return ApplyShadowStrength(light, ShadowCompareCube(slot, toLight, referenceDepth));
 }
 
 vec2 EquirectangularUV(vec3 direction)
