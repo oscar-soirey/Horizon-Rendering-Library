@@ -27,7 +27,7 @@
 #ifndef HRL_IMPL
 #define HRL_IMPL
 
-#define HRL_API_VERSION "0.5"
+#define HRL_API_VERSION "0.6"
 
 #ifdef __cplusplus
  #include <cstdint>
@@ -72,6 +72,62 @@ typedef struct HRL_Vertex3D {
 	float tangent[3];
 	float bitangent[3];
 } HRL_Vertex3D;
+
+/** Maximum number of bone influences stored per skeletal vertex. */
+#define HRL_SKELETAL_MAX_INFLUENCES 4
+/** Maximum number of bones supported by the OpenGL 3.3 skeletal renderer. */
+#define HRL_MAX_SKELETAL_BONES 128
+
+/** Vertex format used by skeletal meshes. The first five attributes share the
+ * HRL_Vertex3D layout, followed by four bone indices and four normalized weights. */
+typedef struct HRL_SkeletalVertex {
+	HRL_Vertex3D vertex;
+	HRL_uint boneIndices[HRL_SKELETAL_MAX_INFLUENCES];
+	float boneWeights[HRL_SKELETAL_MAX_INFLUENCES];
+} HRL_SkeletalVertex;
+
+/** Local transform sampled for one skeletal bone at one animation frame. */
+typedef struct HRL_SkeletalBoneTransform {
+	float translation[3];
+	float rotation[4]; /* quaternion x, y, z, w */
+	float scale[3];
+} HRL_SkeletalBoneTransform;
+
+/** Public skeletal bone metadata. */
+typedef struct HRL_SkeletalBone {
+	const char* name;
+	HRL_uint parentIndex;
+	/** Local bind-pose transform used to reconstruct the bone hierarchy. */
+	HRL_SkeletalBoneTransform bindTransform;
+	/** Evaluated bind-pose node-to-world matrix. */
+	float bindWorldMatrix[16];
+	float inverseBindMatrix[16];
+} HRL_SkeletalBone;
+
+/** Baked animation data owned by HRL_SkeletalMeshData until freed. */
+typedef struct HRL_SkeletalAnimation {
+	const char* name;
+	float duration;
+	float frameRate;
+	size_t frameCount;
+	HRL_SkeletalBoneTransform* frames; /* frameCount * boneCount */
+	/** Optional evaluated skin matrices: frameCount * boneCount * 16 floats. */
+	float* poseMatrices;
+} HRL_SkeletalAnimation;
+
+/** CPU-side skeletal mesh data produced by an importer. */
+typedef struct HRL_SkeletalMeshData {
+	HRL_SkeletalVertex* vertices;
+	size_t vertexCount;
+	HRL_uint* indices;
+	size_t indexCount;
+	HRL_SkeletalBone* bones;
+	size_t boneCount;
+	HRL_SkeletalAnimation* animations;
+	size_t animationCount;
+	/** Geometry-to-world transform of the FBX mesh instance. New data should set this to identity unless imported from FBX. */
+	float geometryToWorldMatrix[16];
+} HRL_SkeletalMeshData;
 
 #define HRL_FALSE ((int)0)
 #define HRL_TRUE  ((int)1)
@@ -132,6 +188,32 @@ typedef enum HRL_EFilterType{
 	/** Not avalaible with OpenGL backends */
 	HRL_FILTER_SUPERSAMPLING
 }HRL_EFilterType;
+
+/**
+ * Global illumination methods.
+ *
+ * Backend support in this release:
+ *   - OpenGL 3.3: SSGI
+ *   - OpenGL 4.5: not implemented in this repository
+ *   - Vulkan: not implemented in this repository
+ *   - D3D11: not implemented in this repository
+ *   - D3D12: not implemented in this repository
+ *   - Metal: not implemented in this repository
+ *   - NVN: not implemented in this repository
+ *   - GNM: not implemented in this repository
+ *
+ * VCT, LPV, DDGI, path tracing and ray tracing are exposed now so the public
+ * API does not need to change when future backends implement them.
+ */
+typedef enum HRL_EGlobalIlluminationMethod {
+    HRL_GI_NONE = 0,
+    HRL_GI_SSGI,
+    HRL_GI_VCT,
+    HRL_GI_LPV,
+    HRL_GI_DDGI,
+    HRL_GI_PATH_TRACING,
+    HRL_GI_RAY_TRACING
+} HRL_EGlobalIlluminationMethod;
 
 typedef enum HRL_EAntialiasingMode{
 	HRL_ANTIALIASING_OFF = 0,
@@ -201,6 +283,7 @@ typedef enum HRL_EWidgetType{
 #define HRL_MESH_3D_SHADER (UINT32_MAX - 2)
 #define HRL_DEBUG_SHADER (UINT32_MAX - 3)
 #define HRL_DEFAULT_POST_PROCESS_SHADER (UINT32_MAX - 4)
+#define HRL_SKINNED_3D_MESH_SHADER (UINT32_MAX - 5)
 
 
 #ifdef __cplusplus
@@ -335,6 +418,13 @@ extern "C" {
 		const HRL_uint* _indices, size_t _indexCount
 	);
 
+	/** Creates a skeletal mesh from CPU-side data returned by the FBX importer.
+	 * HRL copies the data and the caller may free the source structure afterwards. */
+	HRL_API HRL_id HRL_CreateSkeletalMesh(
+		HRL_id _sceneid,
+		const HRL_SkeletalMeshData* _data
+	);
+
 	/**
 	 * @brief Converts an FBX mesh scene to a flat HRL_Vertex3D array.
 	 *
@@ -361,6 +451,118 @@ extern "C" {
 	 * @brief Frees the buffer returned by HRL_GetVertex3DFromFBX.
 	 */
 	HRL_API void HRL_FreeVertex3DFromFBX(HRL_Vertex3D* _vertices);
+
+	/**
+	 * @brief Converts the first skinned FBX mesh in an in-memory FBX buffer.
+	 *
+	 * ufbx is an internal dependency of hrl.cpp. Geometry, bones, weights and
+	 * baked animation samples are copied into an HRL-owned CPU data structure.
+	 * No file path is accepted by this API.
+	 */
+	HRL_API HRL_SkeletalMeshData* HRL_GetSkeletalMeshFromFBX(
+		const char* _data, size_t _bufferSize
+	);
+
+	/** Frees all nested allocations returned by HRL_GetSkeletalMeshFromFBX. */
+	HRL_API void HRL_FreeSkeletalMeshData(HRL_SkeletalMeshData* _data);
+
+	/* ============================================================================
+	 *  FBX RESOURCES & MATERIALS
+	 * ============================================================================ */
+
+	/** Opaque handle owning a decoded FBX resource scene. */
+	typedef struct HRL_FBXResources HRL_FBXResources;
+
+	/** Resource texture kind as reported by ufbx. */
+	typedef enum HRL_EFBXTextureType {
+		HRL_FBX_TEXTURE_FILE = 0,
+		HRL_FBX_TEXTURE_LAYERED,
+		HRL_FBX_TEXTURE_PROCEDURAL,
+		HRL_FBX_TEXTURE_SHADER
+	} HRL_EFBXTextureType;
+
+	/** Texture slots understood by HRL's built-in 3D material shader. */
+	typedef enum HRL_EFBXMaterialTextureSlot {
+		HRL_FBX_MATERIAL_ALBEDO = 0,
+		HRL_FBX_MATERIAL_NORMAL,
+		HRL_FBX_MATERIAL_SPECULAR,
+		HRL_FBX_MATERIAL_ROUGHNESS,
+		HRL_FBX_MATERIAL_METALLIC,
+		HRL_FBX_MATERIAL_ALPHA,
+		HRL_FBX_MATERIAL_TEXTURE_SLOT_COUNT
+	} HRL_EFBXMaterialTextureSlot;
+
+	/** Description of one texture resource in an imported FBX scene.
+	 * The data pointer remains valid until HRL_FreeFBXResources().
+	 */
+	typedef struct HRL_FBXTextureInfo {
+		const char* name;
+		const char* filename;
+		const unsigned char* data;
+		size_t size;
+		HRL_EFBXTextureType type;
+		int embedded;
+	} HRL_FBXTextureInfo;
+
+	/** Material information extracted from the FBX PBR/legacy material model.
+	 * textureIndices contains HRL_INVALID_ID where no matching texture exists.
+	 */
+	typedef struct HRL_FBXMaterialInfo {
+		const char* name;
+		float baseColor[4];
+		float roughness;
+		float metallic;
+		float specular;
+		float opacity;
+		HRL_uint textureIndices[HRL_FBX_MATERIAL_TEXTURE_SLOT_COUNT];
+	} HRL_FBXMaterialInfo;
+
+	/**
+	 * @brief Loads FBX materials and textures without importing geometry.
+	 * Embedded texture bytes are exposed directly through HRL_FBXTextureInfo.
+	 */
+	HRL_API HRL_FBXResources* HRL_LoadFBXResources(const char* _data, size_t _bufferSize);
+
+	/** Releases a resource scene returned by HRL_LoadFBXResources(). */
+	HRL_API void HRL_FreeFBXResources(HRL_FBXResources* _resources);
+
+	HRL_API size_t HRL_GetFBXMaterialCount(const HRL_FBXResources* _resources);
+	/** Returns read-only material metadata; the pointer is valid while _resources is alive. */
+	HRL_API const HRL_FBXMaterialInfo* HRL_GetFBXMaterial(const HRL_FBXResources* _resources, size_t _index);
+	/** Finds a material by its FBX name and returns its material index, or HRL_INVALID_ID. */
+	HRL_API HRL_id HRL_FindFBXMaterial(const HRL_FBXResources* _resources, const char* _name);
+
+	HRL_API size_t HRL_GetFBXTextureCount(const HRL_FBXResources* _resources);
+	/** Returns read-only texture metadata and embedded bytes; valid while _resources is alive. */
+	HRL_API const HRL_FBXTextureInfo* HRL_GetFBXTexture(const HRL_FBXResources* _resources, size_t _index);
+	/** Finds a texture by FBX name or filename and returns its texture index, or HRL_INVALID_ID. */
+	HRL_API HRL_id HRL_FindFBXTexture(const HRL_FBXResources* _resources, const char* _name);
+	HRL_API const HRL_FBXTextureInfo* HRL_GetFBXMaterialTexture(
+		const HRL_FBXResources* _resources,
+		size_t _materialIndex,
+		HRL_EFBXMaterialTextureSlot _slot
+	);
+
+	/** Creates an HRL GPU texture from an embedded FBX texture resource. */
+	HRL_API HRL_id HRL_CreateTextureFromFBX(const HRL_FBXResources* _resources, size_t _textureIndex);
+
+	/** Creates a material from the first FBX material. Automatically selects the built-in static or skinned 3D shader from the FBX contents. */
+	HRL_API HRL_id HRL_CreateMaterialFromFBX(const char* _data, size_t _bufferSize);
+
+	/** Creates a material from the first FBX material using a caller-selected shader. */
+	HRL_API HRL_id HRL_CreateMaterialFromFBXWithShader(
+		const char* _data, size_t _bufferSize, HRL_id _shaderid
+	);
+
+	/** Creates one indexed FBX material and automatically selects the built-in static or skinned 3D shader from the FBX contents. */
+	HRL_API HRL_id HRL_CreateMaterialFromFBXIndexed(
+		const char* _data, size_t _bufferSize, size_t _materialIndex
+	);
+
+	/** Creates one indexed FBX material using a caller-selected shader. */
+	HRL_API HRL_id HRL_CreateMaterialFromFBXIndexedWithShader(
+		const char* _data, size_t _bufferSize, size_t _materialIndex, HRL_id _shaderid
+	);
 
 	/**
 	 * @brief Legacy generic mesh entry point.
@@ -416,6 +618,9 @@ extern "C" {
 	 * @brief Sets the scale of a mesh along each local axis.
 	 */
 	HRL_API void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z);
+	/** Returns the minimum world-space distance from the mesh LOD center to any viewport camera.
+	 * Uses the same object-center and camera-position metric as distance-based LOD. */
+	HRL_API float HRL_GetMeshCameraDistance(HRL_id _meshid);
 
 	/** Enables or disables automatic LOD selection for a 3D mesh. */
 	HRL_API void HRL_SetMeshLODAutomatic(HRL_id _meshid, int _enabled);
@@ -444,6 +649,30 @@ extern "C" {
 	HRL_API size_t HRL_GetMeshLODTriangleCount(HRL_id _meshid, HRL_uint _level);
 	/** Returns the LOD chosen by the most recently rendered viewport. */
 	HRL_API int HRL_GetMeshLODLevel(HRL_id _meshid);
+
+	/* ============================================================================
+	 *  SKELETAL MESHES
+	 * ============================================================================ */
+
+	HRL_API HRL_uint HRL_GetSkeletalBoneCount(HRL_id _meshid);
+	HRL_API const HRL_SkeletalBone* HRL_GetSkeletalBone(HRL_id _meshid, HRL_uint _index);
+	HRL_API HRL_uint HRL_FindSkeletalBone(HRL_id _meshid, const char* _name);
+
+	HRL_API HRL_uint HRL_GetSkeletalAnimationCount(HRL_id _meshid);
+	HRL_API const HRL_SkeletalAnimation* HRL_GetSkeletalAnimation(HRL_id _meshid, HRL_uint _index);
+	HRL_API HRL_uint HRL_FindSkeletalAnimation(HRL_id _meshid, const char* _name);
+
+	HRL_API void HRL_PlaySkeletalAnimation(HRL_id _meshid, HRL_uint _animation);
+	HRL_API void HRL_StopSkeletalAnimation(HRL_id _meshid);
+	HRL_API void HRL_SetSkeletalAnimationTime(HRL_id _meshid, float _time);
+	HRL_API void HRL_SetSkeletalAnimationSpeed(HRL_id _meshid, float _speed);
+	HRL_API void HRL_SetSkeletalAnimationLoop(HRL_id _meshid, int _loop);
+	HRL_API int HRL_GetCurrentSkeletalAnimation(HRL_id _meshid);
+	HRL_API float HRL_GetSkeletalAnimationTime(HRL_id _meshid);
+	HRL_API int HRL_IsSkeletalAnimationPlaying(HRL_id _meshid);
+
+	/** Advances all playing skeletal mesh animations by _deltaSeconds. */
+	HRL_API void HRL_UpdateSkeletalAnimations(float _deltaSeconds);
 
 	/**
 	 * @brief Controls the rendering order of a sprite on the Z axis.
@@ -637,6 +866,19 @@ extern "C" {
 	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
 	 */
 	HRL_API int HRL_IsValidScene(HRL_id _id);
+
+	/** Enable/disable global illumination. Disabled by default. */
+	HRL_API void HRL_SetGlobalIlluminationEnabled(HRL_id _sceneid, int _enable);
+	/** Select the GI method. HRL_GI_NONE disables GI for the scene. */
+	HRL_API void HRL_SetGlobalIlluminationMethod(HRL_id _sceneid, HRL_EGlobalIlluminationMethod _method);
+	/** Returns the scene GI enabled state. */
+	HRL_API int HRL_IsGlobalIlluminationEnabled(HRL_id _sceneid);
+	/** Returns the scene's selected GI method. */
+	HRL_API HRL_EGlobalIlluminationMethod HRL_GetGlobalIlluminationMethod(HRL_id _sceneid);
+	/** Returns whether the active backend implements this GI method. */
+	HRL_API int HRL_IsGlobalIlluminationMethodSupported(HRL_EGlobalIlluminationMethod _method);
+	/** Bitmask of methods supported by the active backend: (1u << method). */
+	HRL_API uint32_t HRL_GetGlobalIlluminationSupportedMethods();
 
 	/**
 	 * @brief Resizes the off-screen render texture of a scene.

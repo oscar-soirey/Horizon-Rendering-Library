@@ -3,6 +3,9 @@
 layout(location = 0) out vec4 FragColor;
 layout(location = 1) out vec4 BrightColor;
 layout(location = 2) out vec4 ColorPickingBuffer;
+// GI G-buffer: unlit linear base color and final world-space shading normal.
+layout(location = 3) out vec4 GIAlbedoBuffer;
+layout(location = 4) out vec4 GINormalBuffer;
 
 #define MAX_LIGHTS 32
 #define MAX_SHADOW_SLOTS 4
@@ -50,6 +53,17 @@ uniform int EnvironmentEnabled;
 uniform float EnvironmentStrength;
 
 uniform vec3 TintColor;
+uniform float BaseColorAlpha;
+uniform float RoughnessValue;
+uniform float MetallicValue;
+uniform float SpecularValue;
+uniform float OpacityValue;
+uniform int RoughnessUseValue;
+uniform int MetallicUseValue;
+uniform int SpecularUseValue;
+uniform int OpacityUseValue;
+uniform int RoughnessInvert;
+uniform int AlphaInvert;
 uniform vec3 CamPos;
 uniform float BrightThreshold;
 uniform int DebugView;
@@ -159,29 +173,52 @@ float ShadowCompare2D_3(vec3 coord)
     return result / 9.0;
 }
 
+float CubeShadowStoredDepth(int slot, vec3 direction)
+{
+    if (slot == 0) return texture(ShadowMapCube_0, direction).r;
+    if (slot == 1) return texture(ShadowMapCube_1, direction).r;
+    if (slot == 2) return texture(ShadowMapCube_2, direction).r;
+    return texture(ShadowMapCube_3, direction).r;
+}
+
+int CubeShadowResolution(int slot)
+{
+    if (slot == 0) return textureSize(ShadowMapCube_0, 0).x;
+    if (slot == 1) return textureSize(ShadowMapCube_1, 0).x;
+    if (slot == 2) return textureSize(ShadowMapCube_2, 0).x;
+    return textureSize(ShadowMapCube_3, 0).x;
+}
+
 float ShadowCompareCube(int slot, vec3 direction, float referenceDepth)
 {
     vec3 d = normalize(direction);
-    const vec3 offsets[5] = vec3[](
-        vec3(0.0),
-        vec3(0.015, 0.0, 0.0),
-        vec3(-0.015, 0.0, 0.0),
-        vec3(0.0, 0.015, 0.0),
-        vec3(0.0, -0.015, 0.0)
+
+    // The previous implementation used a fixed 0.015 direction offset. That is
+    // enormous for a 1024px cube map and samples directions far enough apart to
+    // create visible duplicate/ghosted silhouettes. Scale the kernel to the
+    // actual cube-map texel size instead.
+    const vec2 kernel[9] = vec2[](
+        vec2( 0.0,  0.0),
+        vec2( 1.0,  0.0), vec2(-1.0,  0.0),
+        vec2( 0.0,  1.0), vec2( 0.0, -1.0),
+        vec2( 0.7071,  0.7071), vec2(-0.7071,  0.7071),
+        vec2( 0.7071, -0.7071), vec2(-0.7071, -0.7071)
     );
 
+    vec3 referenceUp = abs(d.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(referenceUp, d));
+    vec3 bitangent = normalize(cross(d, tangent));
+    float angularRadius = 1.5 / float(max(CubeShadowResolution(slot), 1));
+
     float visible = 0.0;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < 9; ++i)
     {
-        vec3 sampleDir = normalize(d + offsets[i]);
-        float storedDepth;
-        if (slot == 0) storedDepth = texture(ShadowMapCube_0, sampleDir).r;
-        else if (slot == 1) storedDepth = texture(ShadowMapCube_1, sampleDir).r;
-        else if (slot == 2) storedDepth = texture(ShadowMapCube_2, sampleDir).r;
-        else storedDepth = texture(ShadowMapCube_3, sampleDir).r;
+        vec2 offset = kernel[i] * angularRadius;
+        vec3 sampleDir = normalize(d + tangent * offset.x + bitangent * offset.y);
+        float storedDepth = CubeShadowStoredDepth(slot, sampleDir);
         visible += storedDepth >= referenceDepth ? 1.0 : 0.0;
     }
-    return visible / 5.0;
+    return visible / 9.0;
 }
 
 float ComputeShadow(Light light, vec3 worldPos, vec3 normalWorld, vec3 lightDir)
@@ -230,10 +267,19 @@ vec2 EquirectangularUV(vec3 direction)
 
 void main()
 {
+    // Default to "no GI surface". Opaque mesh paths overwrite these below.
+    GIAlbedoBuffer = vec4(0.0);
+    GINormalBuffer = vec4(0.0);
+
     vec3 albedo = texture(T_Albedo, uv).rgb;
-    float metallic = texture(T_Metallic, uv).r;
-    float roughness = clamp(texture(T_Roughness, uv).r, 0.05, 1.0);
-    float specMap = texture(T_Specular, uv).r;
+    float metallic = MetallicUseValue != 0 ? MetallicValue : texture(T_Metallic, uv).r;
+    float roughnessSample = texture(T_Roughness, uv).r;
+    if (RoughnessInvert != 0)
+        roughnessSample = 1.0 - roughnessSample;
+    float roughness = RoughnessUseValue != 0 ? RoughnessValue : roughnessSample;
+    roughness = clamp(roughness, 0.05, 1.0);
+
+    float specMap = SpecularUseValue != 0 ? SpecularValue : texture(T_Specular, uv).r;
     vec3 normalTex = texture(T_Normal, uv).rgb * 2.0 - 1.0;
 
     vec3 N = normalize(worldNormal);
@@ -298,7 +344,11 @@ void main()
         litResult = mix(litResult, litResult + environmentColor, reflectionAmount);
     }
 
-    float alpha = texture(T_Albedo, uv).a * texture(T_Alpha, uv).r;
+    float alphaSample = texture(T_Alpha, uv).r;
+    if (AlphaInvert != 0)
+        alphaSample = 1.0 - alphaSample;
+    float alpha = texture(T_Albedo, uv).a * BaseColorAlpha *
+        (OpacityUseValue != 0 ? OpacityValue : alphaSample);
 
     if (DebugView == HRL_DEBUG_VIEW_WIREFRAME)
     {
@@ -314,6 +364,12 @@ void main()
     {
         if (alpha <= 0.001)
             discard;
+
+        // These buffers intentionally contain material/geometry information,
+        // not direct lighting. GI can therefore reconstruct diffuse transport
+        // without guessing albedo or normals from Scene Color/depth.
+        GIAlbedoBuffer = vec4(albedo * TintColor, alpha);
+        GINormalBuffer = vec4(normalize(normalWorld), alpha);
 
         if (DebugView == HRL_DEBUG_VIEW_UNLIT)
         {

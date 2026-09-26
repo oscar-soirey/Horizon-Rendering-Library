@@ -5,6 +5,7 @@
 #include "gl33_definitions.h"
 #include "gl33_shader.h"
 #include "gl33_texture.h"
+#include "gi.h"
 #include "../../ressources/ressources.h"
 #include "../../core/utils_functions.h"
 
@@ -97,6 +98,19 @@ struct GL33_Backend {
 	};
 	std::unordered_map<HRL_id, MeshGPU> meshes;
 
+	struct SkeletalMeshGPU {
+		GLuint vao = 0;
+		GLuint vbo = 0;
+		GLuint ebo = 0;
+		GLuint bone_ubo = 0;
+		GLsizei vertex_count = 0;
+		GLsizei index_count = 0;
+		HRL_uint bone_count = 0;
+		bool indexed = false;
+		uint64_t uploaded_pose_serial = 0;
+	};
+	std::unordered_map<HRL_id, SkeletalMeshGPU> skeletal_meshes;
+
 	// Shared procedural sky sphere geometry. Scene-specific state stays in hrl_scene_t.
 	GLuint sky_vao = 0;
 	GLuint sky_vbo = 0;
@@ -115,6 +129,8 @@ struct GL33_Backend {
 
 	GL33_Shader* shadow_2d_shader = nullptr;
 	GL33_Shader* shadow_point_shader = nullptr;
+	GL33_Shader* shadow_skeletal_2d_shader = nullptr;
+	GL33_Shader* shadow_skeletal_point_shader = nullptr;
 
 	struct ShadowGPU {
 		GLuint fbo = 0;
@@ -138,6 +154,7 @@ struct GL33_Backend {
 	GL33_Shader* ui_shader=nullptr;
 };
 static GL33_Backend* bck_;
+static GL_33_GI* g_gl33_gi = nullptr;
 
 
 
@@ -165,6 +182,24 @@ typedef struct {
 	GL33_Shader* bound_shader = nullptr;
 } GL33_State;
 static GL33_State* ctx_;
+
+static void UploadSkeletalBones(HRL_SkeletalMesh* mesh, GL33_Backend::SkeletalMeshGPU& gpu)
+{
+	if (!mesh || gpu.bone_ubo == 0)
+		return;
+	if (gpu.uploaded_pose_serial == mesh->pose_serial_)
+		return;
+
+	const size_t boneCount = std::min(mesh->bone_matrices_.size(), (size_t)HRL_MAX_SKELETAL_BONES);
+	glBindBuffer(GL_UNIFORM_BUFFER, gpu.bone_ubo);
+	if (boneCount > 0)
+	{
+		glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)(boneCount * sizeof(glm::mat4)), mesh->bone_matrices_.data());
+	}
+	glBindBufferBase(GL_UNIFORM_BUFFER, 1, gpu.bone_ubo);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	gpu.uploaded_pose_serial = mesh->pose_serial_;
+}
 
 static const GL33_Backend::MeshLOD_GPU* GetMeshLOD_GPU(const GL33_Backend::MeshGPU& gpu, int level)
 {
@@ -521,6 +556,12 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bck_->ebo[BUFFER_QUAD]);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(quad_indices), quad_indices, GL_STATIC_DRAW);
 
+	// Global illumination backend is initialized lazily. The scene remains
+	// completely unchanged until HRL_SetGlobalIlluminationEnabled() is used.
+	delete g_gl33_gi;
+	g_gl33_gi = new GL_33_GI();
+	g_gl33_gi->Initialize(bck_->vao[BUFFER_QUAD]);
+
 	//GEN FBO & TEXTURES (post processing)
 	glGenFramebuffers(2, bck_->post_fbo);
 	glGenTextures(2, bck_->post_textures);
@@ -594,6 +635,21 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 	mesh3d_shader->SetFloat("BrightThreshold", 0.75f);
 	mesh3d_shader->SetFloat("EnvironmentStrength", 0.0f);
 
+	//SKINNED 3D MESH SHADER
+	auto* skinned_mesh_shader = new GL33_Shader();
+	if (skinned_mesh_shader->GL33_Create(
+		(const char*)res_skinned_3dmesh_vert_glsl, res_skinned_3dmesh_vert_glsl_len,
+		(const char*)res_static_3dmesh_frag_glsl, res_static_3dmesh_frag_glsl_len) == 0)
+	{
+		bck_->shaders.emplace(HRL_SKINNED_3D_MESH_SHADER, skinned_mesh_shader);
+		skinned_mesh_shader->SetFloat("BrightThreshold", 0.75f);
+		skinned_mesh_shader->SetFloat("EnvironmentStrength", 0.0f);
+	}
+	else
+	{
+		delete skinned_mesh_shader;
+	}
+
 	//DEBUG SHADER
 	auto* debug_shader = new GL33_Shader();
 	debug_shader->GL33_Create(
@@ -634,6 +690,24 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 	{
 		delete bck_->shadow_point_shader;
 		bck_->shadow_point_shader = nullptr;
+	}
+
+	bck_->shadow_skeletal_2d_shader = new GL33_Shader();
+	if (bck_->shadow_skeletal_2d_shader->GL33_Create(
+		(const char*)res_shadow_skeletal_2d_vert_glsl, res_shadow_skeletal_2d_vert_glsl_len,
+		(const char*)res_shadow_2d_frag_glsl, res_shadow_2d_frag_glsl_len) != 0)
+	{
+		delete bck_->shadow_skeletal_2d_shader;
+		bck_->shadow_skeletal_2d_shader = nullptr;
+	}
+
+	bck_->shadow_skeletal_point_shader = new GL33_Shader();
+	if (bck_->shadow_skeletal_point_shader->GL33_Create(
+		(const char*)res_shadow_skeletal_point_vert_glsl, res_shadow_skeletal_point_vert_glsl_len,
+		(const char*)res_shadow_point_frag_glsl, res_shadow_point_frag_glsl_len) != 0)
+	{
+		delete bck_->shadow_skeletal_point_shader;
+		bck_->shadow_skeletal_point_shader = nullptr;
 	}
 
 	//UI SHADER
@@ -683,6 +757,16 @@ void GL33_Shutdown()
 	}
 	bck_->meshes.clear();
 
+	for (auto& [id, mesh] : bck_->skeletal_meshes)
+	{
+		(void)id;
+		if (mesh.vao) glDeleteVertexArrays(1, &mesh.vao);
+		if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
+		if (mesh.ebo) glDeleteBuffers(1, &mesh.ebo);
+		if (mesh.bone_ubo) glDeleteBuffers(1, &mesh.bone_ubo);
+	}
+	bck_->skeletal_meshes.clear();
+
 	for (auto& [scene_id, scene] : bck_->gpu_scenes)
 		DestroyMSAAResources(scene);
 
@@ -699,6 +783,8 @@ void GL33_Shutdown()
 	delete bck_->sky_shader;
 	delete bck_->shadow_2d_shader;
 	delete bck_->shadow_point_shader;
+	delete bck_->shadow_skeletal_2d_shader;
+	delete bck_->shadow_skeletal_point_shader;
 
 	for (auto& [id, shadow] : bck_->shadow_maps)
 	{
@@ -723,6 +809,13 @@ void GL33_Shutdown()
 	if (bck_->sky_vao) glDeleteVertexArrays(1, &bck_->sky_vao);
 	if (bck_->sky_vbo) glDeleteBuffers(1, &bck_->sky_vbo);
 	if (bck_->sky_ebo) glDeleteBuffers(1, &bck_->sky_ebo);
+
+	if (g_gl33_gi)
+	{
+		g_gl33_gi->Shutdown();
+		delete g_gl33_gi;
+		g_gl33_gi = nullptr;
+	}
 
 	//DELETE BUFFERS
 	glDeleteVertexArrays(BUFFER_COUNT, bck_->vao);
@@ -752,6 +845,11 @@ void GL33_WindowResizeCallback(int width, int height)
 		//color picking
 		glBindTexture(GL_TEXTURE_2D, s.second->textures[2]);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		// GI G-buffer attachments must follow the scene size as well.
+		glBindTexture(GL_TEXTURE_2D, s.second->textures[3]);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glBindTexture(GL_TEXTURE_2D, s.second->textures[4]);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
 		glBindRenderbuffer(GL_RENDERBUFFER, s.second->depth_rbo);
 		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
 		s.second->width = width;
@@ -867,6 +965,27 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			GL33_DrawDebug(debugIt->second, GetPrivateContext()->debug_line_thickness);
 
 		ResolveSceneMSAA(gpu_scene);
+
+		// Optional GI pass. Disabled by default, so the existing rendering path is
+		// byte-for-byte the same until a scene explicitly enables a supported method.
+		if (scene->global_illumination_enabled &&
+			scene->global_illumination_method == HRL_GI_SSGI && g_gl33_gi)
+		{
+			const float vx = v.second->x_;
+			const float vy = v.second->y_;
+			const float vw = v.second->width_;
+			const float vh = v.second->height_;
+			const int px = (int)std::floor(vx * winW);
+			const int py = (int)std::floor(vy * winH);
+			const int pw = std::max(1, (int)std::floor(vw * winW));
+			const int ph = std::max(1, (int)std::floor(vh * winH));
+			const glm::vec4 viewportRect(vx, vy, vx + vw, vy + vh);
+			const bool giRendered = g_gl33_gi->RenderSSGI(scene_id, v.first, gpu_scene, render_fbo, ctx_->proj_mat, ctx_->view_mat,
+				ctx_->viewport && ctx_->viewport->camera_ ? ctx_->viewport->camera_->far_plane_ : 1000.0f,
+				viewportRect, px, py, pw, ph);
+			if (!giRendered)
+				printf(">>> SSGI RenderSSGI FAILED <<<\n");
+		}
 
 		bool has_post_process = !v.second->post_processes.empty();
 
@@ -1004,7 +1123,7 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, HRL_Mesh* mesh, co
 			s->SetInt("uInstanced", 0);
 		s->SetInt("FogEnabled", ctx_->current_fog->enabled);
 		s->SetInt("FogMode", ctx_->current_fog->mode);
-		if (mat->shader_ == HRL_MESH_3D_SHADER)
+		if (mat->shader_ == HRL_MESH_3D_SHADER || mat->shader_ == HRL_SKINNED_3D_MESH_SHADER)
 			s->SetInt("DebugView", (int)(ctx_->current_scene ? ctx_->current_scene->debug_view : HRL_DEBUG_VIEW_NONE));
 		s->SetVec4("FogColor", {ctx_->current_fog->r, ctx_->current_fog->g, ctx_->current_fog->b, 1.f});
 		s->SetFloat("FogStart", ctx_->current_fog->range_start);
@@ -1013,8 +1132,21 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, HRL_Mesh* mesh, co
 		s->SetVec3("TintColor", glm::vec3(1.f));
 	}
 
-	if (mat->shader_ == HRL_MESH_3D_SHADER && shaderChanged)
+	if ((mat->shader_ == HRL_MESH_3D_SHADER || mat->shader_ == HRL_SKINNED_3D_MESH_SHADER) && shaderChanged)
 	{
+		// Defaults for the built-in FBX material reconstruction uniforms. Existing
+		// manually-created materials keep their previous texture-driven behavior.
+		s->SetFloat("BaseColorAlpha", 1.f);
+		s->SetFloat("RoughnessValue", 1.f);
+		s->SetFloat("MetallicValue", 0.f);
+		s->SetFloat("SpecularValue", 1.f);
+		s->SetFloat("OpacityValue", 1.f);
+		s->SetInt("RoughnessUseValue", 0);
+		s->SetInt("MetallicUseValue", 0);
+		s->SetInt("SpecularUseValue", 0);
+		s->SetInt("OpacityUseValue", 0);
+		s->SetInt("RoughnessInvert", 0);
+		s->SetInt("AlphaInvert", 0);
 		s->SetInt("ShadowMap2D_0", SHADOW_2D_TEXTURE_UNIT_BASE + 0);
 		s->SetInt("ShadowMap2D_1", SHADOW_2D_TEXTURE_UNIT_BASE + 1);
 		s->SetInt("ShadowMap2D_2", SHADOW_2D_TEXTURE_UNIT_BASE + 2);
@@ -1072,6 +1204,10 @@ static glm::mat4 CalculateModelMatrix(const HRL_Mesh* mesh)
 	model = glm::rotate(model, glm::radians(mesh->rotation_.z), glm::vec3(0.f, 0.f, 1.f));
 	model = glm::translate(model, -mesh->pivot_point_);
 	model = glm::scale(model, mesh->scale_);
+	// Skeletal skinning matrices are already expressed in FBX world space.
+	// Do not append the FBX geometry_to_world transform here: that would apply
+	// the import transform a second time. The model matrix therefore contains
+	// only HRL's user-controlled object transform.
 	return model;
 }
 
@@ -1133,15 +1269,137 @@ static void DrawSkySphere(const hrl_scene_t* scene)
 
 static void DrawOpaqueMeshes(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum)
 {
-	glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glDisable(GL_CULL_FACE); glDisable(GL_BLEND);
-	GLint previousPolygonMode[2]={GL_FILL,GL_FILL}; glGetIntegerv(GL_POLYGON_MODE,previousPolygonMode); if(debug_view==HRL_DEBUG_VIEW_WIREFRAME)glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
-	struct DrawItem{HRL_id id;HRL_Mesh* mesh;HRL_Material* material;const GL33_Backend::MeshLOD_GPU* gpu;glm::mat4 model;float distance2;int lodLevel;};
-	std::vector<DrawItem> visible; visible.reserve(meshes.size()); const glm::vec3 cameraPos=ctx_->viewport->camera_->position_;
-	for(const auto&[id,mesh]:meshes){if(!mesh||mesh->type_==HRL_SPRITE||!IsFiniteBounds(mesh))continue;auto gi=bck_->meshes.find(id);if(gi==bck_->meshes.end())continue;glm::mat4 model=CalculateModelMatrix(mesh);if(!IsMeshVisible(mesh,model,frustum))continue;auto mi=GetPrivateContext()->materials.find(mesh->material_);if(mi==GetPrivateContext()->materials.end())continue;int lod=SelectMeshLOD(mesh,model,ctx_->view_mat,ctx_->proj_mat,(float)GetWindowHeight());const auto* gpu=GetMeshLOD_GPU(gi->second,lod);if(!gpu)continue;mesh->last_lod_level_=lod;glm::vec3 center=glm::vec3(model*glm::vec4(mesh->bounds_center_,1.f));float d2=glm::dot(center-cameraPos,center-cameraPos);visible.push_back({id,mesh,mi->second,gpu,model,d2,lod});}
-	std::sort(visible.begin(),visible.end(),[](const DrawItem&a,const DrawItem&b){if(a.material->shader_!=b.material->shader_)return a.material->shader_<b.material->shader_;if(a.mesh->material_!=b.mesh->material_)return a.mesh->material_<b.mesh->material_;if(a.gpu->vao!=b.gpu->vao)return a.gpu->vao<b.gpu->vao;return a.distance2<b.distance2;});
-	ctx_->bound_material=nullptr;ctx_->bound_shader=nullptr;for(const auto&item:visible){if(!BindMaterial(item.material,item.id,item.mesh,item.model))continue;if(item.material->shader_==HRL_MESH_3D_SHADER&&debug_view==HRL_DEBUG_VIEW_LOD){size_t tc=item.mesh->lods_.empty()?item.mesh->triangle_count_:item.mesh->lods_[(size_t)item.lodLevel].indices.size()/3u;constexpr size_t whiteThreshold=250000;float n=tc>=whiteThreshold?1.f:(float)(std::log((double)tc+1.0)/std::log((double)whiteThreshold+1.0));ctx_->shader->SetVec3("DebugLODColor",tc>=whiteThreshold?glm::vec3(1.f):glm::vec3(n,1.f-n,0.f));}glBindVertexArray(item.gpu->vao);if(item.gpu->indexed)glDrawElements(GL_TRIANGLES,item.gpu->index_count,GL_UNSIGNED_INT,nullptr);else glDrawArrays(GL_TRIANGLES,0,item.gpu->vertex_count);}
-	if(debug_view==HRL_DEBUG_VIEW_WIREFRAME){glPolygonMode(GL_FRONT,previousPolygonMode[0]);glPolygonMode(GL_BACK,previousPolygonMode[1]);}
+	glEnable(GL_DEPTH_TEST);
+	glDepthMask(GL_TRUE);
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_BLEND);
+
+	GLint previousPolygonMode[2] = {GL_FILL, GL_FILL};
+	glGetIntegerv(GL_POLYGON_MODE, previousPolygonMode);
+	if (debug_view == HRL_DEBUG_VIEW_WIREFRAME)
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+
+	struct DrawItem {
+		HRL_id id;
+		HRL_Mesh* mesh;
+		HRL_Material* material;
+		const GL33_Backend::MeshLOD_GPU* staticGpu;
+		GL33_Backend::SkeletalMeshGPU* skeletalGpu;
+		glm::mat4 model;
+		float distance2;
+		int lodLevel;
+	};
+
+	std::vector<DrawItem> visible;
+	visible.reserve(meshes.size());
+	const glm::vec3 cameraPos = ctx_->viewport && ctx_->viewport->camera_
+		? ctx_->viewport->camera_->position_ : glm::vec3(0.f);
+
+	for (const auto& [id, mesh] : meshes)
+	{
+		if (!mesh || mesh->type_ == HRL_SPRITE || !IsFiniteBounds(mesh))
+			continue;
+
+		const glm::mat4 model = CalculateModelMatrix(mesh);
+		if (mesh->type_ != HRL_3D_SKELETAL_MESH && !IsMeshVisible(mesh, model, frustum))
+			continue;
+
+		auto materialIt = GetPrivateContext()->materials.find(mesh->material_);
+		if (materialIt == GetPrivateContext()->materials.end())
+			continue;
+
+		GL33_Backend::SkeletalMeshGPU* skeletalGpu = nullptr;
+		const GL33_Backend::MeshLOD_GPU* staticGpu = nullptr;
+		int lodLevel = 0;
+
+		if (mesh->type_ == HRL_3D_SKELETAL_MESH)
+		{
+			auto gpuIt = bck_->skeletal_meshes.find(id);
+			if (gpuIt == bck_->skeletal_meshes.end() || gpuIt->second.vao == 0)
+				continue;
+			skeletalGpu = &gpuIt->second;
+			UploadSkeletalBones(static_cast<HRL_SkeletalMesh*>(mesh), *skeletalGpu);
+		}
+		else
+		{
+			auto gpuIt = bck_->meshes.find(id);
+			if (gpuIt == bck_->meshes.end())
+				continue;
+			lodLevel = SelectMeshLOD(mesh, model, ctx_->view_mat, ctx_->proj_mat, (float)GetWindowHeight());
+			staticGpu = GetMeshLOD_GPU(gpuIt->second, lodLevel);
+			if (!staticGpu)
+				continue;
+			mesh->last_lod_level_ = lodLevel;
+		}
+
+		const glm::vec3 center = glm::vec3(model * glm::vec4(mesh->bounds_center_, 1.f));
+		const float distance2 = glm::dot(center - cameraPos, center - cameraPos);
+		visible.push_back({id, mesh, materialIt->second, staticGpu, skeletalGpu, model, distance2, lodLevel});
+	}
+
+	std::sort(visible.begin(), visible.end(), [](const DrawItem& a, const DrawItem& b)
+	{
+		if (a.material->shader_ != b.material->shader_)
+			return a.material->shader_ < b.material->shader_;
+		if (a.mesh->material_ != b.mesh->material_)
+			return a.mesh->material_ < b.mesh->material_;
+		const GLuint vaoA = a.staticGpu ? a.staticGpu->vao : (a.skeletalGpu ? a.skeletalGpu->vao : 0);
+		const GLuint vaoB = b.staticGpu ? b.staticGpu->vao : (b.skeletalGpu ? b.skeletalGpu->vao : 0);
+		if (vaoA != vaoB)
+			return vaoA < vaoB;
+		return a.distance2 < b.distance2;
+	});
+
+	ctx_->bound_material = nullptr;
+	ctx_->bound_shader = nullptr;
+
+	for (const DrawItem& item : visible)
+	{
+		if (!BindMaterial(item.material, item.id, item.mesh, item.model))
+			continue;
+
+		if ((item.material->shader_ == HRL_MESH_3D_SHADER || item.material->shader_ == HRL_SKINNED_3D_MESH_SHADER) &&
+			debug_view == HRL_DEBUG_VIEW_LOD)
+		{
+			size_t triangleCount = item.mesh->triangle_count_;
+			if (item.staticGpu && !item.mesh->lods_.empty() && (size_t)item.lodLevel < item.mesh->lods_.size())
+				triangleCount = item.mesh->lods_[(size_t)item.lodLevel].indices.size() / 3u;
+			constexpr size_t whiteThreshold = 250000;
+			const float normalized = triangleCount >= whiteThreshold
+				? 1.f
+				: (float)(std::log((double)triangleCount + 1.0) / std::log((double)whiteThreshold + 1.0));
+			ctx_->shader->SetVec3("DebugLODColor",
+				triangleCount >= whiteThreshold ? glm::vec3(1.f) : glm::vec3(normalized, 1.f - normalized, 0.f));
+		}
+
+		if (item.skeletalGpu)
+		{
+			glBindBufferBase(GL_UNIFORM_BUFFER, 1, item.skeletalGpu->bone_ubo);
+			glBindVertexArray(item.skeletalGpu->vao);
+			if (item.skeletalGpu->indexed)
+				glDrawElements(GL_TRIANGLES, item.skeletalGpu->index_count, GL_UNSIGNED_INT, nullptr);
+			else
+				glDrawArrays(GL_TRIANGLES, 0, item.skeletalGpu->vertex_count);
+		}
+		else if (item.staticGpu)
+		{
+			glBindVertexArray(item.staticGpu->vao);
+			if (item.staticGpu->indexed)
+				glDrawElements(GL_TRIANGLES, item.staticGpu->index_count, GL_UNSIGNED_INT, nullptr);
+			else
+				glDrawArrays(GL_TRIANGLES, 0, item.staticGpu->vertex_count);
+		}
+	}
+
+	glBindVertexArray(0);
+	if (debug_view == HRL_DEBUG_VIEW_WIREFRAME)
+	{
+		glPolygonMode(GL_FRONT, previousPolygonMode[0]);
+		glPolygonMode(GL_BACK, previousPolygonMode[1]);
+	}
 }
+
+
 
 static void UploadSpriteBatch(const std::vector<SpriteBatchInstance>& instances)
 {
@@ -1502,8 +1760,8 @@ static bool EnsureShadowResource(HRL_Light* light)
 			glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_DEPTH_COMPONENT24,
 				resolution, resolution, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
 		}
-		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
@@ -1551,47 +1809,90 @@ static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewPr
 	if (!scene || !shader)
 		return;
 
-	shader->Use();
-	shader->SetMat4("lightSpaceMatrix", lightViewProjection);
-	shader->SetMat4("lightViewProjection", lightViewProjection);
-	shader->SetVec3("lightPosition", lightPosition);
-	shader->SetFloat("farPlane", farPlane);
-
+	GL33_Shader* activeShader = nullptr;
 	const FrustumPlaneSet frustum = BuildFrustum(lightViewProjection);
 	for (const auto& [id, mesh] : scene->meshes)
 	{
 		if (!mesh || mesh->type_ == HRL_SPRITE)
 			continue;
-		auto gpu = bck_->meshes.find(id);
-		if (gpu == bck_->meshes.end())
-			continue;
 
-		const glm::mat4 model = CalculateModelMatrix(mesh);
-		if (pointLight)
+		const bool skeletal = mesh->type_ == HRL_3D_SKELETAL_MESH;
+		GL33_Backend::SkeletalMeshGPU* skeletalGpu = nullptr;
+		const GL33_Backend::MeshLOD_GPU* staticGpu = nullptr;
+		if (skeletal)
 		{
-			const glm::vec3 center = glm::vec3(model * glm::vec4(mesh->bounds_center_, 1.f));
-			const float maxScale = std::max({std::abs(mesh->scale_.x), std::abs(mesh->scale_.y), std::abs(mesh->scale_.z)});
-			const float radius = mesh->bounds_radius_ * std::max(maxScale, 1e-6f);
-			const float limit = farPlane + radius;
-			if (glm::dot(center - lightPosition, center - lightPosition) > limit * limit)
+			auto it = bck_->skeletal_meshes.find(id);
+			if (it == bck_->skeletal_meshes.end() || it->second.vao == 0)
+				continue;
+			skeletalGpu = &it->second;
+			UploadSkeletalBones(static_cast<HRL_SkeletalMesh*>(mesh), *skeletalGpu);
+		}
+		else
+		{
+			auto it = bck_->meshes.find(id);
+			if (it == bck_->meshes.end())
+				continue;
+			const glm::mat4 model = CalculateModelMatrix(mesh);
+			if (pointLight)
+			{
+				const glm::vec3 center = glm::vec3(model * glm::vec4(mesh->bounds_center_, 1.f));
+				const float maxScale = std::max({std::abs(mesh->scale_.x), std::abs(mesh->scale_.y), std::abs(mesh->scale_.z)});
+				const float radius = mesh->bounds_radius_ * std::max(maxScale, 1e-6f);
+				const float limit = farPlane + radius;
+				if (glm::dot(center - lightPosition, center - lightPosition) > limit * limit)
+					continue;
+			}
+			else if (!IsMeshVisible(mesh, model, frustum))
+				continue;
+			const int lodLevel = SelectMeshLOD(mesh, model, lightView, lightProjection, (float)shadowResolution);
+			staticGpu = GetMeshLOD_GPU(it->second, lodLevel);
+			if (!staticGpu)
 				continue;
 		}
-		else if (!IsMeshVisible(mesh, model, frustum))
+
+		const glm::mat4 model = CalculateModelMatrix(mesh);
+		if (!skeletal && !pointLight && !IsMeshVisible(mesh, model, frustum))
 			continue;
 
-		const int lodLevel = SelectMeshLOD(mesh, model, lightView, lightProjection, (float)shadowResolution);
-		const auto* lodGpu = GetMeshLOD_GPU(gpu->second, lodLevel);
-		if (!lodGpu) continue;
-		shader->SetMat4("model", model);
-		glBindVertexArray(lodGpu->vao);
-		if (lodGpu->indexed)
-			glDrawElements(GL_TRIANGLES, lodGpu->index_count, GL_UNSIGNED_INT, nullptr);
+		GL33_Shader* meshShader = shader;
+		if (skeletal)
+			meshShader = pointLight ? bck_->shadow_skeletal_point_shader : bck_->shadow_skeletal_2d_shader;
+		if (!meshShader)
+			continue;
+		if (meshShader != activeShader)
+		{
+			meshShader->Use();
+			meshShader->SetMat4("lightSpaceMatrix", lightViewProjection);
+			meshShader->SetMat4("lightViewProjection", lightViewProjection);
+			meshShader->SetVec3("lightPosition", lightPosition);
+			meshShader->SetFloat("farPlane", farPlane);
+			activeShader = meshShader;
+		}
+		meshShader->SetMat4("model", model);
+
+		if (skeletal)
+		{
+			glBindBufferBase(GL_UNIFORM_BUFFER, 1, skeletalGpu->bone_ubo);
+			glBindVertexArray(skeletalGpu->vao);
+			if (skeletalGpu->indexed)
+				glDrawElements(GL_TRIANGLES, skeletalGpu->index_count, GL_UNSIGNED_INT, nullptr);
+			else
+				glDrawArrays(GL_TRIANGLES, 0, skeletalGpu->vertex_count);
+		}
 		else
-			glDrawArrays(GL_TRIANGLES, 0, lodGpu->vertex_count);
+		{
+			glBindVertexArray(staticGpu->vao);
+			if (staticGpu->indexed)
+				glDrawElements(GL_TRIANGLES, staticGpu->index_count, GL_UNSIGNED_INT, nullptr);
+			else
+				glDrawArrays(GL_TRIANGLES, 0, staticGpu->vertex_count);
+		}
 	}
-	(void)pointLight;
+	glBindVertexArray(0);
 	(void)face;
 }
+
+
 
 static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id)
 {
@@ -1623,8 +1924,18 @@ static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id)
 		glDisable(GL_BLEND);
 		glEnable(GL_CULL_FACE);
 		glCullFace(GL_FRONT);
-		glEnable(GL_POLYGON_OFFSET_FILL);
-		glPolygonOffset(2.0f, 4.0f);
+		// Point-light shadows use a manually computed linear radial depth in the
+		// fragment shader. Large polygon offsets in this space can visibly detach
+		// the shadow from the caster ("double"/ghosted silhouettes), especially
+		// on animated meshes. Receiver-side bias is applied in the lighting shader.
+		// Keep the existing polygon offset for projected 2D shadow maps.
+		if (light->type_ == HRL_POINT_LIGHT)
+			glDisable(GL_POLYGON_OFFSET_FILL);
+		else
+		{
+			glEnable(GL_POLYGON_OFFSET_FILL);
+			glPolygonOffset(2.0f, 4.0f);
+		}
 
 		if (light->type_ == HRL_POINT_LIGHT)
 		{
@@ -1774,13 +2085,15 @@ static void DestroyMSAAResources(GL_Scene* scene)
 {
 	if (!scene)
 		return;
-	if (scene->msaa_textures[0] || scene->msaa_textures[1] || scene->msaa_textures[2])
-		glDeleteTextures(3, scene->msaa_textures);
+	bool hasMSAATextures = false;
+	for (GLuint tex : scene->msaa_textures) hasMSAATextures |= (tex != 0);
+	if (hasMSAATextures)
+		glDeleteTextures(5, scene->msaa_textures);
 	if (scene->msaa_depth_rbo)
 		glDeleteRenderbuffers(1, &scene->msaa_depth_rbo);
 	if (scene->msaa_fbo)
 		glDeleteFramebuffers(1, &scene->msaa_fbo);
-	scene->msaa_textures[0] = scene->msaa_textures[1] = scene->msaa_textures[2] = 0;
+	for (GLuint& tex : scene->msaa_textures) tex = 0;
 	scene->msaa_depth_rbo = 0;
 	scene->msaa_fbo = 0;
 	scene->msaa_samples = 1;
@@ -1802,10 +2115,10 @@ static bool CreateMSAAResources(GL_Scene* scene, int samples)
 		return true;
 
 	glGenFramebuffers(1, &scene->msaa_fbo);
-	glGenTextures(3, scene->msaa_textures);
+	glGenTextures(5, scene->msaa_textures);
 	glBindFramebuffer(GL_FRAMEBUFFER, scene->msaa_fbo);
-	const GLenum internalFormats[3] = {GL_RGBA16F, GL_RGBA16F, GL_RGBA8};
-	for (int i = 0; i < 3; ++i)
+	const GLenum internalFormats[5] = {GL_RGBA16F, GL_RGBA16F, GL_RGBA8, GL_RGBA16F, GL_RGBA16F};
+	for (int i = 0; i < 5; ++i)
 	{
 		glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, scene->msaa_textures[i]);
 		glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, samples, internalFormats[i], scene->width, scene->height, GL_TRUE);
@@ -1815,8 +2128,8 @@ static bool CreateMSAAResources(GL_Scene* scene, int samples)
 	glBindRenderbuffer(GL_RENDERBUFFER, scene->msaa_depth_rbo);
 	glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH_COMPONENT24, scene->width, scene->height);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, scene->msaa_depth_rbo);
-	GLenum attachments[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
-	glDrawBuffers(3, attachments);
+	GLenum attachments[5] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4};
+	glDrawBuffers(5, attachments);
 	const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
 	glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
 	glBindRenderbuffer(GL_RENDERBUFFER, 0);
@@ -1835,7 +2148,7 @@ static void ResolveSceneMSAA(GL_Scene* scene)
 {
 	if (!scene || scene->msaa_samples <= 1 || !scene->msaa_fbo)
 		return;
-	for (int i = 0; i < 3; ++i)
+	for (int i = 0; i < 5; ++i)
 	{
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, scene->msaa_fbo);
 		glReadBuffer(GL_COLOR_ATTACHMENT0 + i);
@@ -1845,9 +2158,9 @@ static void ResolveSceneMSAA(GL_Scene* scene)
 			0, 0, scene->width, scene->height,
 			GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	}
-	GLenum attachments[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
+	GLenum attachments[5] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4};
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene->fbo);
-	glDrawBuffers(3, attachments);
+	glDrawBuffers(5, attachments);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -1863,9 +2176,9 @@ void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 	printf("scene size : %dx%d\n", scene->width, scene->height);
 
 
-	//Gen scene textures (Scene color, Bright color (bloom), Color picking)
+	// Gen scene textures: color, bloom, picking, GI albedo, GI normal.
 	glGenFramebuffers(1, &scene->fbo);
-	glGenTextures(3, scene->textures);
+	glGenTextures(5, scene->textures);
 
 	glBindFramebuffer(GL_FRAMEBUFFER, scene->fbo);
 
@@ -1893,9 +2206,27 @@ void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+	// GI G-buffer: diffuse albedo (linear) and world-space normal.
+	glBindTexture(GL_TEXTURE_2D, scene->textures[3]);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, scene->width, scene->height, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	glBindTexture(GL_TEXTURE_2D, scene->textures[4]);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, scene->width, scene->height, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene->textures[0], 0);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, scene->textures[1], 0);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, scene->textures[2], 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, scene->textures[3], 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT4, GL_TEXTURE_2D, scene->textures[4], 0);
 
 	//Depth/stencil is deliberately kept private to the OpenGL backend. It is required for real 3D occlusion.
 	glGenRenderbuffers(1, &scene->depth_rbo);
@@ -1903,8 +2234,8 @@ void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, scene->width, scene->height);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, scene->depth_rbo);
 
-	GLenum attachments[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
-	glDrawBuffers(3, attachments);
+	GLenum attachments[5] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4 };
+	glDrawBuffers(5, attachments);
 
 	GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
 	if (status != GL_FRAMEBUFFER_COMPLETE)
@@ -1931,9 +2262,12 @@ void GL33_DeleteScene(HRL_id _sceneid)
 		return;
 	}
 
+	if (g_gl33_gi)
+		g_gl33_gi->ReleaseScene(_sceneid);
+
 	//scene is not rendered at screen
 	DestroyMSAAResources(it->second);
-	glDeleteTextures(3, it->second->textures);
+	glDeleteTextures(5, it->second->textures);
 	if (it->second->depth_rbo)
 		glDeleteRenderbuffers(1, &it->second->depth_rbo);
 	glDeleteFramebuffers(1, &it->second->fbo);
@@ -1962,6 +2296,10 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, _width, _height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	glBindTexture(GL_TEXTURE_2D, it->second->textures[2]);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, _width, _height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+	glBindTexture(GL_TEXTURE_2D, it->second->textures[3]);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, _width, _height, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glBindTexture(GL_TEXTURE_2D, it->second->textures[4]);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, _width, _height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	glBindTexture(GL_TEXTURE_2D, 0);
 
 	glBindRenderbuffer(GL_RENDERBUFFER, it->second->depth_rbo);
@@ -2058,10 +2396,106 @@ static bool GL33_UploadMeshLOD(GL33_Backend::MeshLOD_GPU& gpu,
 	return true;
 }
 
+static bool GL33_UploadSkeletalMesh(GL33_Backend::SkeletalMeshGPU& gpu,
+	const HRL_SkeletalVertex* vertices, size_t vertexCount,
+	const HRL_uint* indices, size_t indexCount, HRL_uint boneCount)
+{
+	if (!vertices || vertexCount < 3 || boneCount == 0 || boneCount > HRL_MAX_SKELETAL_BONES)
+		return false;
+	if (indexCount > 0 && !indices)
+		return false;
+	if (vertexCount > (size_t)std::numeric_limits<GLsizei>::max() || indexCount > (size_t)std::numeric_limits<GLsizei>::max())
+		return false;
+
+	glGenVertexArrays(1, &gpu.vao);
+	glGenBuffers(1, &gpu.vbo);
+	glGenBuffers(1, &gpu.bone_ubo);
+	if (!gpu.vao || !gpu.vbo || !gpu.bone_ubo)
+	{
+		if (gpu.vao) glDeleteVertexArrays(1, &gpu.vao);
+		if (gpu.vbo) glDeleteBuffers(1, &gpu.vbo);
+		if (gpu.bone_ubo) glDeleteBuffers(1, &gpu.bone_ubo);
+		gpu = {};
+		return false;
+	}
+
+	glBindVertexArray(gpu.vao);
+	glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
+	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(vertexCount * sizeof(HRL_SkeletalVertex)), vertices, GL_STATIC_DRAW);
+	const GLsizei stride = (GLsizei)sizeof(HRL_SkeletalVertex);
+	const size_t vertexBaseOffset = offsetof(HRL_SkeletalVertex, vertex);
+	const size_t positionOffset = vertexBaseOffset + offsetof(HRL_Vertex3D, position);
+	const size_t normalOffset = vertexBaseOffset + offsetof(HRL_Vertex3D, normal);
+	const size_t uvOffset = vertexBaseOffset + offsetof(HRL_Vertex3D, uv);
+	const size_t tangentOffset = vertexBaseOffset + offsetof(HRL_Vertex3D, tangent);
+	const size_t bitangentOffset = vertexBaseOffset + offsetof(HRL_Vertex3D, bitangent);
+
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(positionOffset));
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(normalOffset));
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(uvOffset));
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(tangentOffset));
+	glEnableVertexAttribArray(3);
+	glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(bitangentOffset));
+	glEnableVertexAttribArray(4);
+	glVertexAttribIPointer(5, 4, GL_UNSIGNED_INT, stride, reinterpret_cast<const void*>(offsetof(HRL_SkeletalVertex, boneIndices)));
+	glEnableVertexAttribArray(5);
+	glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(HRL_SkeletalVertex, boneWeights)));
+	glEnableVertexAttribArray(6);
+
+	if (indexCount > 0)
+	{
+		glGenBuffers(1, &gpu.ebo);
+		if (!gpu.ebo)
+		{
+			glBindVertexArray(0);
+			glDeleteVertexArrays(1, &gpu.vao);
+			glDeleteBuffers(1, &gpu.vbo);
+			glDeleteBuffers(1, &gpu.bone_ubo);
+			gpu = {};
+			return false;
+		}
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu.ebo);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(indexCount * sizeof(HRL_uint)), indices, GL_STATIC_DRAW);
+		gpu.indexed = true;
+		gpu.index_count = (GLsizei)indexCount;
+	}
+
+	glBindBuffer(GL_UNIFORM_BUFFER, gpu.bone_ubo);
+	glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)(HRL_MAX_SKELETAL_BONES * sizeof(glm::mat4)), nullptr, GL_DYNAMIC_DRAW);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 1, gpu.bone_ubo);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+	gpu.vertex_count = (GLsizei)vertexCount;
+	gpu.bone_count = boneCount;
+	gpu.uploaded_pose_serial = 0;
+	glBindVertexArray(0);
+	return true;
+}
+
+int GL33_CreateSkeletalMesh(HRL_id id, const HRL_SkeletalVertex* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count, HRL_uint bone_count)
+{
+	if (bck_->skeletal_meshes.find(id) != bck_->skeletal_meshes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_CreateSkeletalMesh: skeletal mesh ID already exists");
+		return HRL_FALSE;
+	}
+	GL33_Backend::SkeletalMeshGPU gpu;
+	if (!GL33_UploadSkeletalMesh(gpu, vertices, vertex_count, indices, index_count, bone_count))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "GL33_CreateSkeletalMesh: invalid skeletal vertex/index data");
+		return HRL_FALSE;
+	}
+	bck_->skeletal_meshes.emplace(id, std::move(gpu));
+	return HRL_TRUE;
+}
+
 int GL33_CreateMesh(HRL_id id,const HRL_Vertex3D*v,size_t vc,const HRL_uint*i,size_t ic){if(bck_->meshes.find(id)!=bck_->meshes.end()){SetErrorCode(HRL_ERROR_INVALID_ID,HRL_SEVERITY_ERROR,"GL33_CreateMesh: mesh ID already exists");return HRL_FALSE;}GL33_Backend::MeshGPU g;g.levels.resize(1);if(!GL33_UploadMeshLOD(g.levels[0],v,vc,i,ic)){SetErrorCode(HRL_INVALID_VALUE,HRL_SEVERITY_ERROR,"GL33_CreateMesh: invalid vertex/index data");return HRL_FALSE;}bck_->meshes.emplace(id,std::move(g));return HRL_TRUE;}
 int GL33_CreateMeshLOD(HRL_id id,HRL_uint level,const HRL_Vertex3D*v,size_t vc,const HRL_uint*i,size_t ic){auto it=bck_->meshes.find(id);if(it==bck_->meshes.end()||level==0)return HRL_FALSE;if(it->second.levels.size()<=level)it->second.levels.resize((size_t)level+1);auto&g=it->second.levels[level];if(g.vao)glDeleteVertexArrays(1,&g.vao);if(g.vbo)glDeleteBuffers(1,&g.vbo);if(g.ebo)glDeleteBuffers(1,&g.ebo);g={};return GL33_UploadMeshLOD(g,v,vc,i,ic)?HRL_TRUE:HRL_FALSE;}
 void GL33_DeleteMeshLODs(HRL_id id){auto it=bck_->meshes.find(id);if(it==bck_->meshes.end())return;for(size_t k=1;k<it->second.levels.size();++k){auto&g=it->second.levels[k];if(g.vao)glDeleteVertexArrays(1,&g.vao);if(g.vbo)glDeleteBuffers(1,&g.vbo);if(g.ebo)glDeleteBuffers(1,&g.ebo);}it->second.levels.resize(1);}
-void GL33_DeleteMesh(HRL_id id){auto it=bck_->meshes.find(id);if(it==bck_->meshes.end())return;for(auto&g:it->second.levels){if(g.vao)glDeleteVertexArrays(1,&g.vao);if(g.vbo)glDeleteBuffers(1,&g.vbo);if(g.ebo)glDeleteBuffers(1,&g.ebo);}bck_->meshes.erase(it);}
+void GL33_DeleteMesh(HRL_id id){auto it=bck_->meshes.find(id);if(it!=bck_->meshes.end()){for(auto&g:it->second.levels){if(g.vao)glDeleteVertexArrays(1,&g.vao);if(g.vbo)glDeleteBuffers(1,&g.vbo);if(g.ebo)glDeleteBuffers(1,&g.ebo);}bck_->meshes.erase(it);return;}auto sit=bck_->skeletal_meshes.find(id);if(sit!=bck_->skeletal_meshes.end()){auto&g=sit->second;if(g.vao)glDeleteVertexArrays(1,&g.vao);if(g.vbo)glDeleteBuffers(1,&g.vbo);if(g.ebo)glDeleteBuffers(1,&g.ebo);if(g.bone_ubo)glDeleteBuffers(1,&g.bone_ubo);bck_->skeletal_meshes.erase(sit);}}
 
 //LIGHT RESOURCE LIFETIME
 void GL33_DeleteLight(HRL_id id)
@@ -2374,6 +2808,28 @@ unsigned int HRL_GL_GetSceneColorBufferGL_ID(HRL_id _sceneid)
 	return it->second->textures[2];
 }
 
+unsigned int HRL_GL_GetSceneAlbedoBufferGL_ID(HRL_id _sceneid)
+{
+	auto it = bck_->gpu_scenes.find(_sceneid);
+	if (it == bck_->gpu_scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneAlbedoBufferGL_ID: scene ID is not valid");
+		return GL_INVALID_VALUE;
+	}
+	return it->second->textures[3];
+}
+
+unsigned int HRL_GL_GetSceneNormalBufferGL_ID(HRL_id _sceneid)
+{
+	auto it = bck_->gpu_scenes.find(_sceneid);
+	if (it == bck_->gpu_scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneNormalBufferGL_ID: scene ID is not valid");
+		return GL_INVALID_VALUE;
+	}
+	return it->second->textures[4];
+}
+
 HRL_id HRL_GL_GetHoveredObject(HRL_id _scene, int mouseX, int mouseY, HRL_EMeshType* mesh_type)
 {
 	auto it = bck_->gpu_scenes.find(_scene);
@@ -2414,6 +2870,21 @@ HRL_id HRL_GL_GetHoveredObject(HRL_id _scene, int mouseX, int mouseY, HRL_EMeshT
 }
 
 
+
+//Global illumination support
+int GL33_IsGlobalIlluminationMethodSupported(int method)
+{
+	if (!g_gl33_gi)
+		return HRL_FALSE;
+	if (method < HRL_GI_NONE || method > HRL_GI_RAY_TRACING)
+		return HRL_FALSE;
+	return g_gl33_gi->Supports((HRL_EGlobalIlluminationMethod)method) ? HRL_TRUE : HRL_FALSE;
+}
+
+uint32_t GL33_GetGlobalIlluminationSupportedMethods()
+{
+	return g_gl33_gi ? g_gl33_gi->GetSupportedMethods() : 0u;
+}
 
 //Color Picking
 void GL33_EnableColorPickingBuffer(HRL_id _scene, int _enable)

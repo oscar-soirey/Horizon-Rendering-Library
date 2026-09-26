@@ -24,12 +24,15 @@
 #include <limits>
 #include <set>
 #include <tuple>
+#include <cstring>
 
 // Internal FBX decoding dependency. Add ufbx to the build; HRL only consumes
 // its public header here and converts the decoded data to HRL_Vertex3D.
 #include <ufbx/ufbx.h>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <nlohmann/json.hpp>
 
 //pour le texte
@@ -41,6 +44,20 @@ static HRL_Context ctx_;
 
 //vtable utilisée pour appeller les fonctions, ne doit jamais etre modifiée apres Init()
 static HRL_vtable g_Backend;
+
+/**
+ * Owns the ufbx scene kept alive for the duration of the public FBX resource API.
+ * HRL_FBXTextureInfo/HRL_FBXMaterialInfo intentionally expose borrowed strings/data
+ * from this scene, so callers must keep this object alive while using those pointers.
+ */
+struct HRL_FBXResources
+{
+	ufbx_scene* scene = nullptr;
+	std::vector<HRL_FBXTextureInfo> textures;
+	std::vector<HRL_FBXMaterialInfo> materials;
+	std::vector<const ufbx_material*> material_sources;
+	std::unordered_map<const ufbx_texture*, HRL_uint> texture_indices;
+};
 
 
 HRL_Context* GetPrivateContext()
@@ -203,6 +220,14 @@ void HRL_Shutdown()
 
 	for (const auto& [id, material] : ctx_.materials)
 	{
+		if (material)
+		{
+			for (HRL_id textureId : material->owned_textures_)
+			{
+				if (textureId != HRL_INVALID_ID)
+					HRL_DeleteTexture(textureId);
+			}
+		}
 		delete material;
 	}
 	ctx_.materials.clear();
@@ -503,6 +528,68 @@ void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z)
 }
 
 
+static glm::mat4 HRL_InternalMeshModelMatrix(const HRL_Mesh* mesh)
+{
+	glm::mat4 model(1.f);
+	model = glm::translate(model, mesh->position_);
+	model = glm::translate(model, mesh->pivot_point_);
+	model = glm::rotate(model, glm::radians(mesh->rotation_.x), glm::vec3(1.f, 0.f, 0.f));
+	model = glm::rotate(model, glm::radians(mesh->rotation_.y), glm::vec3(0.f, 1.f, 0.f));
+	model = glm::rotate(model, glm::radians(mesh->rotation_.z), glm::vec3(0.f, 0.f, 1.f));
+	model = glm::translate(model, -mesh->pivot_point_);
+	model = glm::scale(model, mesh->scale_);
+	return model;
+}
+
+float HRL_GetMeshCameraDistance(HRL_id _meshid)
+{
+	auto meshIt = ctx_.meshes.find(_meshid);
+	if (meshIt == ctx_.meshes.end() || !meshIt->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetMeshCameraDistance: invalid mesh ID");
+		return -1.f;
+	}
+
+	auto sceneIt = ctx_.scenes.find(meshIt->second->scene_);
+	if (sceneIt == ctx_.scenes.end() || !sceneIt->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetMeshCameraDistance: mesh scene no longer exists");
+		return -1.f;
+	}
+
+	const glm::mat4 model = HRL_InternalMeshModelMatrix(meshIt->second);
+	const glm::vec3 center = glm::vec3(model * glm::vec4(meshIt->second->bounds_center_, 1.f));
+	float minimumDistance = std::numeric_limits<float>::infinity();
+
+	for (const auto& [viewportId, viewport] : sceneIt->second->viewports)
+	{
+		(void)viewportId;
+		if (!viewport || !viewport->camera_)
+			continue;
+		const float distance = glm::length(center - viewport->camera_->position_);
+		minimumDistance = std::min(minimumDistance, distance);
+	}
+
+	if (!std::isfinite(minimumDistance))
+	{
+		for (const auto& [cameraId, camera] : sceneIt->second->cameras)
+		{
+			(void)cameraId;
+			if (!camera) continue;
+			minimumDistance = std::min(minimumDistance, glm::length(center - camera->position_));
+		}
+	}
+
+	if (!std::isfinite(minimumDistance))
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_GetMeshCameraDistance: scene has no camera");
+		return -1.f;
+	}
+
+	return minimumDistance;
+}
+
+
 namespace { static bool RebuildLODs(HRL_Mesh* mesh); }
 
 static HRL_Mesh* GetMeshForLOD(HRL_id id, const char* errorMessage)
@@ -513,10 +600,10 @@ static HRL_Mesh* GetMeshForLOD(HRL_id id, const char* errorMessage)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, errorMessage);
 		return nullptr;
 	}
-	if (it->second->type_ == HRL_SPRITE)
+	if (it->second->type_ == HRL_SPRITE || it->second->type_ == HRL_3D_SKELETAL_MESH)
 	{
 		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR,
-			"LOD is only supported for 3D meshes");
+			"LOD generation is currently supported for static 3D meshes only");
 		return nullptr;
 	}
 	return it->second;
@@ -1115,6 +1202,115 @@ void HRL_DeleteScene(HRL_id _sceneid)
 }
 
 
+static bool IsValidGlobalIlluminationMethod(HRL_EGlobalIlluminationMethod method)
+{
+	return method >= HRL_GI_NONE && method <= HRL_GI_RAY_TRACING;
+}
+
+void HRL_SetGlobalIlluminationEnabled(HRL_id _sceneid, int _enable)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetGlobalIlluminationEnabled: invalid scene ID");
+		return;
+	}
+
+	if (_enable == HRL_FALSE)
+	{
+		it->second->global_illumination_enabled = false;
+		return;
+	}
+
+	if (it->second->global_illumination_method == HRL_GI_NONE)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR,
+			"HRL_SetGlobalIlluminationEnabled: scene GI method is HRL_GI_NONE");
+		return;
+	}
+
+	if (!g_Backend.RHI_IsGlobalIlluminationMethodSupported ||
+		!g_Backend.RHI_IsGlobalIlluminationMethodSupported((int)it->second->global_illumination_method))
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
+			"HRL_SetGlobalIlluminationEnabled: selected GI method is not supported by the active backend");
+		return;
+	}
+
+	it->second->global_illumination_enabled = true;
+}
+
+void HRL_SetGlobalIlluminationMethod(HRL_id _sceneid, HRL_EGlobalIlluminationMethod _method)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetGlobalIlluminationMethod: invalid scene ID");
+		return;
+	}
+
+	if (!IsValidGlobalIlluminationMethod(_method))
+	{
+		SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_SetGlobalIlluminationMethod: invalid GI method");
+		return;
+	}
+
+	if (_method == HRL_GI_NONE)
+	{
+		it->second->global_illumination_method = HRL_GI_NONE;
+		it->second->global_illumination_enabled = false;
+		return;
+	}
+
+	if (!g_Backend.RHI_IsGlobalIlluminationMethodSupported ||
+		!g_Backend.RHI_IsGlobalIlluminationMethodSupported((int)_method))
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
+			"HRL_SetGlobalIlluminationMethod: selected GI method is not supported by the active backend");
+		return;
+	}
+
+	it->second->global_illumination_method = _method;
+}
+
+int HRL_IsGlobalIlluminationEnabled(HRL_id _sceneid)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_IsGlobalIlluminationEnabled: invalid scene ID");
+		return HRL_FALSE;
+	}
+	return it->second->global_illumination_enabled ? HRL_TRUE : HRL_FALSE;
+}
+
+HRL_EGlobalIlluminationMethod HRL_GetGlobalIlluminationMethod(HRL_id _sceneid)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetGlobalIlluminationMethod: invalid scene ID");
+		return HRL_GI_NONE;
+	}
+	return it->second->global_illumination_method;
+}
+
+int HRL_IsGlobalIlluminationMethodSupported(HRL_EGlobalIlluminationMethod _method)
+{
+	if (!IsValidGlobalIlluminationMethod(_method) || _method == HRL_GI_NONE)
+		return HRL_FALSE;
+	if (!g_Backend.RHI_IsGlobalIlluminationMethodSupported)
+		return HRL_FALSE;
+	return g_Backend.RHI_IsGlobalIlluminationMethodSupported((int)_method) ? HRL_TRUE : HRL_FALSE;
+}
+
+uint32_t HRL_GetGlobalIlluminationSupportedMethods()
+{
+	return g_Backend.RHI_GetGlobalIlluminationSupportedMethods
+		? g_Backend.RHI_GetGlobalIlluminationSupportedMethods()
+		: 0u;
+}
+
 void HRL_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
 {
 	g_Backend.RHI_ResizeSceneTexture(_sceneid, _width, _height);
@@ -1288,6 +1484,14 @@ void HRL_DeleteMaterial(HRL_id _matid)
 	{
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteMaterial: invalid ID");
 		return;
+	}
+	if (it->second)
+	{
+		for (HRL_id textureId : it->second->owned_textures_)
+		{
+			if (textureId != HRL_INVALID_ID)
+				HRL_DeleteTexture(textureId);
+		}
 	}
 	delete it->second;
 	ctx_.materials.erase(it);
@@ -2652,6 +2856,1998 @@ HRL_Vertex3D* HRL_GetVertex3DFromFBX(const char* _data, size_t _bufferSize, size
 void HRL_FreeVertex3DFromFBX(HRL_Vertex3D* _vertices)
 {
 	delete[] _vertices;
+}
+
+namespace {
+
+static HRL_SkeletalBoneTransform HRLSkeletal_TransformFromUFBX(const ufbx_transform& transform)
+{
+	HRL_SkeletalBoneTransform result{};
+	result.translation[0] = (float)transform.translation.x;
+	result.translation[1] = (float)transform.translation.y;
+	result.translation[2] = (float)transform.translation.z;
+	result.rotation[0] = (float)transform.rotation.x;
+	result.rotation[1] = (float)transform.rotation.y;
+	result.rotation[2] = (float)transform.rotation.z;
+	result.rotation[3] = (float)transform.rotation.w;
+	result.scale[0] = (float)transform.scale.x;
+	result.scale[1] = (float)transform.scale.y;
+	result.scale[2] = (float)transform.scale.z;
+	return result;
+}
+
+static glm::mat4 HRLSkeletal_TransformToMatrix(const HRL_SkeletalBoneTransform& transform)
+{
+	const glm::vec3 translation(transform.translation[0], transform.translation[1], transform.translation[2]);
+	const glm::quat rotation(
+		transform.rotation[3],
+		transform.rotation[0],
+		transform.rotation[1],
+		transform.rotation[2]);
+	const glm::vec3 scale(transform.scale[0], transform.scale[1], transform.scale[2]);
+	glm::mat4 matrix(1.f);
+	matrix = glm::translate(matrix, translation);
+	matrix *= glm::mat4_cast(rotation);
+	matrix = glm::scale(matrix, scale);
+	return matrix;
+}
+
+static glm::mat4 HRLSkeletal_UFBXMatrixToGLM(const ufbx_matrix& source)
+{
+	glm::mat4 result(1.f);
+	result[0] = glm::vec4((float)source.cols[0].x, (float)source.cols[0].y, (float)source.cols[0].z, 0.f);
+	result[1] = glm::vec4((float)source.cols[1].x, (float)source.cols[1].y, (float)source.cols[1].z, 0.f);
+	result[2] = glm::vec4((float)source.cols[2].x, (float)source.cols[2].y, (float)source.cols[2].z, 0.f);
+	result[3] = glm::vec4((float)source.cols[3].x, (float)source.cols[3].y, (float)source.cols[3].z, 1.f);
+	return result;
+}
+
+static glm::mat4 HRLSkeletal_ArrayToGLM(const float source[16])
+{
+	glm::mat4 result(1.f);
+	for (int col = 0; col < 4; ++col)
+		for (int row = 0; row < 4; ++row)
+			result[col][row] = source[col * 4 + row];
+	return result;
+}
+
+static glm::mat4 HRLSkeletal_LerpMatrix(const glm::mat4& a, const glm::mat4& b, float alpha)
+{
+	const float invAlpha = 1.0f - alpha;
+	glm::mat4 result(0.f);
+	for (int col = 0; col < 4; ++col)
+		for (int row = 0; row < 4; ++row)
+			result[col][row] = a[col][row] * invAlpha + b[col][row] * alpha;
+	return result;
+}
+
+static void HRLSkeletal_SetDefaultTransform(HRL_SkeletalBoneTransform& transform)
+{
+	transform.translation[0] = 0.f;
+	transform.translation[1] = 0.f;
+	transform.translation[2] = 0.f;
+	transform.rotation[0] = 0.f;
+	transform.rotation[1] = 0.f;
+	transform.rotation[2] = 0.f;
+	transform.rotation[3] = 1.f;
+	transform.scale[0] = 1.f;
+	transform.scale[1] = 1.f;
+	transform.scale[2] = 1.f;
+}
+
+static HRL_SkeletalBoneTransform HRLSkeletal_LerpTransform(
+	const HRL_SkeletalBoneTransform& a,
+	const HRL_SkeletalBoneTransform& b,
+	float alpha)
+{
+	HRL_SkeletalBoneTransform result{};
+	const glm::vec3 ta(a.translation[0], a.translation[1], a.translation[2]);
+	const glm::vec3 tb(b.translation[0], b.translation[1], b.translation[2]);
+	const glm::vec3 sa(a.scale[0], a.scale[1], a.scale[2]);
+	const glm::vec3 sb(b.scale[0], b.scale[1], b.scale[2]);
+	const glm::quat qa(a.rotation[3], a.rotation[0], a.rotation[1], a.rotation[2]);
+	const glm::quat qb(b.rotation[3], b.rotation[0], b.rotation[1], b.rotation[2]);
+	const glm::vec3 t = glm::mix(ta, tb, alpha);
+	const glm::vec3 s = glm::mix(sa, sb, alpha);
+	const glm::quat q = glm::normalize(glm::slerp(qa, qb, alpha));
+
+	result.translation[0] = t.x;
+	result.translation[1] = t.y;
+	result.translation[2] = t.z;
+	result.rotation[0] = q.x;
+	result.rotation[1] = q.y;
+	result.rotation[2] = q.z;
+	result.rotation[3] = q.w;
+	result.scale[0] = s.x;
+	result.scale[1] = s.y;
+	result.scale[2] = s.z;
+	return result;
+}
+
+static void HRLSkeletal_BuildPoseFramesForAnimation(
+    HRL_SkeletalMesh* mesh,
+    HRL_SkeletalAnimationInternal& animation)
+{
+    if (!mesh || mesh->bones_.empty() || animation.public_.frameCount == 0 || animation.frames_.empty())
+    {
+        animation.pose_frames_.clear();
+        return;
+    }
+
+    const size_t boneCount = mesh->bones_.size();
+    const size_t frameCount = animation.public_.frameCount;
+    animation.pose_frames_.assign(frameCount * boneCount, glm::mat4(1.f));
+
+    if (animation.pose_matrices_storage_.size() == frameCount * boneCount * 16u)
+    {
+        for (size_t frame = 0; frame < frameCount; ++frame)
+        {
+            for (size_t boneIndex = 0; boneIndex < boneCount; ++boneIndex)
+            {
+                const float* src = animation.pose_matrices_storage_.data() + (frame * boneCount + boneIndex) * 16u;
+                animation.pose_frames_[frame * boneCount + boneIndex] = HRLSkeletal_ArrayToGLM(src);
+            }
+        }
+        return;
+    }
+
+    for (size_t frame = 0; frame < frameCount; ++frame)
+    {
+        std::vector<glm::mat4> world(boneCount, glm::mat4(1.f));
+        std::vector<unsigned char> built(boneCount, 0);
+
+        std::function<glm::mat4(size_t)> buildBone = [&](size_t boneIndex) -> glm::mat4
+        {
+            if (built[boneIndex])
+                return world[boneIndex];
+
+            const HRL_SkeletalBoneInternal& bone = mesh->bones_[boneIndex];
+            const size_t offset = frame * boneCount + boneIndex;
+            glm::mat4 local = HRLSkeletal_TransformToMatrix(animation.frames_[offset]);
+            glm::mat4 parentWorld(1.f);
+            if (bone.public_.parentIndex < boneCount && bone.public_.parentIndex != boneIndex)
+                parentWorld = buildBone((size_t)bone.public_.parentIndex);
+
+            world[boneIndex] = parentWorld * local;
+            built[boneIndex] = 1;
+            return world[boneIndex];
+        };
+
+        for (size_t boneIndex = 0; boneIndex < boneCount; ++boneIndex)
+        {
+            const glm::mat4 boneWorld = buildBone(boneIndex);
+            animation.pose_frames_[frame * boneCount + boneIndex] =
+                boneWorld * mesh->bones_[boneIndex].inverse_bind_;
+        }
+    }
+}
+
+static bool HRLSkeletal_UpdatePose(HRL_SkeletalMesh* mesh)
+{
+	if (!mesh || mesh->bones_.empty())
+		return false;
+
+	mesh->bone_matrices_.resize(mesh->bones_.size(), glm::mat4(1.f));
+	const HRL_SkeletalAnimationInternal* animation = nullptr;
+	if (mesh->current_animation_ >= 0 && (size_t)mesh->current_animation_ < mesh->animations_.size())
+		animation = &mesh->animations_[(size_t)mesh->current_animation_];
+
+	if (animation && !animation->pose_frames_.empty() && animation->public_.frameCount > 0)
+	{
+		const float duration = std::max(animation->public_.duration, 0.f);
+		float time = std::clamp(mesh->animation_time_, 0.f, duration);
+		const float framePosition = duration > 0.f
+			? time * animation->public_.frameRate
+			: 0.f;
+		const size_t frame0 = std::min((size_t)std::floor(framePosition), animation->public_.frameCount - 1);
+		const size_t frame1 = std::min(frame0 + 1, animation->public_.frameCount - 1);
+		const float alpha = frame1 == frame0 ? 0.f : framePosition - (float)frame0;
+		for (size_t boneIndex = 0; boneIndex < mesh->bones_.size(); ++boneIndex)
+		{
+			const size_t offset0 = frame0 * mesh->bones_.size() + boneIndex;
+			const size_t offset1 = frame1 * mesh->bones_.size() + boneIndex;
+			mesh->bone_matrices_[boneIndex] = HRLSkeletal_LerpMatrix(animation->pose_frames_[offset0], animation->pose_frames_[offset1], alpha);
+		}
+	}
+	else if (!mesh->animations_.empty() && !mesh->animations_.front().pose_frames_.empty())
+	{
+		// Imported skeletal meshes keep their bind/first-frame skin matrices in
+		// world-space form, matching ufbx's geometry_to_world skinning convention.
+		const auto& firstPose = mesh->animations_.front().pose_frames_;
+		for (size_t boneIndex = 0; boneIndex < mesh->bones_.size(); ++boneIndex)
+			mesh->bone_matrices_[boneIndex] = firstPose[boneIndex];
+	}
+	else
+	{
+		for (size_t boneIndex = 0; boneIndex < mesh->bones_.size(); ++boneIndex)
+			mesh->bone_matrices_[boneIndex] = mesh->bones_[boneIndex].bind_world_ * mesh->bones_[boneIndex].inverse_bind_;
+	}
+
+	++mesh->pose_serial_;
+	if (mesh->pose_serial_ == 0)
+		mesh->pose_serial_ = 1;
+	return true;
+}
+
+static char* HRLSkeletal_CopyCString(const ufbx_string& string)
+{
+	char* result = new char[string.length + 1];
+	if (string.length > 0)
+		std::memcpy(result, string.data, string.length);
+	result[string.length] = '\0';
+	return result;
+}
+
+static void HRLSkeletal_DestroyMeshData(HRL_SkeletalMeshData* data)
+{
+	if (!data) return;
+	if (data->bones)
+	{
+		for (size_t i = 0; i < data->boneCount; ++i)
+			delete[] const_cast<char*>(data->bones[i].name);
+		delete[] data->bones;
+	}
+	if (data->animations)
+	{
+		for (size_t i = 0; i < data->animationCount; ++i)
+		{
+			delete[] const_cast<char*>(data->animations[i].name);
+			delete[] data->animations[i].frames;
+			delete[] data->animations[i].poseMatrices;
+		}
+		delete[] data->animations;
+	}
+	delete[] data->vertices;
+	delete[] data->indices;
+	delete data;
+}
+
+static bool HRLSkeletal_FillVertex(
+	HRL_SkeletalVertex& output,
+	const ufbx_mesh* mesh,
+	const ufbx_skin_deformer* skin,
+	const std::vector<HRL_uint>& clusterToBone,
+	uint32_t meshIndex)
+{
+	std::memset(&output, 0, sizeof(output));
+	const uint32_t vertexIndex = mesh->vertex_indices.data[meshIndex];
+	if ((size_t)vertexIndex >= mesh->vertices.count)
+		return false;
+
+	ufbx_vec3 position = mesh->vertices.data[vertexIndex];
+	if (mesh->vertex_position.exists)
+		position = ufbx_get_vertex_vec3(&mesh->vertex_position, meshIndex);
+	output.vertex.position[0] = (float)position.x;
+	output.vertex.position[1] = (float)position.y;
+	output.vertex.position[2] = (float)position.z;
+
+	if (mesh->vertex_normal.exists)
+	{
+		const ufbx_vec3 normal = ufbx_get_vertex_vec3(&mesh->vertex_normal, meshIndex);
+		output.vertex.normal[0] = (float)normal.x;
+		output.vertex.normal[1] = (float)normal.y;
+		output.vertex.normal[2] = (float)normal.z;
+	}
+	else
+	{
+		output.vertex.normal[1] = 1.f;
+	}
+
+	if (mesh->vertex_uv.exists)
+	{
+		const ufbx_vec2 uv = ufbx_get_vertex_vec2(&mesh->vertex_uv, meshIndex);
+		output.vertex.uv[0] = (float)uv.x;
+		output.vertex.uv[1] = (float)uv.y;
+	}
+
+	if (mesh->vertex_tangent.exists)
+	{
+		const ufbx_vec3 tangent = ufbx_get_vertex_vec3(&mesh->vertex_tangent, meshIndex);
+		output.vertex.tangent[0] = (float)tangent.x;
+		output.vertex.tangent[1] = (float)tangent.y;
+		output.vertex.tangent[2] = (float)tangent.z;
+	}
+	if (mesh->vertex_bitangent.exists)
+	{
+		const ufbx_vec3 bitangent = ufbx_get_vertex_vec3(&mesh->vertex_bitangent, meshIndex);
+		output.vertex.bitangent[0] = (float)bitangent.x;
+		output.vertex.bitangent[1] = (float)bitangent.y;
+		output.vertex.bitangent[2] = (float)bitangent.z;
+	}
+
+	if (!mesh->vertex_tangent.exists || !mesh->vertex_bitangent.exists)
+	{
+		HRL_Vertex3D tri[3]{};
+		// Tangent fallback is completed at the triangle level by the caller. The
+		// zeroed tangent space here makes the absence explicit without inventing UVs.
+		(void)tri;
+	}
+
+	if (skin && (size_t)vertexIndex < skin->vertices.count)
+	{
+		const ufbx_skin_vertex& skinVertex = skin->vertices.data[vertexIndex];
+		const size_t weightEnd = std::min(
+			(size_t)skinVertex.weight_begin + (size_t)skinVertex.num_weights,
+			skin->weights.count);
+
+		struct Influence {
+			HRL_uint bone;
+			float weight;
+		};
+		std::vector<Influence> influences;
+		influences.reserve((size_t)skinVertex.num_weights);
+		for (size_t weightIndex = skinVertex.weight_begin; weightIndex < weightEnd; ++weightIndex)
+		{
+			const ufbx_skin_weight& weight = skin->weights.data[weightIndex];
+			if ((size_t)weight.cluster_index >= clusterToBone.size())
+				continue;
+			const HRL_uint boneIndex = clusterToBone[weight.cluster_index];
+			if (boneIndex == HRL_INVALID_ID)
+				continue;
+			const float w = (float)weight.weight;
+			if (!std::isfinite(w) || w <= 0.f)
+				continue;
+			influences.push_back({boneIndex, w});
+		}
+
+		std::sort(influences.begin(), influences.end(), [](const Influence& a, const Influence& b) {
+			return a.weight > b.weight;
+		});
+
+		const size_t influenceCount = std::min(influences.size(), (size_t)HRL_SKELETAL_MAX_INFLUENCES);
+		float weightSum = 0.f;
+		for (size_t i = 0; i < influenceCount; ++i)
+		{
+			output.boneIndices[i] = influences[i].bone;
+			output.boneWeights[i] = influences[i].weight;
+			weightSum += influences[i].weight;
+		}
+		if (weightSum > 0.f)
+		{
+			for (size_t i = 0; i < influenceCount; ++i)
+				output.boneWeights[i] /= weightSum;
+		}
+		else if (skin->clusters.count > 0 && !clusterToBone.empty())
+		{
+			output.boneIndices[0] = clusterToBone[0] == HRL_INVALID_ID ? 0u : clusterToBone[0];
+			output.boneWeights[0] = 1.f;
+		}
+	}
+	return true;
+}
+
+static void HRLSkeletal_ComputeMissingTangentSpace(
+	HRL_SkeletalVertex& a, HRL_SkeletalVertex& b, HRL_SkeletalVertex& c)
+{
+	const glm::vec3 p0(a.vertex.position[0], a.vertex.position[1], a.vertex.position[2]);
+	const glm::vec3 p1(b.vertex.position[0], b.vertex.position[1], b.vertex.position[2]);
+	const glm::vec3 p2(c.vertex.position[0], c.vertex.position[1], c.vertex.position[2]);
+	const glm::vec2 uv0(a.vertex.uv[0], a.vertex.uv[1]);
+	const glm::vec2 uv1(b.vertex.uv[0], b.vertex.uv[1]);
+	const glm::vec2 uv2(c.vertex.uv[0], c.vertex.uv[1]);
+	glm::vec3 normalA(a.vertex.normal[0], a.vertex.normal[1], a.vertex.normal[2]);
+	const glm::vec3 faceNormal = HRLFBX_NormalizeOrFallback(glm::cross(p1-p0, p2-p0), glm::vec3(0,1,0));
+	for (glm::vec3* n : {&normalA})
+		*n = HRLFBX_NormalizeOrFallback(*n, faceNormal);
+
+	glm::vec3 tangent, bitangent;
+	HRLFBX_BuildFallbackTangentSpace(p0,p1,p2,uv0,uv1,uv2,normalA,tangent,bitangent);
+	for (HRL_SkeletalVertex* v : {&a,&b,&c})
+	{
+		glm::vec3 n(v->vertex.normal[0], v->vertex.normal[1], v->vertex.normal[2]);
+		n = HRLFBX_NormalizeOrFallback(n, faceNormal);
+		v->vertex.normal[0]=n.x; v->vertex.normal[1]=n.y; v->vertex.normal[2]=n.z;
+		glm::vec3 t(v->vertex.tangent[0], v->vertex.tangent[1], v->vertex.tangent[2]);
+		if (glm::dot(t,t) < 1e-8f) t=tangent;
+		t = HRLFBX_NormalizeOrFallback(t - n*glm::dot(n,t), tangent);
+		glm::vec3 bt(v->vertex.bitangent[0], v->vertex.bitangent[1], v->vertex.bitangent[2]);
+		const glm::vec3 expected = glm::normalize(glm::cross(n,t));
+		if (glm::dot(bt,bt) < 1e-8f) bt=expected;
+		bt = HRLFBX_NormalizeOrFallback(bt, expected);
+		if (glm::dot(bt, expected) < 0.f) bt=-expected;
+		v->vertex.tangent[0]=t.x; v->vertex.tangent[1]=t.y; v->vertex.tangent[2]=t.z;
+		v->vertex.bitangent[0]=bt.x; v->vertex.bitangent[1]=bt.y; v->vertex.bitangent[2]=bt.z;
+	}
+}
+
+} // anonymous namespace
+
+HRL_SkeletalMeshData* HRL_GetSkeletalMeshFromFBX(const char* _data, size_t _bufferSize)
+{
+	if (!_data || _bufferSize == 0)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: data and buffer size must be valid");
+		return nullptr;
+	}
+
+	ufbx_load_opts options{};
+	options.file_format = UFBX_FILE_FORMAT_FBX;
+	options.generate_missing_normals = true;
+	options.normalize_normals = true;
+	options.load_external_files = true;
+	options.ignore_missing_external_files = true;
+	options.evaluate_skinning = true;
+	options.evaluate_caches = false;
+	options.ignore_geometry = false;
+	options.target_axes.right = UFBX_COORDINATE_AXIS_POSITIVE_X;
+	options.target_axes.up = UFBX_COORDINATE_AXIS_POSITIVE_Y;
+	options.target_axes.front = UFBX_COORDINATE_AXIS_POSITIVE_Z;
+	options.target_unit_meters = 1.0;
+
+	ufbx_error error{};
+	ufbx_scene* scene = ufbx_load_memory(_data, _bufferSize, &options, &error);
+	if (!scene)
+	{
+		std::string detail = "HRL_GetSkeletalMeshFromFBX: failed to decode FBX file";
+		if (error.description.data && error.description.data[0] != '\0')
+		{
+			detail += " (";
+			detail += error.description.data;
+			detail += ")";
+		}
+		SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, detail.c_str());
+		return nullptr;
+	}
+
+	// A FBX file may contain several meshes attached to the same skeleton.
+	// This API represents a single HRL skeletal mesh, so pick the largest skinned
+	// geometry instead of depending on FBX object ordering (which often puts
+	// small accessory meshes before the main character). The diagnostic below
+	// makes the limitation explicit instead of silently hiding it.
+	const ufbx_mesh* mesh = nullptr;
+	size_t skinnedMeshCount = 0;
+	size_t largestTriangles = 0;
+	for (size_t i = 0; i < scene->meshes.count; ++i)
+	{
+		const ufbx_mesh* candidate = scene->meshes.data[i];
+		if (!candidate || candidate->skin_deformers.count == 0 || candidate->num_triangles == 0)
+			continue;
+		++skinnedMeshCount;
+		if (!mesh || candidate->num_triangles > largestTriangles)
+		{
+			mesh = candidate;
+			largestTriangles = candidate->num_triangles;
+		}
+	}
+	if (skinnedMeshCount > 1)
+	{
+		std::printf(
+			"HRL_GetSkeletalMeshFromFBX: FBX contains %zu skinned meshes; importing the largest (%zu triangles) with the single-mesh API.\n",
+			skinnedMeshCount, largestTriangles);
+	}
+	if (!mesh)
+	{
+		ufbx_free_scene(scene);
+		SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: FBX scene contains no skinned mesh geometry");
+		return nullptr;
+	}
+
+	const ufbx_node* meshNode = nullptr;
+	for (size_t nodeIndex = 0; nodeIndex < scene->nodes.count; ++nodeIndex)
+	{
+		const ufbx_node* candidate = scene->nodes.data[nodeIndex];
+		if (candidate && candidate->mesh == mesh)
+		{
+			meshNode = candidate;
+			break;
+		}
+	}
+	if (!meshNode && mesh->instances.count > 0)
+		meshNode = mesh->instances.data[0];
+
+	const ufbx_skin_deformer* skin = mesh->skin_deformers.data[0];
+	if (!skin || skin->clusters.count == 0)
+	{
+		ufbx_free_scene(scene);
+		SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: mesh has no skin clusters");
+		return nullptr;
+	}
+
+	try
+	{
+		std::unordered_map<const ufbx_node*, bool> nodeSet;
+		std::unordered_map<const ufbx_node*, const ufbx_skin_cluster*> clusterByNode;
+		std::vector<const ufbx_node*> boneNodes;
+		for (size_t i = 0; i < skin->clusters.count; ++i)
+		{
+			const ufbx_skin_cluster* cluster = skin->clusters.data[i];
+			if (!cluster || !cluster->bone_node)
+				continue;
+			clusterByNode.emplace(cluster->bone_node, cluster);
+			for (ufbx_node* node = cluster->bone_node; node; node = node->parent)
+			{
+				if (!nodeSet.emplace(node, true).second)
+					break;
+				boneNodes.push_back(node);
+			}
+		}
+		if (boneNodes.empty())
+		{
+			ufbx_free_scene(scene);
+			SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: skin has no valid bone nodes");
+			return nullptr;
+		}
+		std::stable_sort(boneNodes.begin(), boneNodes.end(), [](const ufbx_node* a, const ufbx_node* b){
+			if (a->node_depth != b->node_depth) return a->node_depth < b->node_depth;
+			if (a->name.length != b->name.length) return a->name.length < b->name.length;
+			return std::strncmp(a->name.data, b->name.data, a->name.length) < 0;
+		});
+		if (boneNodes.size() > HRL_MAX_SKELETAL_BONES)
+		{
+			ufbx_free_scene(scene);
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: skeleton exceeds HRL_MAX_SKELETAL_BONES");
+			return nullptr;
+		}
+
+		std::unordered_map<const ufbx_node*, HRL_uint> nodeToBone;
+		for (size_t i = 0; i < boneNodes.size(); ++i)
+			nodeToBone[boneNodes[i]] = (HRL_uint)i;
+
+		std::vector<HRL_uint> clusterToBone(skin->clusters.count, HRL_INVALID_ID);
+		for (size_t i = 0; i < skin->clusters.count; ++i)
+		{
+			const ufbx_skin_cluster* cluster = skin->clusters.data[i];
+			if (!cluster || !cluster->bone_node) continue;
+			auto it = nodeToBone.find(cluster->bone_node);
+			if (it != nodeToBone.end()) clusterToBone[i] = it->second;
+		}
+
+		// Keep mesh vertices in ufbx's native geometry space. IMPORTANT: the
+		// skinning matrices themselves are world-space matrices. This is the same
+		// convention used by the official ufbx viewer: for each influence,
+		// currentBoneWorld * geometry_to_bone is applied directly to the geometry
+		// vertex. Therefore the HRL object/model transform must NOT apply the FBX
+		// geometry_to_world a second time.
+
+		std::vector<HRL_SkeletalVertex> vertices;
+		std::vector<HRL_uint> indices;
+		vertices.reserve(mesh->num_triangles * 3u);
+		indices.reserve(mesh->num_triangles * 3u);
+		const size_t triangleCapacity = (size_t)std::max<uint32_t>(1u, mesh->max_face_triangles) * 3u;
+		std::vector<uint32_t> triangles(triangleCapacity);
+		for (size_t faceIndex = 0; faceIndex < mesh->faces.count; ++faceIndex)
+		{
+			const ufbx_face& face = mesh->faces.data[faceIndex];
+			if (face.num_indices < 3) continue;
+			const uint32_t triangleCount = ufbx_triangulate_face(triangles.data(), triangles.size(), mesh, face);
+			for (uint32_t tri = 0; tri < triangleCount; ++tri)
+			{
+				HRL_SkeletalVertex triVertices[3]{};
+				bool valid = true;
+				for (size_t corner = 0; corner < 3; ++corner)
+				{
+					const uint32_t meshIndex = triangles[(size_t)tri * 3u + corner];
+					if ((size_t)meshIndex >= mesh->num_indices ||
+						!HRLSkeletal_FillVertex(triVertices[corner], mesh, skin, clusterToBone, meshIndex))
+					{
+						valid = false;
+						break;
+					}
+				}
+				if (!valid) continue;
+				HRLSkeletal_ComputeMissingTangentSpace(triVertices[0], triVertices[1], triVertices[2]);
+				for (int corner = 0; corner < 3; ++corner)
+				{
+					const HRL_uint index = (HRL_uint)vertices.size();
+					vertices.push_back(triVertices[corner]);
+					indices.push_back(index);
+				}
+			}
+		}
+
+		if (vertices.empty())
+		{
+			ufbx_free_scene(scene);
+			SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: skinned mesh contains no convertible triangles");
+			return nullptr;
+		}
+
+		HRL_SkeletalMeshData* result = new HRL_SkeletalMeshData{};
+		// Skeletal vertices are deformed all the way to world space by the skin
+		// matrices. Keep the generic geometry transform field neutral so the
+		// renderer cannot apply the FBX node transform a second time.
+		for (int i = 0; i < 16; ++i)
+			result->geometryToWorldMatrix[i] = 0.f;
+		result->geometryToWorldMatrix[0] = 1.f;
+		result->geometryToWorldMatrix[5] = 1.f;
+		result->geometryToWorldMatrix[10] = 1.f;
+		result->geometryToWorldMatrix[15] = 1.f;
+		result->vertexCount = vertices.size();
+		result->indexCount = indices.size();
+		result->boneCount = boneNodes.size();
+		result->animationCount = scene->anim_stacks.count > 0 ? scene->anim_stacks.count : 1;
+		result->vertices = new HRL_SkeletalVertex[result->vertexCount];
+		result->indices = new HRL_uint[result->indexCount];
+		result->bones = new HRL_SkeletalBone[result->boneCount]{};
+		result->animations = new HRL_SkeletalAnimation[result->animationCount]{};
+		std::copy(vertices.begin(), vertices.end(), result->vertices);
+		std::copy(indices.begin(), indices.end(), result->indices);
+
+		for (size_t i = 0; i < boneNodes.size(); ++i)
+		{
+			const ufbx_node* node = boneNodes[i];
+			HRL_SkeletalBone& bone = result->bones[i];
+			bone.name = HRLSkeletal_CopyCString(node->name);
+			bone.parentIndex = HRL_INVALID_ID;
+			for (ufbx_node* parent = node->parent; parent; parent = parent->parent)
+			{
+				auto pit = nodeToBone.find(parent);
+				if (pit != nodeToBone.end()) { bone.parentIndex = pit->second; break; }
+			}
+			const auto clusterIt = clusterByNode.find(node);
+			const glm::mat4 inverseBind = clusterIt != clusterByNode.end()
+				? HRLSkeletal_UFBXMatrixToGLM(clusterIt->second->geometry_to_bone)
+				: glm::mat4(1.f);
+			const HRL_SkeletalBoneTransform bindTransform = HRLSkeletal_TransformFromUFBX(node->local_transform);
+			bone.bindTransform = bindTransform;
+			const glm::mat4 bindWorld = HRLSkeletal_UFBXMatrixToGLM(node->node_to_world);
+			for (int r = 0; r < 4; ++r)
+				for (int c = 0; c < 4; ++c)
+				{
+					bone.bindWorldMatrix[c * 4 + r] = bindWorld[c][r];
+					bone.inverseBindMatrix[c * 4 + r] = inverseBind[c][r];
+				}
+		}
+
+		for (size_t animationIndex = 0; animationIndex < result->animationCount; ++animationIndex)
+		{
+			HRL_SkeletalAnimation& animation = result->animations[animationIndex];
+			const bool bindPose = scene->anim_stacks.count == 0;
+			const ufbx_anim_stack* stack = bindPose ? nullptr : scene->anim_stacks.data[animationIndex];
+			if (bindPose)
+			{
+				const char* name = "BindPose";
+				animation.name = new char[std::strlen(name) + 1];
+				std::strcpy(const_cast<char*>(animation.name), name);
+				animation.duration = 0.f;
+				animation.frameRate = 30.f;
+				animation.frameCount = 1;
+			}
+			else
+			{
+				animation.name = HRLSkeletal_CopyCString(stack->name);
+				animation.duration = (float)std::max(0.0, stack->time_end - stack->time_begin);
+				animation.frameRate = 30.f;
+				const size_t maxFrames = 4096;
+				animation.frameCount = animation.duration > 0.f
+					? std::min(maxFrames, (size_t)std::ceil(animation.duration * animation.frameRate) + 1u)
+					: 1u;
+			}
+			if (result->boneCount != 0 && animation.frameCount > std::numeric_limits<size_t>::max() / result->boneCount)
+			{
+				ufbx_free_scene(scene);
+				HRLSkeletal_DestroyMeshData(result);
+				SetErrorCode(HRL_OUT_OF_MEMORY, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: animation frame data is too large");
+				return nullptr;
+			}
+			const size_t frameValueCount = animation.frameCount * result->boneCount;
+			if (frameValueCount > std::numeric_limits<size_t>::max() / 16u)
+			{
+				ufbx_free_scene(scene);
+				HRLSkeletal_DestroyMeshData(result);
+				SetErrorCode(HRL_OUT_OF_MEMORY, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: evaluated pose data is too large");
+				return nullptr;
+			}
+			animation.frames = new HRL_SkeletalBoneTransform[frameValueCount]{};
+			animation.poseMatrices = new float[frameValueCount * 16u]{};
+			for (size_t frame = 0; frame < animation.frameCount; ++frame)
+			{
+				const double time = bindPose || !stack
+					? 0.0
+					: std::min(stack->time_end, stack->time_begin + (double)frame / (double)animation.frameRate);
+				ufbx_scene* evaluatedScene = nullptr;
+				if (!bindPose && stack && stack->anim)
+				{
+					ufbx_error evalError{};
+					evaluatedScene = ufbx_evaluate_scene(scene, stack->anim, time, nullptr, &evalError);
+					if (!evaluatedScene)
+					{
+						ufbx_free_scene(scene);
+						HRLSkeletal_DestroyMeshData(result);
+						SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: failed to evaluate animation scene");
+						return nullptr;
+					}
+				}
+
+				// ufbx directly provides the current skinning transform as
+				// cluster->geometry_to_world = bone_node->node_to_world * geometry_to_bone.
+				// Use that instead of rebuilding the FBX bone hierarchy manually.
+				std::unordered_map<uint32_t, const ufbx_skin_cluster*> evaluatedClusterByNode;
+				if (evaluatedScene)
+				{
+					const uint32_t meshTypedId = mesh->typed_id;
+					if ((size_t)meshTypedId >= evaluatedScene->meshes.count || !evaluatedScene->meshes.data[meshTypedId])
+					{
+						ufbx_free_scene(evaluatedScene);
+						ufbx_free_scene(scene);
+						HRLSkeletal_DestroyMeshData(result);
+						SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: evaluated mesh lookup failed");
+						return nullptr;
+					}
+					const ufbx_mesh* evaluatedMesh = evaluatedScene->meshes.data[meshTypedId];
+					if (!evaluatedMesh || evaluatedMesh->skin_deformers.count == 0 || !evaluatedMesh->skin_deformers.data[0])
+					{
+						ufbx_free_scene(evaluatedScene);
+						ufbx_free_scene(scene);
+						HRLSkeletal_DestroyMeshData(result);
+						SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: evaluated mesh has no skin deformer");
+						return nullptr;
+					}
+					const ufbx_skin_deformer* evaluatedSkin = evaluatedMesh->skin_deformers.data[0];
+					for (size_t clusterIndex = 0; clusterIndex < evaluatedSkin->clusters.count; ++clusterIndex)
+					{
+						const ufbx_skin_cluster* cluster = evaluatedSkin->clusters.data[clusterIndex];
+						if (cluster && cluster->bone_node)
+							evaluatedClusterByNode[cluster->bone_node->typed_id] = cluster;
+					}
+				}
+
+
+				for (size_t boneIndex = 0; boneIndex < boneNodes.size(); ++boneIndex)
+				{
+					const size_t offset = frame * boneNodes.size() + boneIndex;
+					const ufbx_skin_cluster* cluster = nullptr;
+					const auto clusterIt = clusterByNode.find(boneNodes[boneIndex]);
+					if (clusterIt != clusterByNode.end()) cluster = clusterIt->second;
+					const ufbx_skin_cluster* poseCluster = cluster;
+					if (evaluatedScene)
+					{
+						auto evaluatedIt = evaluatedClusterByNode.find(boneNodes[boneIndex]->typed_id);
+						if (evaluatedIt != evaluatedClusterByNode.end()) poseCluster = evaluatedIt->second;
+					}
+
+					HRL_SkeletalBoneTransform transform = HRLSkeletal_TransformFromUFBX(boneNodes[boneIndex]->local_transform);
+					if (evaluatedScene)
+					{
+						const uint32_t typedId = boneNodes[boneIndex]->typed_id;
+						if ((size_t)typedId < evaluatedScene->nodes.count && evaluatedScene->nodes.data[typedId])
+							transform = HRLSkeletal_TransformFromUFBX(evaluatedScene->nodes.data[typedId]->local_transform);
+						else
+						{
+							ufbx_free_scene(evaluatedScene);
+							ufbx_free_scene(scene);
+							HRLSkeletal_DestroyMeshData(result);
+							SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: evaluated bone node lookup failed");
+							return nullptr;
+						}
+					}
+					animation.frames[offset] = transform;
+					// ufbx's cluster->geometry_to_world is already the complete current
+					// skin matrix:
+					//     bone_node->node_to_world * geometry_to_bone
+					// Keep it in world space exactly as provided by ufbx. Do not pre/post-
+					// multiply it by the mesh node transform: doing so is the source of
+					// the disappearing/partial-mesh regression between the previous fixes.
+					const glm::mat4 poseMatrix = poseCluster
+						? HRLSkeletal_UFBXMatrixToGLM(poseCluster->geometry_to_world)
+						: glm::mat4(1.f);
+					for (int col = 0; col < 4; ++col)
+						for (int row = 0; row < 4; ++row)
+							animation.poseMatrices[offset * 16u + (size_t)col * 4u + (size_t)row] = poseMatrix[col][row];
+				}
+				if (evaluatedScene)
+					ufbx_free_scene(evaluatedScene);
+			}
+		}
+
+		ufbx_free_scene(scene);
+		return result;
+	}
+	catch (const std::bad_alloc&)
+	{
+		ufbx_free_scene(scene);
+		SetErrorCode(HRL_OUT_OF_MEMORY, HRL_SEVERITY_ERROR, "HRL_GetSkeletalMeshFromFBX: out of memory while converting skeleton");
+		return nullptr;
+	}
+}
+
+void HRL_FreeSkeletalMeshData(HRL_SkeletalMeshData* _data)
+{
+	HRLSkeletal_DestroyMeshData(_data);
+}
+
+// ============================================================================
+// FBX resource/material helpers
+// ============================================================================
+
+namespace {
+
+static ufbx_load_opts HRLFBX_MakeResourceLoadOptions()
+{
+	ufbx_load_opts options{};
+	options.file_format = UFBX_FILE_FORMAT_FBX;
+	options.load_external_files = false;
+	options.ignore_missing_external_files = true;
+	options.ignore_geometry = true;
+	options.ignore_animation = true;
+	options.ignore_embedded = false;
+	options.evaluate_skinning = false;
+	options.evaluate_caches = false;
+	options.use_blender_pbr_material = true;
+	return options;
+}
+
+static bool HRLFBX_HasString(const ufbx_string& value)
+{
+	return value.data && value.length > 0;
+}
+
+struct HRLFBX_TexturePayload
+{
+	const ufbx_texture* source = nullptr;
+	ufbx_blob blob{};
+};
+
+static HRLFBX_TexturePayload HRLFBX_FindTexturePayload(
+	const HRL_FBXResources* resources,
+	const ufbx_texture* texture,
+	int depth = 0)
+{
+	HRLFBX_TexturePayload result{};
+	if (!resources || !resources->scene || !texture || depth > 16)
+		return result;
+
+	if (texture->content.data && texture->content.size > 0)
+	{
+		result.source = texture;
+		result.blob = texture->content;
+		return result;
+	}
+
+	if (texture->has_file && texture->file_index < resources->scene->texture_files.count)
+	{
+		const ufbx_texture_file& file = resources->scene->texture_files.data[texture->file_index];
+		if (file.content.data && file.content.size > 0)
+		{
+			result.source = texture;
+			result.blob = file.content;
+			return result;
+		}
+	}
+
+	for (size_t i = 0; i < texture->file_textures.count; ++i)
+	{
+		HRLFBX_TexturePayload nested = HRLFBX_FindTexturePayload(
+			resources, texture->file_textures.data[i], depth + 1);
+		if (nested.blob.data && nested.blob.size > 0)
+			return nested;
+	}
+
+	return result;
+}
+
+static const char* HRLFBX_TextureFilename(const ufbx_texture* texture)
+{
+	if (!texture)
+		return "";
+	if (HRLFBX_HasString(texture->filename))
+		return texture->filename.data;
+	if (HRLFBX_HasString(texture->relative_filename))
+		return texture->relative_filename.data;
+	return "";
+}
+
+static const ufbx_material_map* HRLFBX_SelectMap(
+	const ufbx_material_map& primary,
+	const ufbx_material_map& fallback)
+{
+	if (primary.texture && primary.texture_enabled)
+		return &primary;
+	if (primary.has_value)
+		return &primary;
+	if (fallback.texture && fallback.texture_enabled)
+		return &fallback;
+	return &fallback;
+}
+
+static const ufbx_material_map* HRLFBX_SelectTextureMap(
+	const ufbx_material_map& primary,
+	const ufbx_material_map& fallback)
+{
+	if (primary.texture && primary.texture_enabled)
+		return &primary;
+	if (fallback.texture && fallback.texture_enabled)
+		return &fallback;
+	return nullptr;
+}
+
+static glm::vec4 HRLFBX_ReadColor(const ufbx_material_map& map, const glm::vec4& fallback)
+{
+	if (!map.has_value && map.value_components == 0)
+		return fallback;
+
+	switch (map.value_components)
+	{
+	case 1:
+		return glm::vec4((float)map.value_real, (float)map.value_real, (float)map.value_real, 1.f);
+	case 2:
+		return glm::vec4((float)map.value_vec2.x, (float)map.value_vec2.y, 0.f, 1.f);
+	case 3:
+		return glm::vec4(
+			(float)map.value_vec3.x,
+			(float)map.value_vec3.y,
+			(float)map.value_vec3.z,
+			1.f);
+	case 4:
+		return glm::vec4(
+			(float)map.value_vec4.x,
+			(float)map.value_vec4.y,
+			(float)map.value_vec4.z,
+			(float)map.value_vec4.w);
+	default:
+		return fallback;
+	}
+}
+
+static float HRLFBX_ReadScalar(const ufbx_material_map& map, float fallback)
+{
+	if (!map.has_value && map.value_components == 0)
+		return fallback;
+	if (map.value_components == 1)
+		return (float)map.value_real;
+	if (map.value_components == 2)
+		return (float)map.value_vec2.x;
+	if (map.value_components == 3)
+		return (float)map.value_vec3.x;
+	if (map.value_components == 4)
+		return (float)map.value_vec4.x;
+	return fallback;
+}
+
+static HRL_uint HRLFBX_TextureIndex(HRL_FBXResources* resources, const ufbx_texture* texture)
+{
+	if (!resources || !texture)
+		return (HRL_uint)HRL_INVALID_ID;
+
+	auto found = resources->texture_indices.find(texture);
+	if (found != resources->texture_indices.end())
+		return found->second;
+
+	HRL_FBXTextureInfo info{};
+	info.name = HRLFBX_HasString(texture->name) ? texture->name.data : "";
+	info.filename = HRLFBX_TextureFilename(texture);
+	switch (texture->type)
+	{
+	case UFBX_TEXTURE_FILE:       info.type = HRL_FBX_TEXTURE_FILE; break;
+	case UFBX_TEXTURE_LAYERED:    info.type = HRL_FBX_TEXTURE_LAYERED; break;
+	case UFBX_TEXTURE_PROCEDURAL: info.type = HRL_FBX_TEXTURE_PROCEDURAL; break;
+	case UFBX_TEXTURE_SHADER:     info.type = HRL_FBX_TEXTURE_SHADER; break;
+	default:                      info.type = HRL_FBX_TEXTURE_FILE; break;
+	}
+
+	const HRLFBX_TexturePayload payload = HRLFBX_FindTexturePayload(resources, texture);
+	if (payload.blob.data && payload.blob.size > 0)
+	{
+		info.data = (const unsigned char*)payload.blob.data;
+		info.size = payload.blob.size;
+		info.embedded = 1;
+	}
+
+	if (resources->textures.size() >= (size_t)HRL_INVALID_ID)
+		return (HRL_uint)HRL_INVALID_ID;
+
+	const HRL_uint index = (HRL_uint)resources->textures.size();
+	resources->textures.push_back(info);
+	resources->texture_indices.emplace(texture, index);
+	return index;
+}
+
+static void HRLFBX_AssignTextureIndex(
+	HRL_FBXResources* resources,
+	HRL_uint& destination,
+	const ufbx_material_map& primary,
+	const ufbx_material_map& fallback)
+{
+	const ufbx_material_map* map = HRLFBX_SelectTextureMap(primary, fallback);
+	if (!map || !map->texture)
+		return;
+	destination = HRLFBX_TextureIndex(resources, map->texture);
+}
+
+static void HRLFBX_BuildTextureInfo(
+	HRL_FBXResources* resources,
+	const ufbx_texture* texture,
+	HRL_FBXTextureInfo& info)
+{
+	info = {};
+	info.name = texture && HRLFBX_HasString(texture->name) ? texture->name.data : "";
+	info.filename = HRLFBX_TextureFilename(texture);
+	info.type = HRL_FBX_TEXTURE_FILE;
+	if (texture)
+	{
+		switch (texture->type)
+		{
+		case UFBX_TEXTURE_FILE:       info.type = HRL_FBX_TEXTURE_FILE; break;
+		case UFBX_TEXTURE_LAYERED:    info.type = HRL_FBX_TEXTURE_LAYERED; break;
+		case UFBX_TEXTURE_PROCEDURAL: info.type = HRL_FBX_TEXTURE_PROCEDURAL; break;
+		case UFBX_TEXTURE_SHADER:     info.type = HRL_FBX_TEXTURE_SHADER; break;
+		default:                      info.type = HRL_FBX_TEXTURE_FILE; break;
+		}
+	}
+	const HRLFBX_TexturePayload payload = HRLFBX_FindTexturePayload(resources, texture);
+	if (payload.blob.data && payload.blob.size > 0)
+	{
+		info.data = (const unsigned char*)payload.blob.data;
+		info.size = payload.blob.size;
+		info.embedded = 1;
+	}
+}
+
+static void HRLFBX_BuildMaterialInfo(
+	HRL_FBXResources* resources,
+	const ufbx_material* material,
+	HRL_FBXMaterialInfo& info)
+{
+	info = {};
+	for (HRL_uint& index : info.textureIndices)
+		index = (HRL_uint)HRL_INVALID_ID;
+
+	info.name = material && HRLFBX_HasString(material->name) ? material->name.data : "";
+	info.baseColor[0] = 1.f;
+	info.baseColor[1] = 1.f;
+	info.baseColor[2] = 1.f;
+	info.baseColor[3] = 1.f;
+	info.roughness = 0.5f;
+	info.metallic = 0.f;
+	info.specular = 0.5f;
+	info.opacity = 1.f;
+
+	if (!material)
+		return;
+
+	const bool hasPbrBase =
+		(material->pbr.base_color.texture && material->pbr.base_color.texture_enabled) ||
+		material->pbr.base_color.has_value;
+	const ufbx_material_map* baseColor = hasPbrBase
+		? &material->pbr.base_color
+		: &material->fbx.diffuse_color;
+	glm::vec4 color = HRLFBX_ReadColor(*baseColor, glm::vec4(1.f));
+	if (hasPbrBase)
+	{
+		if (material->pbr.base_factor.has_value)
+			color *= HRLFBX_ReadColor(material->pbr.base_factor, glm::vec4(1.f));
+	}
+	else if (material->fbx.diffuse_factor.has_value)
+	{
+		color *= HRLFBX_ReadColor(material->fbx.diffuse_factor, glm::vec4(1.f));
+	}
+
+	info.baseColor[0] = std::clamp(color.r, 0.f, 1.f);
+	info.baseColor[1] = std::clamp(color.g, 0.f, 1.f);
+	info.baseColor[2] = std::clamp(color.b, 0.f, 1.f);
+	info.baseColor[3] = std::clamp(color.a, 0.f, 1.f);
+
+	if (material->pbr.roughness.has_value || material->pbr.roughness.texture)
+		info.roughness = std::clamp(HRLFBX_ReadScalar(material->pbr.roughness, 0.5f), 0.f, 1.f);
+	else if (material->pbr.glossiness.has_value || material->pbr.glossiness.texture)
+		info.roughness = 1.f - std::clamp(HRLFBX_ReadScalar(material->pbr.glossiness, 0.5f), 0.f, 1.f);
+
+	if (material->pbr.metalness.has_value || material->pbr.metalness.texture)
+		info.metallic = std::clamp(HRLFBX_ReadScalar(material->pbr.metalness, 0.f), 0.f, 1.f);
+
+	if (material->pbr.specular_factor.has_value || material->pbr.specular_factor.texture)
+		info.specular = std::clamp(HRLFBX_ReadScalar(material->pbr.specular_factor, 0.5f), 0.f, 1.f);
+	else if (material->fbx.specular_factor.has_value || material->fbx.specular_factor.texture)
+		info.specular = std::clamp(HRLFBX_ReadScalar(material->fbx.specular_factor, 0.5f), 0.f, 1.f);
+
+	// ufbx exposes PBR maps for all shading models, and for legacy Phong/
+	// Lambert materials some of those maps can contain synthesized default
+	// values even when the material does not actually use opacity. Do not treat
+	// such a scalar as authoritative: a synthesized opacity of 0 would make the
+	// entire material disappear in the fragment shader (which discards alpha).
+	const bool pbrOpacityTexture =
+		material->pbr.opacity.texture && material->pbr.opacity.texture_enabled;
+	const bool fbxTransparencyTexture =
+		material->fbx.transparency_factor.texture && material->fbx.transparency_factor.texture_enabled;
+	const bool opacityFeatureEnabled = material->features.opacity.enabled;
+	if (pbrOpacityTexture)
+		info.opacity = std::clamp(HRLFBX_ReadScalar(material->pbr.opacity, 1.f), 0.f, 1.f);
+	else if (fbxTransparencyTexture)
+		info.opacity = 1.f - std::clamp(HRLFBX_ReadScalar(material->fbx.transparency_factor, 0.f), 0.f, 1.f);
+	else if (opacityFeatureEnabled && material->pbr.opacity.has_value)
+		info.opacity = std::clamp(HRLFBX_ReadScalar(material->pbr.opacity, 1.f), 0.f, 1.f);
+	else if (opacityFeatureEnabled && material->fbx.transparency_factor.has_value)
+		info.opacity = 1.f - std::clamp(HRLFBX_ReadScalar(material->fbx.transparency_factor, 0.f), 0.f, 1.f);
+	else
+		info.opacity = 1.f;
+
+	HRLFBX_AssignTextureIndex(resources, info.textureIndices[HRL_FBX_MATERIAL_ALBEDO],
+		material->pbr.base_color, material->fbx.diffuse_color);
+	HRLFBX_AssignTextureIndex(resources, info.textureIndices[HRL_FBX_MATERIAL_NORMAL],
+		material->pbr.normal_map, material->fbx.normal_map);
+	HRLFBX_AssignTextureIndex(resources, info.textureIndices[HRL_FBX_MATERIAL_SPECULAR],
+		material->pbr.specular_color, material->fbx.specular_color);
+	HRLFBX_AssignTextureIndex(resources, info.textureIndices[HRL_FBX_MATERIAL_ROUGHNESS],
+		material->pbr.roughness, material->pbr.roughness);
+	if (info.textureIndices[HRL_FBX_MATERIAL_ROUGHNESS] == (HRL_uint)HRL_INVALID_ID)
+		HRLFBX_AssignTextureIndex(resources, info.textureIndices[HRL_FBX_MATERIAL_ROUGHNESS],
+			material->pbr.glossiness, material->pbr.glossiness);
+	HRLFBX_AssignTextureIndex(resources, info.textureIndices[HRL_FBX_MATERIAL_METALLIC],
+		material->pbr.metalness, material->pbr.metalness);
+	if (material->pbr.opacity.texture && material->pbr.opacity.texture_enabled)
+	{
+		HRLFBX_AssignTextureIndex(resources, info.textureIndices[HRL_FBX_MATERIAL_ALPHA],
+			material->pbr.opacity, material->pbr.opacity);
+	}
+	if (info.textureIndices[HRL_FBX_MATERIAL_ALPHA] == (HRL_uint)HRL_INVALID_ID &&
+		material->fbx.transparency_factor.texture && material->fbx.transparency_factor.texture_enabled)
+	{
+		HRLFBX_AssignTextureIndex(resources, info.textureIndices[HRL_FBX_MATERIAL_ALPHA],
+			material->fbx.transparency_factor, material->fbx.transparency_factor);
+	}
+	if (info.textureIndices[HRL_FBX_MATERIAL_ALPHA] == (HRL_uint)HRL_INVALID_ID &&
+		material->fbx.transparency_color.texture && material->fbx.transparency_color.texture_enabled)
+	{
+		HRLFBX_AssignTextureIndex(resources, info.textureIndices[HRL_FBX_MATERIAL_ALPHA],
+			material->fbx.transparency_color, material->fbx.transparency_color);
+	}
+}
+
+static HRL_id HRLFBX_CreateMaterialFromResource(
+	HRL_FBXResources* resources,
+	size_t materialIndex,
+	HRL_id shaderid)
+{
+	if (!resources || materialIndex >= resources->materials.size())
+		return HRL_INVALID_ID;
+	if (!HRL_IsValidShader(shaderid))
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR,
+			"HRL_CreateMaterialFromFBX: invalid shader ID");
+		return HRL_INVALID_ID;
+	}
+
+	HRL_id materialId = HRL_INVALID_ID;
+	try
+	{
+		const HRL_FBXMaterialInfo& info = resources->materials[materialIndex];
+		materialId = HRL_CreateMaterial(shaderid);
+		if (materialId == HRL_INVALID_ID)
+			return HRL_INVALID_ID;
+
+		HRL_MaterialSetVec3(materialId, "TintColor", info.baseColor[0], info.baseColor[1], info.baseColor[2]);
+		HRL_MaterialSetFloat(materialId, "BaseColorAlpha", info.baseColor[3]);
+		HRL_MaterialSetFloat(materialId, "RoughnessValue", info.roughness);
+		HRL_MaterialSetFloat(materialId, "MetallicValue", info.metallic);
+		HRL_MaterialSetFloat(materialId, "SpecularValue", info.specular);
+		HRL_MaterialSetFloat(materialId, "OpacityValue", info.opacity);
+		HRL_MaterialSetInt(materialId, "RoughnessUseValue", info.textureIndices[HRL_FBX_MATERIAL_ROUGHNESS] == (HRL_uint)HRL_INVALID_ID ? 1 : 0);
+		HRL_MaterialSetInt(materialId, "MetallicUseValue", info.textureIndices[HRL_FBX_MATERIAL_METALLIC] == (HRL_uint)HRL_INVALID_ID ? 1 : 0);
+		HRL_MaterialSetInt(materialId, "SpecularUseValue", info.textureIndices[HRL_FBX_MATERIAL_SPECULAR] == (HRL_uint)HRL_INVALID_ID ? 1 : 0);
+		HRL_MaterialSetInt(materialId, "OpacityUseValue", info.textureIndices[HRL_FBX_MATERIAL_ALPHA] == (HRL_uint)HRL_INVALID_ID ? 1 : 0);
+
+		if (materialIndex < resources->material_sources.size())
+		{
+			const ufbx_material* fbxMaterial = resources->material_sources[materialIndex];
+			if (fbxMaterial)
+			{
+				if (!fbxMaterial->pbr.roughness.texture && fbxMaterial->pbr.glossiness.texture)
+					HRL_MaterialSetInt(materialId, "RoughnessInvert", 1);
+				if (!fbxMaterial->pbr.opacity.texture &&
+					((fbxMaterial->fbx.transparency_factor.texture && fbxMaterial->fbx.transparency_factor.texture_enabled) ||
+					 (fbxMaterial->fbx.transparency_color.texture && fbxMaterial->fbx.transparency_color.texture_enabled)))
+					HRL_MaterialSetInt(materialId, "AlphaInvert", 1);
+			}
+		}
+
+		HRL_Material* materialObject = nullptr;
+		auto materialIt = ctx_.materials.find(materialId);
+		if (materialIt != ctx_.materials.end())
+			materialObject = materialIt->second;
+		if (!materialObject)
+		{
+			SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR,
+				"HRL_CreateMaterialFromFBX: material was not registered");
+			return HRL_INVALID_ID;
+		}
+
+		materialObject->owned_textures_.reserve(
+			materialObject->owned_textures_.size() + HRL_FBX_MATERIAL_TEXTURE_SLOT_COUNT);
+
+		HRL_uint createdTextureIndices[HRL_FBX_MATERIAL_TEXTURE_SLOT_COUNT]{};
+		HRL_id createdTextureIds[HRL_FBX_MATERIAL_TEXTURE_SLOT_COUNT]{};
+		size_t createdTextureCount = 0;
+		static const char* const slots[] = {
+			HRL_T_ALBEDO,
+			HRL_T_NORMAL,
+			HRL_T_SPECULAR,
+			HRL_T_ROUGHNESS,
+			HRL_T_METALLIC,
+			HRL_T_ALPHA
+		};
+
+		for (int slot = 0; slot < (int)HRL_FBX_MATERIAL_TEXTURE_SLOT_COUNT; ++slot)
+		{
+			const HRL_uint textureIndex = info.textureIndices[slot];
+			if (textureIndex == (HRL_uint)HRL_INVALID_ID)
+				continue;
+
+			const HRL_FBXTextureInfo* textureInfo = HRL_GetFBXTexture(resources, textureIndex);
+			if (!textureInfo || !textureInfo->embedded || !textureInfo->data || textureInfo->size == 0)
+				continue;
+
+			HRL_id textureId = HRL_INVALID_ID;
+			for (size_t i = 0; i < createdTextureCount; ++i)
+			{
+				if (createdTextureIndices[i] == textureIndex)
+				{
+					textureId = createdTextureIds[i];
+					break;
+				}
+			}
+
+			if (textureId == HRL_INVALID_ID)
+			{
+				textureId = HRL_CreateTextureFromFBX(resources, textureIndex);
+				if (textureId == HRL_INVALID_ID)
+					continue;
+				createdTextureIndices[createdTextureCount] = textureIndex;
+				createdTextureIds[createdTextureCount] = textureId;
+				++createdTextureCount;
+				materialObject->owned_textures_.push_back(textureId);
+			}
+
+			HRL_MaterialSetTexture(materialId, slots[slot], textureId);
+		}
+
+		return materialId;
+	}
+	catch (const std::bad_alloc&)
+	{
+		if (materialId != HRL_INVALID_ID)
+			HRL_DeleteMaterial(materialId);
+		SetErrorCode(HRL_OUT_OF_MEMORY, HRL_SEVERITY_ERROR,
+			"HRL_CreateMaterialFromFBX: out of memory while creating material resources");
+		return HRL_INVALID_ID;
+	}
+}
+} // anonymous namespace
+
+
+HRL_FBXResources* HRL_LoadFBXResources(const char* _data, size_t _bufferSize)
+{
+	if (!_data || _bufferSize == 0)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR,
+			"HRL_LoadFBXResources: data and buffer size must be valid");
+		return nullptr;
+	}
+
+	ufbx_load_opts options = HRLFBX_MakeResourceLoadOptions();
+	ufbx_error error{};
+	ufbx_scene* scene = ufbx_load_memory(_data, _bufferSize, &options, &error);
+	if (!scene)
+	{
+		std::string detail = "HRL_LoadFBXResources: failed to decode FBX file";
+		if (error.description.data && error.description.data[0] != '\0')
+		{
+			detail += " (";
+			detail += error.description.data;
+			detail += ")";
+		}
+		SetErrorCode(HRL_INVALID_FILE_FORMAT, HRL_SEVERITY_ERROR, detail.c_str());
+		return nullptr;
+	}
+
+	HRL_FBXResources* resources = nullptr;
+	try
+	{
+		resources = new HRL_FBXResources();
+		resources->scene = scene;
+		resources->textures.reserve(scene->textures.count);
+		resources->materials.reserve(scene->materials.count);
+		resources->material_sources.reserve(scene->materials.count);
+
+		for (size_t i = 0; i < scene->textures.count; ++i)
+		{
+			const ufbx_texture* texture = scene->textures.data[i];
+			if (!texture)
+				continue;
+			HRL_FBXTextureInfo info{};
+			HRLFBX_BuildTextureInfo(resources, texture, info);
+			const HRL_uint index = (HRL_uint)resources->textures.size();
+			resources->textures.push_back(info);
+			resources->texture_indices.emplace(texture, index);
+		}
+
+		for (size_t i = 0; i < scene->materials.count; ++i)
+		{
+			const ufbx_material* material = scene->materials.data[i];
+			if (!material)
+				continue;
+			HRL_FBXMaterialInfo info{};
+			HRLFBX_BuildMaterialInfo(resources, material, info);
+			resources->materials.push_back(info);
+			resources->material_sources.push_back(material);
+		}
+	}
+	catch (const std::bad_alloc&)
+	{
+		delete resources;
+		ufbx_free_scene(scene);
+		SetErrorCode(HRL_OUT_OF_MEMORY, HRL_SEVERITY_ERROR,
+			"HRL_LoadFBXResources: out of memory while building resource tables");
+		return nullptr;
+	}
+
+	return resources;
+}
+
+void HRL_FreeFBXResources(HRL_FBXResources* _resources)
+{
+	if (!_resources)
+		return;
+	if (_resources->scene)
+		ufbx_free_scene(_resources->scene);
+	delete _resources;
+}
+
+size_t HRL_GetFBXMaterialCount(const HRL_FBXResources* _resources)
+{
+	return _resources ? _resources->materials.size() : 0;
+}
+
+const HRL_FBXMaterialInfo* HRL_GetFBXMaterial(const HRL_FBXResources* _resources, size_t _index)
+{
+	if (!_resources || _index >= _resources->materials.size())
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_GetFBXMaterial: invalid material index");
+		return nullptr;
+	}
+	return &_resources->materials[_index];
+}
+
+HRL_id HRL_FindFBXMaterial(const HRL_FBXResources* _resources, const char* _name)
+{
+	if (!_resources || !_name)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_FindFBXMaterial: invalid resources or name");
+		return HRL_INVALID_ID;
+	}
+	for (size_t i = 0; i < _resources->materials.size(); ++i)
+	{
+		const char* name = _resources->materials[i].name ? _resources->materials[i].name : "";
+		if (std::strcmp(name, _name) == 0)
+			return (HRL_id)i;
+	}
+	return HRL_INVALID_ID;
+}
+
+size_t HRL_GetFBXTextureCount(const HRL_FBXResources* _resources)
+{
+	return _resources ? _resources->textures.size() : 0;
+}
+
+const HRL_FBXTextureInfo* HRL_GetFBXTexture(const HRL_FBXResources* _resources, size_t _index)
+{
+	if (!_resources || _index >= _resources->textures.size())
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_GetFBXTexture: invalid texture index");
+		return nullptr;
+	}
+	return &_resources->textures[_index];
+}
+
+HRL_id HRL_FindFBXTexture(const HRL_FBXResources* _resources, const char* _name)
+{
+	if (!_resources || !_name)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_FindFBXTexture: invalid resources or name");
+		return HRL_INVALID_ID;
+	}
+	for (size_t i = 0; i < _resources->textures.size(); ++i)
+	{
+		const char* name = _resources->textures[i].name ? _resources->textures[i].name : "";
+		const char* filename = _resources->textures[i].filename ? _resources->textures[i].filename : "";
+		if (std::strcmp(name, _name) == 0 || std::strcmp(filename, _name) == 0)
+			return (HRL_id)i;
+	}
+	return HRL_INVALID_ID;
+}
+
+const HRL_FBXTextureInfo* HRL_GetFBXMaterialTexture(
+	const HRL_FBXResources* _resources,
+	size_t _materialIndex,
+	HRL_EFBXMaterialTextureSlot _slot)
+{
+	if (!_resources || _materialIndex >= _resources->materials.size() ||
+		_slot < HRL_FBX_MATERIAL_ALBEDO || _slot >= HRL_FBX_MATERIAL_TEXTURE_SLOT_COUNT)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_GetFBXMaterialTexture: invalid material or texture slot");
+		return nullptr;
+	}
+	const HRL_uint index = _resources->materials[_materialIndex].textureIndices[(size_t)_slot];
+	if (index == (HRL_uint)HRL_INVALID_ID)
+		return nullptr;
+	return HRL_GetFBXTexture(_resources, index);
+}
+
+HRL_id HRL_CreateTextureFromFBX(const HRL_FBXResources* _resources, size_t _textureIndex)
+{
+	const HRL_FBXTextureInfo* texture = HRL_GetFBXTexture(_resources, _textureIndex);
+	if (!texture)
+		return HRL_INVALID_ID;
+	if (!texture->embedded || !texture->data || texture->size == 0)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR,
+			"HRL_CreateTextureFromFBX: texture has no embedded image data");
+		return HRL_INVALID_ID;
+	}
+	return HRL_CreateTexture(reinterpret_cast<const char*>(texture->data), texture->size);
+}
+
+static HRL_id HRLFBX_SelectAutomaticMaterialShader(const HRL_FBXResources* resources)
+{
+	if (resources && resources->scene)
+	{
+		for (size_t i = 0; i < resources->scene->meshes.count; ++i)
+		{
+			const ufbx_mesh* mesh = resources->scene->meshes.data[i];
+			if (mesh && mesh->skin_deformers.count > 0)
+				return HRL_SKINNED_3D_MESH_SHADER;
+		}
+	}
+	return HRL_MESH_3D_SHADER;
+}
+
+static HRL_id HRLFBX_CreateAutomaticMaterial(
+	const char* _data, size_t _bufferSize, size_t _materialIndex)
+{
+	HRL_FBXResources* resources = HRL_LoadFBXResources(_data, _bufferSize);
+	if (!resources)
+		return HRL_INVALID_ID;
+
+	if (_materialIndex >= HRL_GetFBXMaterialCount(resources))
+	{
+		HRL_FreeFBXResources(resources);
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR,
+			"HRL_CreateMaterialFromFBX: FBX contains no material at the requested index");
+		return HRL_INVALID_ID;
+	}
+
+	const HRL_id shader = HRLFBX_SelectAutomaticMaterialShader(resources);
+	const HRL_id material = HRLFBX_CreateMaterialFromResource(resources, _materialIndex, shader);
+	HRL_FreeFBXResources(resources);
+	return material;
+}
+
+HRL_id HRL_CreateMaterialFromFBX(const char* _data, size_t _bufferSize)
+{
+	return HRLFBX_CreateAutomaticMaterial(_data, _bufferSize, 0);
+}
+
+HRL_id HRL_CreateMaterialFromFBXWithShader(const char* _data, size_t _bufferSize, HRL_id _shaderid)
+{
+	return HRL_CreateMaterialFromFBXIndexedWithShader(
+		_data, _bufferSize, 0, _shaderid);
+}
+
+HRL_id HRL_CreateMaterialFromFBXIndexed(
+	const char* _data, size_t _bufferSize, size_t _materialIndex)
+{
+	return HRLFBX_CreateAutomaticMaterial(_data, _bufferSize, _materialIndex);
+}
+
+HRL_id HRL_CreateMaterialFromFBXIndexedWithShader(
+	const char* _data, size_t _bufferSize, size_t _materialIndex, HRL_id _shaderid)
+{
+	HRL_FBXResources* resources = HRL_LoadFBXResources(_data, _bufferSize);
+	if (!resources)
+		return HRL_INVALID_ID;
+
+	if (_materialIndex >= HRL_GetFBXMaterialCount(resources))
+	{
+		HRL_FreeFBXResources(resources);
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR,
+			"HRL_CreateMaterialFromFBX: FBX contains no material at the requested index");
+		return HRL_INVALID_ID;
+	}
+
+	const HRL_id material = HRLFBX_CreateMaterialFromResource(resources, _materialIndex, _shaderid);
+	HRL_FreeFBXResources(resources);
+	return material;
+}
+
+HRL_id HRL_CreateSkeletalMesh(HRL_id _sceneid, const HRL_SkeletalMeshData* _data)
+{
+	auto sceneIt = ctx_.scenes.find(_sceneid);
+	if (sceneIt == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: invalid scene ID");
+		return HRL_INVALID_ID;
+	}
+	if (!_data || !_data->vertices || _data->vertexCount < 3 || !_data->bones || _data->boneCount == 0 || _data->boneCount > HRL_MAX_SKELETAL_BONES)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: invalid skeletal mesh data");
+		return HRL_INVALID_ID;
+	}
+	if (_data->indexCount > 0 && !_data->indices)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: index count is non-zero but indices are null");
+		return HRL_INVALID_ID;
+	}
+	if (_data->vertexCount > (size_t)std::numeric_limits<HRL_uint>::max())
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: vertex count exceeds HRL_uint index range");
+		return HRL_INVALID_ID;
+	}
+	for (size_t vertexIndex = 0; vertexIndex < _data->vertexCount; ++vertexIndex)
+	{
+		float weightSum = 0.f;
+		for (size_t influence = 0; influence < HRL_SKELETAL_MAX_INFLUENCES; ++influence)
+		{
+			const float weight = _data->vertices[vertexIndex].boneWeights[influence];
+			if (!std::isfinite(weight) || weight < 0.f)
+			{
+				SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: bone weights must be finite and non-negative");
+				return HRL_INVALID_ID;
+			}
+			if (weight > 0.f && _data->vertices[vertexIndex].boneIndices[influence] >= _data->boneCount)
+			{
+				SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: bone index is outside the skeleton");
+				return HRL_INVALID_ID;
+			}
+			weightSum += weight;
+		}
+		if (!(weightSum > 0.f) || !std::isfinite(weightSum))
+		{
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: every vertex must have at least one positive bone weight");
+			return HRL_INVALID_ID;
+		}
+	}
+	for (size_t i = 0; i < _data->indexCount; ++i)
+	{
+		if ((size_t)_data->indices[i] >= _data->vertexCount)
+		{
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: index references a vertex outside the vertex array");
+			return HRL_INVALID_ID;
+		}
+	}
+	if (_data->indexCount > 0 && (_data->indexCount % 3u) != 0)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: index count must be a multiple of 3");
+		return HRL_INVALID_ID;
+	}
+
+	std::vector<HRL_uint> generatedIndices;
+	const HRL_uint* indices = _data->indices;
+	if (_data->indexCount == 0)
+	{
+		if ((_data->vertexCount % 3u) != 0)
+		{
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: non-indexed vertex count must be a multiple of 3");
+			return HRL_INVALID_ID;
+		}
+		generatedIndices.resize(_data->vertexCount);
+		for (size_t i = 0; i < generatedIndices.size(); ++i)
+			generatedIndices[i] = (HRL_uint)i;
+		indices = generatedIndices.data();
+	}
+
+	HRL_id newId = GenerateHRL_ID();
+	if (!g_Backend.RHI_CreateSkeletalMesh ||
+		g_Backend.RHI_CreateSkeletalMesh(newId, _data->vertices, _data->vertexCount, indices,
+			_data->indexCount > 0 ? _data->indexCount : generatedIndices.size(), (HRL_uint)_data->boneCount) != HRL_TRUE)
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: backend failed to create skeletal mesh");
+		return HRL_INVALID_ID;
+	}
+
+	std::unique_ptr<HRL_SkeletalMesh> mesh(new (std::nothrow) HRL_SkeletalMesh());
+	if (!mesh)
+	{
+		g_Backend.RHI_DeleteMesh(newId);
+		SetErrorCode(HRL_OUT_OF_MEMORY, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: out of memory");
+		return HRL_INVALID_ID;
+	}
+	mesh->scene_ = _sceneid;
+	mesh->type_ = HRL_3D_SKELETAL_MESH;
+	bool hasGeometryToWorld = false;
+	for (int i = 0; i < 16; ++i)
+		if (std::isfinite(_data->geometryToWorldMatrix[i]) && std::fabs(_data->geometryToWorldMatrix[i]) > 0.f) { hasGeometryToWorld = true; break; }
+	mesh->fbx_geometry_to_world_ = hasGeometryToWorld
+		? HRLSkeletal_ArrayToGLM(_data->geometryToWorldMatrix)
+		: glm::mat4(1.f);
+	mesh->triangle_count_ = (_data->indexCount > 0 ? _data->indexCount : generatedIndices.size()) / 3u;
+	mesh->vertices_.assign(_data->vertices, _data->vertices + _data->vertexCount);
+	mesh->indices_.assign(indices, indices + (_data->indexCount > 0 ? _data->indexCount : generatedIndices.size()));
+	mesh->bones_.resize(_data->boneCount);
+	for (size_t i = 0; i < _data->boneCount; ++i)
+	{
+		mesh->bones_[i].public_ = _data->bones[i];
+		mesh->bones_[i].name_storage_ = _data->bones[i].name ? _data->bones[i].name : "Bone";
+		mesh->bones_[i].public_.parentIndex = _data->bones[i].parentIndex < _data->boneCount ? _data->bones[i].parentIndex : HRL_INVALID_ID;
+		for (int j = 0; j < 16; ++j)
+			mesh->bones_[i].public_.inverseBindMatrix[j] = _data->bones[i].inverseBindMatrix[j];
+		mesh->bones_[i].bind_local_ = _data->bones[i].bindTransform;
+		glm::mat4 inverseBind(1.0f);
+		for (int col = 0; col < 4; ++col)
+			for (int row = 0; row < 4; ++row)
+				inverseBind[col][row] = mesh->bones_[i].public_.inverseBindMatrix[col * 4 + row];
+		mesh->bones_[i].inverse_bind_ = inverseBind;
+		mesh->bones_[i].bind_world_ = HRLSkeletal_ArrayToGLM(_data->bones[i].bindWorldMatrix);
+	}
+	// Bind world matrices from the importer are exact; reconstruct only for legacy manually-created data.
+	{
+		const size_t boneCount = mesh->bones_.size();
+		std::vector<unsigned char> built(boneCount, 0);
+		std::function<glm::mat4(size_t)> buildBone = [&](size_t boneIndex) -> glm::mat4
+		{
+			if (built[boneIndex])
+				return mesh->bones_[boneIndex].bind_world_;
+			glm::mat4 parentWorld(1.f);
+			const size_t parent = mesh->bones_[boneIndex].public_.parentIndex;
+			if (parent < boneCount && parent != boneIndex)
+				parentWorld = buildBone(parent);
+			mesh->bones_[boneIndex].bind_world_ = parentWorld * HRLSkeletal_TransformToMatrix(mesh->bones_[boneIndex].bind_local_);
+			built[boneIndex] = 1;
+			return mesh->bones_[boneIndex].bind_world_;
+		};
+		for (size_t i = 0; i < boneCount; ++i)
+		{
+			bool hasBindWorld = false;
+			for (int e = 0; e < 16; ++e)
+				if (mesh->bones_[i].public_.bindWorldMatrix[e] != 0.f) { hasBindWorld = true; break; }
+			if (!hasBindWorld)
+				buildBone(i);
+		}
+	}
+
+	// The baked animations are copied before public pointers are refreshed.
+	mesh->animations_.resize(_data->animationCount);
+	for (size_t i = 0; i < _data->animationCount; ++i)
+	{
+		mesh->animations_[i].public_ = _data->animations[i];
+		mesh->animations_[i].name_storage_ = _data->animations[i].name ? _data->animations[i].name : "Animation";
+		if (_data->boneCount != 0 && _data->animations[i].frameCount > std::numeric_limits<size_t>::max() / _data->boneCount)
+		{
+			g_Backend.RHI_DeleteMesh(newId);
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: animation frame data is too large");
+			return HRL_INVALID_ID;
+		}
+		const size_t valueCount = _data->animations[i].frameCount * _data->boneCount;
+		if (valueCount > 0 && !_data->animations[i].frames)
+		{
+			g_Backend.RHI_DeleteMesh(newId);
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: animation has no frame data");
+			return HRL_INVALID_ID;
+		}
+		if (valueCount > 0)
+			mesh->animations_[i].frames_.assign(_data->animations[i].frames, _data->animations[i].frames + valueCount);
+		else
+			mesh->animations_[i].frames_.clear();
+		if (valueCount > 0 && _data->animations[i].poseMatrices)
+			mesh->animations_[i].pose_matrices_storage_.assign(_data->animations[i].poseMatrices, _data->animations[i].poseMatrices + valueCount * 16u);
+		else
+			mesh->animations_[i].pose_matrices_storage_.clear();
+	}
+
+	for (auto& animation : mesh->animations_)
+		HRLSkeletal_BuildPoseFramesForAnimation(mesh.get(), animation);
+
+	mesh->RefreshPublicPointers();
+	mesh->bone_matrices_.resize(mesh->bones_.size(), glm::mat4(1.f));
+	HRLSkeletal_UpdatePose(mesh.get());
+
+	glm::vec3 minPoint(std::numeric_limits<float>::max());
+	glm::vec3 maxPoint(std::numeric_limits<float>::lowest());
+	for (const auto& vertex : mesh->vertices_)
+	{
+		const glm::vec4 localPosition(vertex.vertex.position[0], vertex.vertex.position[1], vertex.vertex.position[2], 1.f);
+		glm::vec4 skinnedPosition(0.f);
+		float weightSum = 0.f;
+		for (size_t influence = 0; influence < HRL_SKELETAL_MAX_INFLUENCES; ++influence)
+		{
+			const float weight = vertex.boneWeights[influence];
+			if (!(weight > 0.f)) continue;
+			const size_t boneIndex = (size_t)vertex.boneIndices[influence];
+			if (boneIndex >= mesh->bone_matrices_.size()) continue;
+			skinnedPosition += mesh->bone_matrices_[boneIndex] * localPosition * weight;
+			weightSum += weight;
+		}
+		if (!(weightSum > 0.f))
+			skinnedPosition = localPosition;
+		else if (std::abs(weightSum - 1.f) > 1e-5f)
+			skinnedPosition /= weightSum;
+		const glm::vec3 p = glm::vec3(skinnedPosition);
+		if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z))
+		{
+			minPoint = glm::min(minPoint, p);
+			maxPoint = glm::max(maxPoint, p);
+		}
+	}
+	if (!std::isfinite(minPoint.x) || !std::isfinite(maxPoint.x))
+	{
+		minPoint = glm::vec3(-1.f);
+		maxPoint = glm::vec3(1.f);
+	}
+	mesh->bounds_center_ = (minPoint + maxPoint) * 0.5f;
+	float radius2 = 0.f;
+	for (const auto& vertex : mesh->vertices_)
+	{
+		const glm::vec4 localPosition(vertex.vertex.position[0], vertex.vertex.position[1], vertex.vertex.position[2], 1.f);
+		glm::vec4 skinnedPosition(0.f);
+		float weightSum = 0.f;
+		for (size_t influence = 0; influence < HRL_SKELETAL_MAX_INFLUENCES; ++influence)
+		{
+			const float weight = vertex.boneWeights[influence];
+			if (!(weight > 0.f)) continue;
+			const size_t boneIndex = (size_t)vertex.boneIndices[influence];
+			if (boneIndex >= mesh->bone_matrices_.size()) continue;
+			skinnedPosition += mesh->bone_matrices_[boneIndex] * localPosition * weight;
+			weightSum += weight;
+		}
+		if (!(weightSum > 0.f)) skinnedPosition = localPosition;
+		else if (std::abs(weightSum - 1.f) > 1e-5f) skinnedPosition /= weightSum;
+		const glm::vec3 p = glm::vec3(skinnedPosition);
+		if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z))
+			radius2 = std::max(radius2, glm::dot(p - mesh->bounds_center_, p - mesh->bounds_center_));
+	}
+	mesh->bounds_radius_ = std::sqrt(radius2);
+
+	HRL_SkeletalMesh* rawMesh = mesh.release();
+	sceneIt->second->meshes.emplace(newId, rawMesh);
+	sceneIt->second->shadows_dirty = true;
+	ctx_.meshes.emplace(newId, rawMesh);
+	return newId;
+}
+
+HRL_uint HRL_GetSkeletalBoneCount(HRL_id _meshid)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_GetSkeletalBoneCount: invalid skeletal mesh ID");
+		return 0;
+	}
+	return (HRL_uint)static_cast<HRL_SkeletalMesh*>(it->second)->bones_.size();
+}
+
+const HRL_SkeletalBone* HRL_GetSkeletalBone(HRL_id _meshid, HRL_uint _index)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_GetSkeletalBone: invalid skeletal mesh ID");
+		return nullptr;
+	}
+	auto* mesh = static_cast<HRL_SkeletalMesh*>(it->second);
+	if (_index >= mesh->bones_.size())
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_GetSkeletalBone: invalid bone index");
+		return nullptr;
+	}
+	return &mesh->bones_[_index].public_;
+}
+
+HRL_uint HRL_FindSkeletalBone(HRL_id _meshid, const char* _name)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH || !_name)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_FindSkeletalBone: invalid mesh or bone name");
+		return HRL_INVALID_ID;
+	}
+	auto* mesh = static_cast<HRL_SkeletalMesh*>(it->second);
+	for (size_t i = 0; i < mesh->bones_.size(); ++i)
+		if (mesh->bones_[i].name_storage_ == _name)
+			return (HRL_uint)i;
+	return HRL_INVALID_ID;
+}
+
+HRL_uint HRL_GetSkeletalAnimationCount(HRL_id _meshid)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_GetSkeletalAnimationCount: invalid skeletal mesh ID");
+		return 0;
+	}
+	return (HRL_uint)static_cast<HRL_SkeletalMesh*>(it->second)->animations_.size();
+}
+
+const HRL_SkeletalAnimation* HRL_GetSkeletalAnimation(HRL_id _meshid, HRL_uint _index)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_GetSkeletalAnimation: invalid skeletal mesh ID");
+		return nullptr;
+	}
+	auto* mesh = static_cast<HRL_SkeletalMesh*>(it->second);
+	if (_index >= mesh->animations_.size())
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_GetSkeletalAnimation: invalid animation index");
+		return nullptr;
+	}
+	return &mesh->animations_[_index].public_;
+}
+
+HRL_uint HRL_FindSkeletalAnimation(HRL_id _meshid, const char* _name)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH || !_name)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_FindSkeletalAnimation: invalid mesh or animation name");
+		return HRL_INVALID_ID;
+	}
+	auto* mesh = static_cast<HRL_SkeletalMesh*>(it->second);
+	for (size_t i = 0; i < mesh->animations_.size(); ++i)
+		if (mesh->animations_[i].name_storage_ == _name)
+			return (HRL_uint)i;
+	return HRL_INVALID_ID;
+}
+
+void HRL_PlaySkeletalAnimation(HRL_id _meshid, HRL_uint _animation)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_PlaySkeletalAnimation: invalid skeletal mesh ID");
+		return;
+	}
+	auto* mesh = static_cast<HRL_SkeletalMesh*>(it->second);
+	if (_animation >= mesh->animations_.size())
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_PlaySkeletalAnimation: invalid animation index");
+		return;
+	}
+	mesh->current_animation_ = (int)_animation;
+	mesh->animation_time_ = 0.f;
+	mesh->animation_playing_ = true;
+	HRLSkeletal_UpdatePose(mesh);
+}
+
+void HRL_StopSkeletalAnimation(HRL_id _meshid)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_StopSkeletalAnimation: invalid skeletal mesh ID");
+		return;
+	}
+	static_cast<HRL_SkeletalMesh*>(it->second)->animation_playing_ = false;
+}
+
+void HRL_SetSkeletalAnimationTime(HRL_id _meshid, float _time)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetSkeletalAnimationTime: invalid skeletal mesh ID");
+		return;
+	}
+	if (!std::isfinite(_time))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetSkeletalAnimationTime: time must be finite");
+		return;
+	}
+	auto* mesh = static_cast<HRL_SkeletalMesh*>(it->second);
+	if (mesh->current_animation_ < 0 || (size_t)mesh->current_animation_ >= mesh->animations_.size())
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetSkeletalAnimationTime: no animation is selected");
+		return;
+	}
+	const float duration = std::max(mesh->animations_[(size_t)mesh->current_animation_].public_.duration, 0.f);
+	if (mesh->animation_loop_ && duration > 0.f)
+	{
+		float wrapped = std::fmod(_time, duration);
+		if (wrapped < 0.f) wrapped += duration;
+		mesh->animation_time_ = wrapped;
+	}
+	else
+		mesh->animation_time_ = std::clamp(_time, 0.f, duration);
+	HRLSkeletal_UpdatePose(mesh);
+}
+
+void HRL_SetSkeletalAnimationSpeed(HRL_id _meshid, float _speed)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetSkeletalAnimationSpeed: invalid skeletal mesh ID");
+		return;
+	}
+	if (!std::isfinite(_speed))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetSkeletalAnimationSpeed: speed must be finite");
+		return;
+	}
+	static_cast<HRL_SkeletalMesh*>(it->second)->animation_speed_ = _speed;
+}
+
+void HRL_SetSkeletalAnimationLoop(HRL_id _meshid, int _loop)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetSkeletalAnimationLoop: invalid skeletal mesh ID");
+		return;
+	}
+	static_cast<HRL_SkeletalMesh*>(it->second)->animation_loop_ = _loop != HRL_FALSE;
+}
+
+int HRL_GetCurrentSkeletalAnimation(HRL_id _meshid)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_GetCurrentSkeletalAnimation: invalid skeletal mesh ID");
+		return -1;
+	}
+	return static_cast<HRL_SkeletalMesh*>(it->second)->current_animation_;
+}
+
+float HRL_GetSkeletalAnimationTime(HRL_id _meshid)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_GetSkeletalAnimationTime: invalid skeletal mesh ID");
+		return 0.f;
+	}
+	return static_cast<HRL_SkeletalMesh*>(it->second)->animation_time_;
+}
+
+int HRL_IsSkeletalAnimationPlaying(HRL_id _meshid)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end() || !it->second || it->second->type_ != HRL_3D_SKELETAL_MESH)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_IsSkeletalAnimationPlaying: invalid skeletal mesh ID");
+		return HRL_FALSE;
+	}
+	return static_cast<HRL_SkeletalMesh*>(it->second)->animation_playing_ ? HRL_TRUE : HRL_FALSE;
+}
+
+void HRL_UpdateSkeletalAnimations(float _deltaSeconds)
+{
+	if (!std::isfinite(_deltaSeconds) || _deltaSeconds < 0.f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_UpdateSkeletalAnimations: delta seconds must be finite and non-negative");
+		return;
+	}
+	for (const auto& [id, baseMesh] : ctx_.meshes)
+	{
+		(void)id;
+		if (!baseMesh || baseMesh->type_ != HRL_3D_SKELETAL_MESH)
+			continue;
+		auto* mesh = static_cast<HRL_SkeletalMesh*>(baseMesh);
+		if (!mesh->animation_playing_ || mesh->current_animation_ < 0 || (size_t)mesh->current_animation_ >= mesh->animations_.size())
+			continue;
+		const float duration = std::max(mesh->animations_[(size_t)mesh->current_animation_].public_.duration, 0.f);
+		if (duration <= 0.f)
+		{
+			mesh->animation_time_ = 0.f;
+			mesh->animation_playing_ = false;
+			HRLSkeletal_UpdatePose(mesh);
+			continue;
+		}
+		mesh->animation_time_ += _deltaSeconds * mesh->animation_speed_;
+		if (mesh->animation_loop_)
+		{
+			mesh->animation_time_ = std::fmod(mesh->animation_time_, duration);
+			if (mesh->animation_time_ < 0.f) mesh->animation_time_ += duration;
+		}
+		else if (mesh->animation_time_ >= duration)
+		{
+			mesh->animation_time_ = duration;
+			mesh->animation_playing_ = false;
+		}
+		else if (mesh->animation_time_ <= 0.f)
+		{
+			mesh->animation_time_ = 0.f;
+			if (mesh->animation_speed_ < 0.f)
+				mesh->animation_playing_ = false;
+		}
+		const bool poseChanged = HRLSkeletal_UpdatePose(mesh);
+		if (poseChanged)
+		{
+			auto sceneIt = ctx_.scenes.find(mesh->scene_);
+			if (sceneIt != ctx_.scenes.end() && sceneIt->second)
+				sceneIt->second->shadows_dirty = true;
+		}
+	}
 }
 
 HRL_id HRL_CreateMesh(HRL_id _sceneid, HRL_EMeshType _type, const float *_vertices)

@@ -5,6 +5,7 @@
 
 #include <map>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -72,6 +73,53 @@ struct HRL_Mesh {
   float region_[4] = {0.f, 0.f, 1.f, 1.f};
 };
 
+struct HRL_SkeletalBoneInternal {
+  HRL_SkeletalBone public_;
+  std::string name_storage_;
+  HRL_SkeletalBoneTransform bind_local_{};
+  glm::mat4 inverse_bind_{1.f};
+  glm::mat4 bind_world_{1.f};
+};
+
+struct HRL_SkeletalAnimationInternal {
+  HRL_SkeletalAnimation public_{};
+  std::string name_storage_;
+  std::vector<HRL_SkeletalBoneTransform> frames_;
+  std::vector<glm::mat4> pose_frames_; // Final bone skin matrices sampled from ufbx evaluation.
+  std::vector<float> pose_matrices_storage_; // Public poseMatrices backing storage.
+};
+
+struct HRL_SkeletalMesh final : HRL_Mesh {
+  std::vector<HRL_SkeletalVertex> vertices_;
+  std::vector<HRL_uint> indices_;
+  std::vector<HRL_SkeletalBoneInternal> bones_;
+  std::vector<HRL_SkeletalAnimationInternal> animations_;
+  std::vector<glm::mat4> bone_matrices_;
+
+  int current_animation_ = -1;
+  float animation_time_ = 0.f;
+  float animation_speed_ = 1.f;
+  bool animation_loop_ = true;
+  bool animation_playing_ = false;
+  uint64_t pose_serial_ = 1;
+
+  // Geometry transform from the imported FBX mesh node. Kept separate from
+  // the user-controlled HRL object transform and applied in the renderer
+  // model matrix so the skin matrices can remain mesh-local.
+  glm::mat4 fbx_geometry_to_world_{1.f};
+
+  void RefreshPublicPointers() {
+    for (auto &bone : bones_) {
+      bone.public_.name = bone.name_storage_.c_str();
+    }
+    for (auto &anim : animations_) {
+      anim.public_.name = anim.name_storage_.c_str();
+      anim.public_.frames = anim.frames_.empty() ? nullptr : anim.frames_.data();
+      anim.public_.poseMatrices = anim.pose_matrices_storage_.empty() ? nullptr : anim.pose_matrices_storage_.data();
+    }
+  }
+};
+
 //LIGHT
 typedef struct {
   HRL_id scene_ = HRL_INVALID_ID;
@@ -113,6 +161,10 @@ typedef struct {
   std::unordered_map<std::string, glm::vec2> vec2Params_;
   std::unordered_map<std::string, glm::vec3> vec3Params_;
   std::unordered_map<std::string, glm::vec4> vec4Params_;
+
+  // Textures created internally by HRL_CreateMaterialFromFBX*. Manual
+  // HRL_MaterialSetTexture() bindings remain non-owning for compatibility.
+  std::vector<HRL_id> owned_textures_;
 }HRL_Material;
 
 //CAMERA
@@ -228,6 +280,10 @@ typedef struct {
 
   //Effects
   hrl_fog_t fog;
+
+  // Global illumination. Opt-in only; default keeps the existing renderer untouched.
+  bool global_illumination_enabled = false;
+  HRL_EGlobalIlluminationMethod global_illumination_method = HRL_GI_SSGI;
 
   // Shadow maps are static until geometry or a shadow-relevant light changes.
   bool shadows_dirty = true;

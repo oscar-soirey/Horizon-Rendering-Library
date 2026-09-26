@@ -34,6 +34,7 @@ typedef struct {
 
 	//Mesh GPU resources
 	int(*RHI_CreateMesh)(HRL_id id, const HRL_Vertex3D* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count);
+	int(*RHI_CreateSkeletalMesh)(HRL_id id, const HRL_SkeletalVertex* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count, HRL_uint bone_count);
 	int(*RHI_CreateMeshLOD)(HRL_id id, HRL_uint level, const HRL_Vertex3D* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count);
 	void(*RHI_DeleteMeshLODs)(HRL_id id);
 	int(*RHI_CreateSpriteMesh)(HRL_id id);
@@ -72,6 +73,10 @@ typedef struct {
 	//Post Process//
 	void(*RHI_CreatePostProcess)(HRL_id material, int priority);
 	void(*RHI_DeletePostProcess)(HRL_id post);
+
+	//Global illumination support queries//
+	int(*RHI_IsGlobalIlluminationMethodSupported)(int method);
+	uint32_t(*RHI_GetGlobalIlluminationSupportedMethods)();
 
 	//Effects//
 	void(*RHI_FogPropertyChanged)(HRL_id scene, hrl_fog_t* fog);

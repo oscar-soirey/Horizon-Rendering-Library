@@ -106,6 +106,7 @@ add_library(hrl STATIC
         src/backend/opengl33/gl33_renderer.cpp
         src/backend/opengl33/gl33_shader.cpp
         src/backend/opengl33/gl33_texture.cpp
+        src/backend/opengl33/gi.cpp
 )
 
 add_library(hrldll SHARED
@@ -127,6 +128,7 @@ add_library(hrldll SHARED
         src/backend/opengl33/gl33_renderer.cpp
         src/backend/opengl33/gl33_shader.cpp
         src/backend/opengl33/gl33_texture.cpp
+	src/backend/opengl33/gi.cpp
 )
 
 #compile dll declspec export

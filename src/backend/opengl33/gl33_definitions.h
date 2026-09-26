@@ -44,14 +44,16 @@ static_assert(sizeof(GL_Light) == 144, "GL_Light must match the std140 Light lay
 
 typedef struct {
 	GLuint fbo;
-	//contains scene texture, brightness texture and color picking texture
-	GLuint textures[3]{};
+	// Scene color, bloom, object picking, and GI G-buffer attachments.
+	// textures[3] = linear diffuse albedo, textures[4] = world-space normal.
+	GLuint textures[5]{};
 	GLuint depth_rbo = 0;
 
 	// Optional multisample render target. The regular fbo/textures remain the
 	// single-sample resolve target used by post-processing and presentation.
 	GLuint msaa_fbo = 0;
-	GLuint msaa_textures[3]{};
+	// MSAA counterparts for the five scene color attachments.
+	GLuint msaa_textures[5]{};
 	GLuint msaa_depth_rbo = 0;
 	int msaa_samples = 1;
 

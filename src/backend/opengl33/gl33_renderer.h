@@ -19,6 +19,7 @@ void GL33_DrawScene(hrl_scene_t* scene, HRL_id scene_id);
 
 //Meshes//
 int GL33_CreateMesh(HRL_id id, const HRL_Vertex3D* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count);
+int GL33_CreateSkeletalMesh(HRL_id id, const HRL_SkeletalVertex* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count, HRL_uint bone_count);
 int GL33_CreateMeshLOD(HRL_id id, HRL_uint level, const HRL_Vertex3D* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count);
 void GL33_DeleteMeshLODs(HRL_id id);
 int GL33_CreateSpriteMesh(HRL_id id);
@@ -71,6 +72,9 @@ void GL33_GetModelMatrix(HRL_Mesh* mesh, float* aa);
 void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness);
 
 //Requests//
+int GL33_IsGlobalIlluminationMethodSupported(int method);
+uint32_t GL33_GetGlobalIlluminationSupportedMethods();
+
 int GL33_IsValidTexture(HRL_id tex);
 int GL33_IsValidShader(HRL_id shader);
 

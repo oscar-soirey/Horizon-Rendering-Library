@@ -84,6 +84,12 @@ int GL33_Shader::GL33_Create(const char* _vertContent, size_t _vertSize, const c
     glUniformBlockBinding(id, uboIndex, 0);
   }
 
+  GLuint boneBlockIndex = glGetUniformBlockIndex(id, "BoneBlock");
+  if (boneBlockIndex != GL_INVALID_INDEX)
+  {
+    glUniformBlockBinding(id, boneBlockIndex, 1);
+  }
+
   return 0;
 }
 

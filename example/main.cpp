@@ -72,9 +72,9 @@ Vec3 GetForwardVector(float pitchDeg, float yawDeg)
   float p = glm::radians(pitchDeg);
   float y = glm::radians(yawDeg);
   return {
-    (float)(-cosf(y) * cosf(p)),
-    (float)( sinf(p)),
-    (float)( sinf(y) * cosf(p))
+    (float)(cosf(y) * cosf(p)),
+    (float)(sinf(p)),
+    (float)(sinf(y) * cosf(p))
   };
 }
 
@@ -174,11 +174,7 @@ int main()
   HRL_Init(HRL_OPENGL_33);
 
   // GLFW WINDOW //
-
-  // on init glfw
   glfwInit();
-
-  // on crée la fenetre
   GLFWwindow* win = glfwCreateWindow(1280, 720, "HRL 3D Example", nullptr, nullptr);
 
   // important! : le contexte doit etre actif avant HRL_InitContext
@@ -186,43 +182,23 @@ int main()
   glfwSetFramebufferSizeCallback(win, framebuffer_size_callback);
 
   // cacher le curseur
-  // glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+  glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
   // verouiller la souris au centre
-  // glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+  glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
   // désactiver la v-sync
   glfwSwapInterval(0);
 
   HRL_RegisterErrorCallback(ErrorCallback);
 
-  // on appelle initcontext avec le loader glfw
+  // initcontext avec le loader GLFW
   HRL_InitContext(1280, 720, (void*)glfwGetProcAddress);
 
   HRL_SetDebugLineThickness(3.f);
+  HRL_SetAntialiasingMode(HRL_ANTIALIASING_4X);
 
-  size_t sky_size;
-  std::string sky_data = example::OpenFile("skydome.jpg", &sky_size);
-  HRL_id sky_tex = HRL_CreateTexture(sky_data.c_str(), sky_size);
-
-  // Create scene, camera & viewport
+  // Create scene, camera & viewports
   HRL_id scene = HRL_CreateScene(true);
-  HRL_SetSkySphereEnabled(scene, HRL_TRUE);
-  HRL_SetSkySphereColors(
-    scene,
-    0.05f, 0.15f, 0.50f,
-    0.55f, 0.75f, 1.00f,
-    0.03f, 0.04f, 0.08f
-  );
-  HRL_SetSkySphereTexture(scene, sky_tex);
-
-
-  HRL_SetEnvironmentMap(scene, sky_tex);
-  HRL_SetEnvironmentMappingEnabled(scene, HRL_TRUE);
-
-
-  HRL_SetAntialiasingMode(HRL_ANTIALIASING_8X);
-
-
   HRL_id camera = HRL_CreateCamera(scene, HRL_PERSPECTIVE);
   HRL_SetCameraPerspectiveFov(camera, 90.f);
   HRL_id viewport = HRL_CreateViewport(scene, camera, 0.f, 0.f, 1.f, 1.f);
@@ -231,16 +207,70 @@ int main()
   // Initialiser explicitement la caméra avant le premier rendu.
   HRL_SetCameraLocation(camera, camX, camY, camZ);
   HRL_SetCameraRotation(camera, pitch, yaw, 0.f);
+  
+  
 
-  // ───────────────────────────────────────────────────────────────────────────
-  //  Chargement FBX : conversion vers HRL_Vertex3D puis création d'un mesh HRL
-  //  Placez "model.fbx" à côté de l'exécutable de l'exemple.
-  // ───────────────────────────────────────────────────────────────────────────
+
+  std::cout << HRL_GetGlobalIlluminationSupportedMethods() << std::endl;
+  HRL_SetGlobalIlluminationEnabled(scene, HRL_TRUE);
+  HRL_SetGlobalIlluminationMethod(scene, HRL_GI_SSGI);
+
+  printf("Albedo G-buffer: %u\n",
+    HRL_GL_GetSceneAlbedoBufferGL_ID(scene));
+
+  printf("Normal G-buffer: %u\n",
+    HRL_GL_GetSceneNormalBufferGL_ID(scene));
+
+  // ---------------------------------------------------------------------------
+  // Sky sphere image + environment mapping
+  // sky_equirectangular.png est une texture equirectangulaire 2:1.
+  // ---------------------------------------------------------------------------
+  size_t skySize = 0;
+  std::string skyData = example::OpenFile("skydome.jpg", &skySize);
+  if (skySize == 0)
+    skyData = example::OpenFile("skydome.jpg", &skySize);
+  HRL_id skyTexture = HRL_INVALID_ID;
+  if (skySize > 0)
+    skyTexture = HRL_CreateTexture(skyData.data(), skySize);
+  if (skyTexture != HRL_INVALID_ID)
+  {
+    HRL_SetTextureMinFilter(skyTexture, HRL_FILTER_TRILINEAR);
+    HRL_SetTextureMagFilter(skyTexture, HRL_FILTER_LINEAR);
+    HRL_SetSkySphereEnabled(scene, HRL_TRUE);
+    HRL_SetSkySphereTexture(scene, skyTexture);
+
+    HRL_SetEnvironmentMap(scene, skyTexture);
+    HRL_SetEnvironmentMappingEnabled(scene, HRL_TRUE);
+  }
+  else
+  {
+    // Si l'image n'est pas disponible, garder le ciel procédural.
+    HRL_SetSkySphereEnabled(scene, HRL_TRUE);
+    HRL_SetSkySphereColors(
+      scene,
+      0.06f, 0.18f, 0.55f,
+      0.55f, 0.72f, 0.95f,
+      0.08f, 0.10f, 0.16f
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // FBX -> HRL_Vertex3D -> HRL_Mesh
+  // ---------------------------------------------------------------------------
+  size_t modelSize = 0;
+  std::string modelData = example::OpenFile("model.fbx", &modelSize);
+  if (modelSize == 0)
+  {
+    printf("Impossible de lire model.fbx\n");
+    HRL_Shutdown();
+    glfwDestroyWindow(win);
+    glfwTerminate();
+    return 1;
+  }
 
   size_t vertexCount = 0;
-  size_t model_size;
-  std::string model_data = example::OpenFile("model.fbx", &model_size);
-  HRL_Vertex3D* vertices = HRL_GetVertex3DFromFBX(model_data.c_str(), model_size, &vertexCount);
+  HRL_Vertex3D* vertices = HRL_GetVertex3DFromFBX(
+    modelData.data(), modelSize, &vertexCount);
 
   if (!vertices)
   {
@@ -251,8 +281,10 @@ int main()
     return 1;
   }
 
-  HRL_id modelMaterial = HRL_CreateMaterial(HRL_MESH_3D_SHADER);
-  //HRL_MaterialSetVec3(modelMaterial, "TintColor", 0.8f, 0.8f, 0.8f);
+  //HRL_id modelMaterial = HRL_CreateMaterial(HRL_MESH_3D_SHADER);
+  HRL_id modelMaterial = HRL_CreateMaterialFromFBX(modelData.c_str(), modelSize);
+  HRL_MaterialSetVec3(modelMaterial, "TintColor", 0.8f, 0.8f, 0.8f);
+  HRL_MaterialSetFloat(modelMaterial, "EnvironmentStrength", 0.45f);
 
   HRL_id model = HRL_CreateMesh3D(
     scene,
@@ -272,62 +304,149 @@ int main()
     return 1;
   }
 
+  printf("Static model camera distance: %.3f\n", HRL_GetMeshCameraDistance(model));
+
+
+
+  // ---------------------------------------------------------------------------
+  // Optional skeletal FBX. HRL receives the FBX bytes in memory, like every
+  // other resource. Put skeletal.fbx next to the executable to test it.
+  // ---------------------------------------------------------------------------
+  HRL_id skeletalModel = HRL_INVALID_ID;
+  size_t skeletalSize = 0;
+  std::string skeletalData = example::OpenFile("skeletal.fbx", &skeletalSize);
+  if (skeletalSize == 0)
+    skeletalData = example::OpenFile("../skeletal.fbx", &skeletalSize);
+
+  HRL_FBXResources* resources =
+    HRL_LoadFBXResources(skeletalData.c_str(), skeletalSize);
+
+  printf("%zu materials, %zu textures\n",
+      HRL_GetFBXMaterialCount(resources),
+      HRL_GetFBXTextureCount(resources));
+
+  const HRL_FBXTextureInfo* albedo =
+      HRL_GetFBXMaterialTexture(
+          resources,
+          0,
+          HRL_FBX_MATERIAL_ALBEDO
+      );
+
+  HRL_FreeFBXResources(resources);
+
+  if (skeletalSize > 0)
+  {
+    HRL_SkeletalMeshData* skeletalDataHRL =
+      HRL_GetSkeletalMeshFromFBX(skeletalData.data(), skeletalSize);
+    if (skeletalDataHRL)
+    {
+      skeletalModel = HRL_CreateSkeletalMesh(scene, skeletalDataHRL);
+      if (skeletalModel != HRL_INVALID_ID)
+      {
+        HRL_id skeletalMaterial = HRL_CreateMaterialFromFBX(skeletalData.c_str(), skeletalSize);
+        HRL_MaterialSetVec3(skeletalMaterial, "TintColor", 0.85f, 0.85f, 0.9f);
+        HRL_MaterialSetFloat(skeletalMaterial, "EnvironmentStrength", 0.25f);
+        HRL_SetMeshMaterial(skeletalModel, skeletalMaterial);
+        HRL_SetMeshLocation(skeletalModel, -3.f, 0.f, 0.f);
+        HRL_SetMeshScale(skeletalModel, 1.f, 1.f, 1.f);
+
+        printf("Skeletal mesh: %u bones, %u animations\n", HRL_GetSkeletalBoneCount(skeletalModel), HRL_GetSkeletalAnimationCount(skeletalModel));
+        printf("Skeletal model camera distance: %.3f\n", HRL_GetMeshCameraDistance(skeletalModel));
+
+        for (HRL_uint i = 0; i < HRL_GetSkeletalAnimationCount(skeletalModel); ++i)
+        {
+          const HRL_SkeletalAnimation* animation = HRL_GetSkeletalAnimation(skeletalModel, i);
+          if (animation)
+            printf("  Animation %u: %s (%.3fs, %zu frames)\n",
+              i, animation->name ? animation->name : "<unnamed>",
+              animation->duration, animation->frameCount);
+        }
+        if (HRL_GetSkeletalAnimationCount(skeletalModel) > 0)
+          HRL_PlaySkeletalAnimation(skeletalModel, 0);
+      }
+      else
+      {
+        printf("Impossible de creer le skeletal mesh.\n");
+      }
+      HRL_FreeSkeletalMeshData(skeletalDataHRL);
+    }
+    else
+    {
+      printf("Impossible de charger skeletal.fbx.\n");
+    }
+  }
+  else
+  {
+    printf("Aucun skeletal.fbx trouve : le test skeletal est desactive.\n");
+  }
+
+
   HRL_SetMeshMaterial(model, modelMaterial);
-  HRL_SetMeshLocation(model, 0.f, 0.f, 0.f);
+  HRL_SetMeshLocation(model, 3.f, 0.f, 0.f);
   HRL_SetMeshScale(model, 5.f, 5.f, 5.f);
 
-  HRL_MaterialSetFloat(
-      modelMaterial,
-      "EnvironmentStrength",
-      1.f
-  );
-
-
+  // Automatic LOD: generated internally from LOD 0.
   HRL_SetMeshLODLevels(model, 5);
-  HRL_SetMeshLODMode(model, HRL_LOD_DISTANCE);
+  HRL_SetMeshLODMode(model, HRL_LOD_SCREEN_SIZE);
   HRL_SetMeshLODScreenThreshold(model, 0.22f);
   HRL_SetMeshLODScreenScale(model, 0.5f);
   HRL_SetMeshLODHysteresis(model, 0.08f);
   HRL_SetMeshLODAutomatic(model, HRL_TRUE);
-  HRL_SetMeshLODMaxDistance(model, 2.f);
 
+  printf("Generated %u LOD levels\n", HRL_GetMeshLODCount(model));
+  for (HRL_uint level = 0; level < HRL_GetMeshLODCount(model); ++level)
+    printf("  LOD %u: %zu triangles, %zu vertices\n",
+      level, HRL_GetMeshLODTriangleCount(model, level),
+      HRL_GetMeshLODVertexCount(model, level));
 
+  // ---------------------------------------------------------------------------
+  // Sol 3D : utile pour voir les ombres projetées par le modèle.
+  // ---------------------------------------------------------------------------
+  const HRL_Vertex3D floorVertices[4] = {
+    {{-1.f, 0.f, -1.f}, {0.f, 1.f, 0.f}, {0.f, 0.f}, {1.f, 0.f, 0.f}, {0.f, 0.f, 1.f}},
+    {{ 1.f, 0.f, -1.f}, {0.f, 1.f, 0.f}, {1.f, 0.f}, {1.f, 0.f, 0.f}, {0.f, 0.f, 1.f}},
+    {{ 1.f, 0.f,  1.f}, {0.f, 1.f, 0.f}, {1.f, 1.f}, {1.f, 0.f, 0.f}, {0.f, 0.f, 1.f}},
+    {{-1.f, 0.f,  1.f}, {0.f, 1.f, 0.f}, {0.f, 1.f}, {1.f, 0.f, 0.f}, {0.f, 0.f, 1.f}}
+  };
+  const HRL_uint floorIndices[6] = {0, 2, 1, 0, 3, 2};
 
-  // Lumière ponctuelle pour rendre le relief / les normales visibles.
+  HRL_id floorMaterial = HRL_CreateMaterial(HRL_MESH_3D_SHADER);
+  HRL_MaterialSetVec3(floorMaterial, "TintColor", 0.32f, 0.34f, 0.38f);
+  HRL_MaterialSetFloat(floorMaterial, "EnvironmentStrength", 0.10f);
+
+  HRL_id floorMesh = HRL_CreateMesh3D(scene, floorVertices, 4, floorIndices, 6);
+  HRL_SetMeshMaterial(floorMesh, floorMaterial);
+  HRL_SetMeshScale(floorMesh, 30.f, 1.f, 30.f);
+  HRL_SetMeshLocation(floorMesh, 0.f, -2.0f, 0.f);
+
+  // ---------------------------------------------------------------------------
+  // Point light + shadow map cubemap.
+  // ---------------------------------------------------------------------------
   HRL_id light = HRL_CreateLight(scene, HRL_POINT_LIGHT);
-  HRL_SetLightAttenuation(light, 0.02f);
-  HRL_SetLightIntensity(light, 8.f);
+  HRL_SetLightAttenuation(light, 0.012f);
+  HRL_SetLightIntensity(light, 15.f);
   HRL_SetLightColor(light, 1.f, 0.95f, 0.85f);
-  HRL_SetLightLocation(light, 3.f, 3.f, 4.f);
+  HRL_SetLightLocation(light, 5.f, 7.f, 5.f);
   HRL_SetLightRotation(light, 0.f, 0.f, 0.f);
   HRL_SetLightCastShadows(light, HRL_TRUE);
   HRL_SetLightShadowResolution(light, 1024);
   HRL_SetLightShadowBias(light, 0.0015f);
 
-
   while (!glfwWindowShouldClose(win))
   {
-    if (glfwGetKey(win, GLFW_KEY_F6) == GLFW_PRESS)
-    {
-      HRL_id cam = HRL_CreateCamera(scene, HRL_PERSPECTIVE);
-      HRL_SetViewportCamera(viewport, cam);
-      HRL_SetCameraPerspectiveFov(cam, 60.f);
-    }
-
     CalculateDeltaTime();
 
-    // Rotation lente du mesh FBX pour vérifier les normales et le depth test.
+    // Rotation lente du mesh FBX pour vérifier les normales, shadows et environment map.
     static float modelYaw = 0.f;
     modelYaw += 20.f * (float)dt;
     HRL_SetMeshRotation(model, 0.f, modelYaw, 0.f);
 
+    HRL_UpdateSkeletalAnimations((float)dt);
     HRL_EndFrame();
 
-    // update classique glfw
     glfwSwapBuffers(win);
     glfwPollEvents();
 
-    // FPS dans le titre de la fenêtre
     if (dt > 0.0)
       glfwSetWindowTitle(win, std::to_string(1.0 / dt).c_str());
 
@@ -337,34 +456,27 @@ int main()
     HRL_SetCameraLocation(camera, camX, camY, camZ);
     HRL_SetCameraRotation(camera, pitch, yaw, 0.f);
 
-    // debug views
-    if (glfwGetKey(win, GLFW_KEY_F6) == GLFW_PRESS)
+    // Debug views
+    if (glfwGetKey(win, GLFW_KEY_F1) == GLFW_PRESS)
       HRL_DrawSceneAsDebugMode(scene, HRL_DEBUG_VIEW_NONE);
-    if (glfwGetKey(win, GLFW_KEY_F7) == GLFW_PRESS)
+    if (glfwGetKey(win, GLFW_KEY_F2) == GLFW_PRESS)
       HRL_DrawSceneAsDebugMode(scene, HRL_DEBUG_VIEW_UNLIT);
-    if (glfwGetKey(win, GLFW_KEY_F8) == GLFW_PRESS)
+    if (glfwGetKey(win, GLFW_KEY_F3) == GLFW_PRESS)
       HRL_DrawSceneAsDebugMode(scene, HRL_DEBUG_VIEW_WIREFRAME);
-    if (glfwGetKey(win, GLFW_KEY_F9) == GLFW_PRESS)
+    if (glfwGetKey(win, GLFW_KEY_F4) == GLFW_PRESS)
       HRL_DrawSceneAsDebugMode(scene, HRL_DEBUG_VIEW_NORMAL);
-    if (glfwGetKey(win, GLFW_KEY_F10) == GLFW_PRESS)
+    if (glfwGetKey(win, GLFW_KEY_F5) == GLFW_PRESS)
       HRL_DrawSceneAsDebugMode(scene, HRL_DEBUG_VIEW_LIGHTING);
-    if (glfwGetKey(win, GLFW_KEY_F11) == GLFW_PRESS)
+    if (glfwGetKey(win, GLFW_KEY_F6) == GLFW_PRESS)
       HRL_DrawSceneAsDebugMode(scene, HRL_DEBUG_VIEW_LOD);
 
-    // debug keys
     if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS)
       glfwSetWindowShouldClose(win, true);
 
-    if (glfwGetKey(win, GLFW_KEY_F1) == GLFW_PRESS)
-      glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-    if (glfwGetKey(win, GLFW_KEY_F2) == GLFW_PRESS)
-      glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    if (glfwGetKey(win, GLFW_KEY_F7) == GLFW_PRESS)
+      HRL_SetAntialiasingMode(HRL_ANTIALIASING_8X);
 
-    if (glfwGetKey(win, GLFW_KEY_F3) == GLFW_PRESS)
-      // activer l'anti-aliasing, 8x MSAA
-      glfwWindowHint(GLFW_SAMPLES, 8);
-
-    if (glfwGetKey(win, GLFW_KEY_F4) == GLFW_PRESS)
+    if (glfwGetKey(win, GLFW_KEY_F8) == GLFW_PRESS)
     {
       float proj[16];
       HRL_GetProjectionMatrix(proj);
@@ -372,7 +484,7 @@ int main()
         printf("%f %f %f %f\n", proj[col*4+0], proj[col*4+1], proj[col*4+2], proj[col*4+3]);
     }
 
-    if (glfwGetKey(win, GLFW_KEY_F5) == GLFW_PRESS)
+    if (glfwGetKey(win, GLFW_KEY_F9) == GLFW_PRESS)
     {
       HRL_DrawDebugCircle(scene, HRL_DEBUG_SOLID, 0.f,20.f,0.f, 30.f, 16, 1.f, 0.f,1.f);
       HRL_DrawDebugSegment(
@@ -383,10 +495,31 @@ int main()
       );
     }
 
+    if (glfwGetKey(win, GLFW_KEY_F10) == GLFW_PRESS)
+    {
+      HRL_SetGlobalIlluminationMethod(scene, HRL_GI_SSGI);
+      HRL_SetGlobalIlluminationEnabled(scene, HRL_TRUE);
 
-    std::cout << HRL_GetMeshLODLevel(model) << std::endl;
+      printf(
+          "GI ENABLED = %d | METHOD = %d\n",
+          HRL_IsGlobalIlluminationEnabled(scene),
+          (int)HRL_GetGlobalIlluminationMethod(scene)
+      );
+    }
+
+    if (glfwGetKey(win, GLFW_KEY_F11) == GLFW_PRESS)
+    {
+      HRL_SetGlobalIlluminationEnabled(scene, HRL_FALSE);
+
+      printf(
+          "GI ENABLED = %d | METHOD = %d\n",
+          HRL_IsGlobalIlluminationEnabled(scene),
+          (int)HRL_GetGlobalIlluminationMethod(scene)
+      );
+    }
   }
 
-  // on libere les ressources HRL
   HRL_Shutdown();
+  glfwDestroyWindow(win);
+  glfwTerminate();
 }

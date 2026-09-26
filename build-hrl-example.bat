@@ -1,5 +1,5 @@
 cd build
-mingw32-make
+mingw32-make -j12
 
 robocopy "." "../example/lib/" "libhrldll.dll.a"
 robocopy "." "../example/build/" "libhrldll.dll"

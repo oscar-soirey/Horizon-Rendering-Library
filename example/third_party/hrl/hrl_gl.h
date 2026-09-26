@@ -48,6 +48,9 @@
 	HRL_API unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid);
 
   HRL_API unsigned int HRL_GL_GetSceneColorBufferGL_ID(HRL_id _sceneid);
+  // GI G-buffer: diffuse albedo and world-space normal.
+  HRL_API unsigned int HRL_GL_GetSceneAlbedoBufferGL_ID(HRL_id _sceneid);
+  HRL_API unsigned int HRL_GL_GetSceneNormalBufferGL_ID(HRL_id _sceneid);
   HRL_API HRL_id HRL_GL_GetHoveredObject(HRL_id _scene, int mouseX, int mouseY, HRL_EMeshType* mesh_type);
 
 #ifdef __cplusplus

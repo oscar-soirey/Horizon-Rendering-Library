@@ -7,11 +7,10 @@ uniform mat4 model;
 uniform vec3 lightPosition;
 uniform float farPlane;
 
-out float shadowDepth;
+out vec3 worldPosition;
 
 void main()
 {
-    vec4 worldPosition = model * vec4(aPosition, 1.0);
-    shadowDepth = length(worldPosition.xyz - lightPosition) / farPlane;
-    gl_Position = lightViewProjection * worldPosition;
+    worldPosition = (model * vec4(aPosition, 1.0)).xyz;
+    gl_Position = lightViewProjection * vec4(worldPosition, 1.0);
 }

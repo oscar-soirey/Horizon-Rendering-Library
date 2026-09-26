@@ -18,6 +18,7 @@ HRL_vtable GetOpenGL33Backend()
 	vtable.RHI_RenderScene = GL33_DrawScene;
 
 	vtable.RHI_CreateMesh = GL33_CreateMesh;
+	vtable.RHI_CreateSkeletalMesh = GL33_CreateSkeletalMesh;
 	vtable.RHI_CreateMeshLOD = GL33_CreateMeshLOD;
 	vtable.RHI_DeleteMeshLODs = GL33_DeleteMeshLODs;
 	vtable.RHI_CreateSpriteMesh = GL33_CreateSpriteMesh;
@@ -50,6 +51,9 @@ HRL_vtable GetOpenGL33Backend()
 
 	vtable.RHI_CreatePostProcess = GL33_CreatePostProcess;
 	vtable.RHI_DeletePostProcess = GL33_DeletePostProcess;
+
+	vtable.RHI_IsGlobalIlluminationMethodSupported = GL33_IsGlobalIlluminationMethodSupported;
+	vtable.RHI_GetGlobalIlluminationSupportedMethods = GL33_GetGlobalIlluminationSupportedMethods;
 
 	vtable.RHI_FogPropertyChanged = GL33_FogPropertyChanged;
 
