@@ -17,6 +17,16 @@ void GL33_ResetFramebuffer();
 
 void GL33_DrawScene(hrl_scene_t* scene, HRL_id scene_id);
 
+//Meshes//
+int GL33_CreateMesh(HRL_id id, const HRL_Vertex3D* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count);
+int GL33_CreateMeshLOD(HRL_id id, HRL_uint level, const HRL_Vertex3D* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count);
+void GL33_DeleteMeshLODs(HRL_id id);
+int GL33_CreateSpriteMesh(HRL_id id);
+void GL33_DeleteMesh(HRL_id id);
+
+//Lights//
+void GL33_DeleteLight(HRL_id id);
+
 //Scene & Viewport//
 //void GL33_ClearScene();
 //void GL33_BindScene(HRL_id _sceneid);
@@ -63,5 +73,9 @@ void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness);
 //Requests//
 int GL33_IsValidTexture(HRL_id tex);
 int GL33_IsValidShader(HRL_id shader);
+
+//Color Picking
+void GL33_EnableColorPickingBuffer(HRL_id scene, int _enable);
+void GL33_SetAntialiasingMode(int samples);
 
 #endif

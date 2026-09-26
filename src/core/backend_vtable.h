@@ -32,8 +32,16 @@ typedef struct {
 	//Draw
 	void(*RHI_DrawMesh)(HRL_Mesh* mesh);
 
+	//Mesh GPU resources
+	int(*RHI_CreateMesh)(HRL_id id, const HRL_Vertex3D* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count);
+	int(*RHI_CreateMeshLOD)(HRL_id id, HRL_uint level, const HRL_Vertex3D* vertices, size_t vertex_count, const HRL_uint* indices, size_t index_count);
+	void(*RHI_DeleteMeshLODs)(HRL_id id);
+	int(*RHI_CreateSpriteMesh)(HRL_id id);
+	void(*RHI_DeleteMesh)(HRL_id id);
+
 	//Lights//
 	void(*RHI_UpdateLights)(const std::vector<HRL_Light*>& lights);
+	void(*RHI_DeleteLight)(HRL_id id);
 
 	//Textures//
 	HRL_id(*RHI_CreateTexture)(const char* imageContent, const size_t imageSize);
@@ -50,6 +58,7 @@ typedef struct {
 	void(*RHI_ClearScene)();
 	void(*RHI_ResizeSceneTexture)(HRL_id sceneid, int width, int height);
 	void(*RHI_EnableColorPickingBuffer)(HRL_id sceneid, int enable);
+	void(*RHI_SetAntialiasingMode)(int samples);
 
 	//Shaders//
 	HRL_id(*RHI_CreateShader)(const char* vertContent, size_t vertSize, const char* fragContent, size_t fragSize);

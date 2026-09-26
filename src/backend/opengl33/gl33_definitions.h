@@ -14,56 +14,48 @@ class GL33_Shader;
  * sur des multiples de 16, donc on ajoute des paddings pour correspondre
  */
 typedef struct {
-	//16 bytes {
-	//4 bytes
+	//16 bytes
 	uint32_t type;
-	//4 bytes
 	float intensity;
-	//4 bytes
 	float attenuation;
-	//4 bytes
-	float innerCutoff;  //(anciennement padding1) cos(angle intérieur) — SpotLight
-	// }
+	float innerCutoff;
 
-	//16 bytes {
-	//12 bytes
+	//16 bytes
 	glm::vec3 position;
-	//4 bytes
-	float outerCutoff;  //(anciennement padding2) cos(angle extérieur) — SpotLight
-	// }
+	float outerCutoff;
 
-	//16 bytes {
-	//12 bytes
+	//16 bytes
 	glm::vec3 rotation;
-	//4 bytes
-	float padding3;  //direction (DirectionalLight / SpotLight)
-	// }
+	float padding3;
 
-	//16 bytes {
-	//12 bytes
+	//16 bytes
 	glm::vec3 color;
-	//4 bytes
 	float padding4;
-	// }
+
+	//64 bytes - world -> shadow texture coordinates for 2D shadow maps.
+	glm::mat4 shadowMatrix;
+
+	//16 bytes
+	// x=bias, y=far plane, z=slot, w=type (0 none, 1 2D, 2 cubemap)
+	glm::vec4 shadowParams;
 }GL_Light;
 
-typedef struct {
-	glm::mat4 model;
-	glm::vec4 region;
-	HRL_id sprite_id;
-}GL_SpriteInstance;
-
-typedef struct {
-	GL_SpriteInstance* instances;
-	int instance_count;
-	HRL_id mat;
-}GL_RenderBatch;
+static_assert(sizeof(GL_Light) == 144, "GL_Light must match the std140 Light layout");
 
 typedef struct {
 	GLuint fbo;
-	//contains scene texture and brightness texture
-	GLuint textures[3];
-	int width, height;
+	//contains scene texture, brightness texture and color picking texture
+	GLuint textures[3]{};
+	GLuint depth_rbo = 0;
+
+	// Optional multisample render target. The regular fbo/textures remain the
+	// single-sample resolve target used by post-processing and presentation.
+	GLuint msaa_fbo = 0;
+	GLuint msaa_textures[3]{};
+	GLuint msaa_depth_rbo = 0;
+	int msaa_samples = 1;
+
+	int width = 0, height = 0;
 }GL_Scene;
 
 

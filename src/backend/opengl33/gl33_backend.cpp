@@ -5,7 +5,7 @@
 
 HRL_vtable GetOpenGL33Backend()
 {
-	HRL_vtable vtable;
+	HRL_vtable vtable{};
 
 	vtable.RHI_Init = GL33_Init;
 	vtable.RHI_InitContext = GL33_InitContext;
@@ -17,6 +17,12 @@ HRL_vtable GetOpenGL33Backend()
 
 	vtable.RHI_RenderScene = GL33_DrawScene;
 
+	vtable.RHI_CreateMesh = GL33_CreateMesh;
+	vtable.RHI_CreateMeshLOD = GL33_CreateMeshLOD;
+	vtable.RHI_DeleteMeshLODs = GL33_DeleteMeshLODs;
+	vtable.RHI_CreateSpriteMesh = GL33_CreateSpriteMesh;
+	vtable.RHI_DeleteMesh = GL33_DeleteMesh;
+
 	//vtable.RHI_BeginFrame = GL33_BeginFrame;
 	//vtable.RHI_ClearScene = GL33_ClearScene;
 	//vtable.RHI_BindScene = GL33_BindScene;
@@ -26,6 +32,7 @@ HRL_vtable GetOpenGL33Backend()
 	//vtable.RHI_DrawMesh = GL33_DrawMesh;
 
 	vtable.RHI_UpdateLights = GL33_UpdateLights;
+	vtable.RHI_DeleteLight = GL33_DeleteLight;
 
 	vtable.RHI_CreateTexture = GL33_CreateTexture;
 	vtable.RHI_CreateTextureFromBitmap = GL33_CreateTextureFromBitmap;
@@ -54,6 +61,9 @@ HRL_vtable GetOpenGL33Backend()
 
 	vtable.RHI_IsValidTexture = GL33_IsValidTexture;
 	vtable.RHI_IsValidShader = GL33_IsValidShader;
+
+	vtable.RHI_EnableColorPickingBuffer = GL33_EnableColorPickingBuffer;
+	vtable.RHI_SetAntialiasingMode = GL33_SetAntialiasingMode;
 
 	return vtable;
 }

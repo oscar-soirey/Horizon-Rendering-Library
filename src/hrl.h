@@ -27,13 +27,15 @@
 #ifndef HRL_IMPL
 #define HRL_IMPL
 
-#define HRL_API_VERSION "0.4"
+#define HRL_API_VERSION "0.5"
 
 #ifdef __cplusplus
  #include <cstdint>
+ #include <cstddef>
  #include <iostream>
 #else
  #include <stdint.h>
+ #include <stddef.h>
  #include <stdio.h>
 #endif
 
@@ -55,6 +57,21 @@
 
 typedef uint32_t HRL_id;
 typedef uint32_t HRL_uint;
+
+/**
+ * @brief Vertex format used by HRL_CreateMesh3D.
+ *
+ * All vectors are expressed in object/local space. UV coordinates use the same
+ * convention as HRL_CreateMeshSprite and HRL_SetSpriteRegion. Tangent and
+ * bitangent are used with the normal map for the built-in OpenGL 3.3 shader.
+ */
+typedef struct HRL_Vertex3D {
+	float position[3];
+	float normal[3];
+	float uv[2];
+	float tangent[3];
+	float bitangent[3];
+} HRL_Vertex3D;
 
 #define HRL_FALSE ((int)0)
 #define HRL_TRUE  ((int)1)
@@ -116,12 +133,27 @@ typedef enum HRL_EFilterType{
 	HRL_FILTER_SUPERSAMPLING
 }HRL_EFilterType;
 
+typedef enum HRL_EAntialiasingMode{
+	HRL_ANTIALIASING_OFF = 0,
+	HRL_ANTIALIASING_2X = 2,
+	HRL_ANTIALIASING_4X = 4,
+	HRL_ANTIALIASING_8X = 8
+}HRL_EAntialiasingMode;
+
 typedef enum HRL_EDebugView{
 	HRL_DEBUG_VIEW_NONE = 0x0060,
 	HRL_DEBUG_VIEW_UNLIT,
 	HRL_DEBUG_VIEW_NORMAL,
-	HRL_DEBUG_VIEW_LIGHTS
+	HRL_DEBUG_VIEW_LIGHTS,
+	HRL_DEBUG_VIEW_LIGHTING = HRL_DEBUG_VIEW_LIGHTS,
+	HRL_DEBUG_VIEW_WIREFRAME,
+	HRL_DEBUG_VIEW_LOD
 }HRL_EDebugView;
+
+typedef enum HRL_ELODMode {
+	HRL_LOD_DISTANCE = 0,
+	HRL_LOD_SCREEN_SIZE
+} HRL_ELODMode;
 
 typedef enum HRL_EError{
 	HRL_NO_ERROR=0x0070,
@@ -281,19 +313,69 @@ extern "C" {
 	HRL_API void HRL_SetSpriteRegion(HRL_id _meshid, float min_u, float min_v, float max_u, float max_v);
 
 	/**
-	 * @brief Creates a mesh from raw vertex data in the given scene.
-	 * @param _type     One of HRL_2D_Mesh, HRL_3D_Mesh, HRL_3D_SkeletalMesh.
-	 * @param _vertices Pointer to the raw vertex buffer.
+	 * @brief Creates a static 3D mesh from caller-owned vertex/index arrays.
+	 *
+	 * The mesh data is copied by HRL and may be released by the caller as soon
+	 * as the function returns. When _indexCount is zero, the vertices are drawn
+	 * sequentially as triangles. Otherwise _indices must contain triangle indices
+	 * and _indexCount must be a multiple of 3.
+	 *
+	 * No standard 3D file format importer is involved in this API.
+	 *
+	 * @param _sceneid      ID of the target scene.
+	 * @param _vertices     Pointer to _vertexCount HRL_Vertex3D values.
+	 * @param _vertexCount  Number of vertices.
+	 * @param _indices      Optional pointer to _indexCount HRL_uint indices.
+	 * @param _indexCount   Number of indices, or 0 for non-indexed rendering.
 	 * @return HRL_id of the new mesh, or HRL_INVALID_ID on failure.
+	 */
+	HRL_API HRL_id HRL_CreateMesh3D(
+		HRL_id _sceneid,
+		const HRL_Vertex3D* _vertices, size_t _vertexCount,
+		const HRL_uint* _indices, size_t _indexCount
+	);
+
+	/**
+	 * @brief Converts an FBX mesh scene to a flat HRL_Vertex3D array.
+	 *
+	 * The FBX file is decoded internally by HRL and the resulting geometry is
+	 * returned as non-indexed triangles. Node transforms are baked into the
+	 * returned vertex positions and tangent space. The returned buffer must be
+	 * released with HRL_FreeVertex3DFromFBX.
+	 *
+	 * HRL does not expose ufbx types through this API. The FBX implementation is
+	 * an internal dependency of hrl.cpp.
+	 *
+	 * @param _data          Pointer to the complete FBX data in memory.
+	 * @param _bufferSize    Size of the FBX data buffer in bytes.
+	 * @param _vertexCount   Receives the number of returned vertices.
+	 * @return Newly allocated HRL_Vertex3D array, or NULL on failure.
+	 */
+	HRL_API HRL_Vertex3D* HRL_GetVertex3DFromFBX(
+		const char* _data,
+		size_t _bufferSize,
+		size_t* _vertexCount
+	);
+
+	/**
+	 * @brief Frees the buffer returned by HRL_GetVertex3DFromFBX.
+	 */
+	HRL_API void HRL_FreeVertex3DFromFBX(HRL_Vertex3D* _vertices);
+
+	/**
+	 * @brief Legacy generic mesh entry point.
+	 *
+	 * This prototype does not carry enough information to describe a bounded
+	 * vertex buffer and therefore remains reserved. Use HRL_CreateMesh3D for
+	 * static 3D geometry.
 	 */
 	HRL_API HRL_id HRL_CreateMesh(HRL_id _sceneid, HRL_EMeshType _type, const float* _vertices);
 
 	/**
-	 * @brief Creates a mesh by loading a 3D file from a memory buffer.
-	 * Supported formats: .fbx, .obj.
-	 * @param _data       Pointer to the file contents (opened in binary mode).
-	 * @param _bufferSize Size of the buffer in bytes.
-	 * @return HRL_id of the new mesh, or HRL_INVALID_ID on failure.
+	 * @brief Reserved generic file-based mesh entry point.
+	 *
+	 * This entry point remains reserved. FBX conversion is intentionally exposed
+	 * separately through HRL_GetVertex3DFromFBX.
 	 */
 	HRL_API HRL_id HRL_CreateMeshFromFile(HRL_id _sceneid, HRL_EMeshType _type, const char* _data, size_t _bufferSize);
 
@@ -334,6 +416,34 @@ extern "C" {
 	 * @brief Sets the scale of a mesh along each local axis.
 	 */
 	HRL_API void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z);
+
+	/** Enables or disables automatic LOD selection for a 3D mesh. */
+	HRL_API void HRL_SetMeshLODAutomatic(HRL_id _meshid, int _enabled);
+	/** Selects distance-based or projected screen-size LOD selection. */
+	HRL_API void HRL_SetMeshLODMode(HRL_id _meshid, HRL_ELODMode _mode);
+	/** Sets the number of LOD levels, including LOD 0. Range: 1..8. */
+	HRL_API void HRL_SetMeshLODLevels(HRL_id _meshid, HRL_uint _levels);
+	/** Sets the first transition distance in world units. */
+	HRL_API void HRL_SetMeshLODDistance(HRL_id _meshid, float _baseDistance);
+	/** Multiplies the distance threshold for each next LOD. */
+	HRL_API void HRL_SetMeshLODScale(HRL_id _meshid, float _distanceScale);
+	HRL_API void HRL_SetMeshLODMinDistance(HRL_id _meshid, float _distance);
+	HRL_API void HRL_SetMeshLODMaxDistance(HRL_id _meshid, float _distance);
+	/** Sets the LOD 0 screen-height threshold in [0,1]. */
+	HRL_API void HRL_SetMeshLODScreenThreshold(HRL_id _meshid, float _threshold);
+	/** Multiplies the screen-size threshold for each next LOD. */
+	HRL_API void HRL_SetMeshLODScreenScale(HRL_id _meshid, float _scale);
+	/** Adds transition hysteresis in [0,0.49] to reduce LOD popping. */
+	HRL_API void HRL_SetMeshLODHysteresis(HRL_id _meshid, float _hysteresis);
+	/** Forces a fixed LOD level. Pass -1 to return to automatic selection. */
+	HRL_API void HRL_SetMeshLODOverride(HRL_id _meshid, int _level);
+	/** Regenerates the internal LOD geometry from LOD 0. */
+	HRL_API void HRL_ForceMeshLODRebuild(HRL_id _meshid);
+	HRL_API HRL_uint HRL_GetMeshLODCount(HRL_id _meshid);
+	HRL_API size_t HRL_GetMeshLODVertexCount(HRL_id _meshid, HRL_uint _level);
+	HRL_API size_t HRL_GetMeshLODTriangleCount(HRL_id _meshid, HRL_uint _level);
+	/** Returns the LOD chosen by the most recently rendered viewport. */
+	HRL_API int HRL_GetMeshLODLevel(HRL_id _meshid);
 
 	/**
 	 * @brief Controls the rendering order of a sprite on the Z axis.
@@ -397,6 +507,24 @@ extern "C" {
 	 * Primarily relevant for directional and spot lights.
 	 */
 	HRL_API void HRL_SetLightRotation(HRL_id _lightid, float pitch, float yaw, float roll);
+
+	/**
+	 * @brief Enables or disables shadow casting for a light.
+	 * OpenGL 3.3 supports shadows for point, directional and spot lights.
+	 */
+	HRL_API void HRL_SetLightCastShadows(HRL_id _lightid, int _enable);
+
+	/**
+	 * @brief Sets the shadow bias used to reduce self-shadowing artifacts.
+	 */
+	HRL_API void HRL_SetLightShadowBias(HRL_id _lightid, float _bias);
+
+	/**
+	 * @brief Sets the resolution of the private shadow map for a light.
+	 * Supported values are positive powers of two; the OpenGL backend may clamp
+	 * the requested value to the implementation limits.
+	 */
+	HRL_API void HRL_SetLightShadowResolution(HRL_id _lightid, int _resolution);
 
 	/**
 	 * 
@@ -517,6 +645,48 @@ extern "C" {
 	HRL_API void HRL_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height);
 
 	/**
+	 * @brief Enables or disables the procedural sky sphere for a scene.
+	 * The sky follows the camera translation, so it behaves as an infinitely
+	 * distant environment while remaining a true sphere in the OpenGL backend.
+	 * Disabled by default for backward compatibility.
+	 */
+	HRL_API void HRL_SetSkySphereEnabled(HRL_id _sceneid, int _enable);
+
+	/**
+	 * @brief Sets the top, horizon and bottom colors of the procedural sky.
+	 * Values are linear RGB and may exceed 1 for HDR rendering.
+	 */
+	HRL_API void HRL_SetSkySphereColors(
+		HRL_id _sceneid,
+		float top_r, float top_g, float top_b,
+		float horizon_r, float horizon_g, float horizon_b,
+		float bottom_r, float bottom_g, float bottom_b
+	);
+
+	/**
+	 * @brief Rotates the sky sphere using Euler angles in degrees.
+	 */
+	HRL_API void HRL_SetSkySphereRotation(HRL_id _sceneid, float pitch, float yaw, float roll);
+
+	/**
+	 * @brief Uses an equirectangular 2D texture as the sky-sphere image.
+	 * Pass HRL_INVALID_ID to return to the procedural color sky.
+	 */
+	HRL_API void HRL_SetSkySphereTexture(HRL_id _sceneid, HRL_id _textureid);
+
+	/**
+	 * @brief Enables or disables equirectangular environment mapping for 3D materials.
+	 * The environment texture is independent from the sky texture.
+	 */
+	HRL_API void HRL_SetEnvironmentMappingEnabled(HRL_id _sceneid, int _enable);
+
+	/**
+	 * @brief Sets an equirectangular texture used for environment reflections.
+	 * Pass HRL_INVALID_ID to remove the environment map.
+	 */
+	HRL_API void HRL_SetEnvironmentMap(HRL_id _sceneid, HRL_id _textureid);
+
+	/**
 	 * @brief Enables or disables the GPU color-picking buffer for a scene.
 	 * When enabled, each rendered object is assigned a unique color ID,
 	 * allowing CPU-side object picking by reading pixel values.
@@ -527,10 +697,10 @@ extern "C" {
 	/**
 	 *
 	 * @param _scene
-	 * @param mesh_type
+	 * @param mesh_type Reference to the type of hovered mesh, can be nullptr
 	 * @param mouseX Relative mouse cursor position to the window
 	 * @param mouseY
-	 * @return
+	 * @return HRL id of the hovered mesh, if none, it will return HRL_INVALID_ID
 	 */
 	HRL_API HRL_id HRL_GetHoveredObject(HRL_id _scene, int mouseX, int mouseY, HRL_EMeshType* mesh_type);
 
@@ -836,7 +1006,7 @@ extern "C" {
 	/**
 	 * @brief Overrides the scene rendering with a diagnostic visualization mode.
 	 * Useful for inspecting normals, lighting, or other render passes in isolation.
-	 * @param mode One of HRL_DebugViewNone, HRL_DebugViewNormal, HRL_DebugViewLights.
+	 * @param mode One of HRL_DEBUG_VIEW_NONE, HRL_DEBUG_VIEW_UNLIT, HRL_DEBUG_VIEW_NORMAL, HRL_DEBUG_VIEW_LIGHTING, HRL_DEBUG_VIEW_WIREFRAME or HRL_DEBUG_VIEW_LOD.
 	 */
 	HRL_API void HRL_DrawSceneAsDebugMode(HRL_id _sceneid, HRL_EDebugView mode);
 
@@ -924,9 +1094,9 @@ extern "C" {
 	HRL_API void HRL_TakeScreenshot(HRL_id _sceneid, const char* _target_path);
 
 	/**
-	 * @brief Enables or changes the global anti-aliasing mode.
-	 * @param _mode One of the HRL_Filter_* constants. Not all modes may be
-	 *              supported by every backend.
+	 * @brief Enables or changes the global multisample anti-aliasing mode.
+	 * @param _mode One of HRL_ANTIALIASING_OFF, HRL_ANTIALIASING_2X,
+	 *              HRL_ANTIALIASING_4X or HRL_ANTIALIASING_8X.
 	 */
 	HRL_API void HRL_SetAntialiasingMode(HRL_uint _mode);
 
@@ -961,7 +1131,7 @@ extern "C" {
 	 *  UI
 	 * ============================================================================ */
 
-	/* Work in progress road to 0.5 release */
+	/* Work in progress road to 0.6 release */
 
 	/**
 	 * 

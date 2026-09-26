@@ -91,6 +91,7 @@ generate_ressources_file_header()
 add_library(hrl STATIC
         #third-party
         third_party/glad/glad.c
+	third_party/ufbx/ufbx.c
 
         #fichiers ressources générés
         ${EMBEDDED_SOURCES}
@@ -110,6 +111,7 @@ add_library(hrl STATIC
 add_library(hrldll SHARED
         #third-party
         third_party/glad/glad.c
+	third_party/ufbx/ufbx.c
 
         #fichiers ressources générés
         ${EMBEDDED_SOURCES}

@@ -1,16 +1,18 @@
 #version 330 core
 
-//vertex/point
-layout(location = 0) in vec2 apos;
-layout(location = 1) in vec2 auv;
-//hold location 2,3,4 and 5 (four vec4)
-layout(location = 2) in mat4 amodel;
+// Sprite = mesh 3D plane. The default sprite path supports instanced rendering.
+layout(location = 0) in vec3 aPosition;
+layout(location = 2) in vec2 aTexCoord;
+layout(location = 5) in mat4 aInstanceModel;
+layout(location = 9) in vec4 aInstanceUVRegion;
+layout(location = 10) in uint aInstanceSpriteID;
 
-//vue/ecran
+uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
-
-uniform uint uSpriteID;  //utile pour le color picking buffer
+uniform vec4 UVRegion;
+uniform uint uSpriteID;
+uniform int uInstanced;
 
 out vec3 fragPos;
 out vec2 uv;
@@ -18,13 +20,26 @@ flat out uint sprite_id;
 
 void main()
 {
-    vec4 pos = vec4(apos, 0.0, 1.0);
+    vec4 pos = vec4(aPosition, 1.0);
+    vec4 worldPos;
+    vec4 region;
+    uint id;
 
-    //on passe les coordonees fragment et uv au fragment shader
-    fragPos = vec3(amodel * pos);
-    uv = auv;
-    sprite_id = uSpriteID;
+    if (uInstanced != 0)
+    {
+        worldPos = aInstanceModel * pos;
+        region = aInstanceUVRegion;
+        id = aInstanceSpriteID;
+    }
+    else
+    {
+        worldPos = model * pos;
+        region = UVRegion;
+        id = uSpriteID;
+    }
 
-    //garder cet ordre
-    gl_Position = projection * view * amodel * pos;
+    fragPos = worldPos.xyz;
+    uv = mix(region.xy, region.zw, aTexCoord);
+    sprite_id = id;
+    gl_Position = projection * view * worldPos;
 }
