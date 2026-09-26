@@ -14,6 +14,7 @@ typedef struct {
 	void(*RHI_Shutdown)();
 
 	void(*RHI_WindowResizeCallback)(int width, int height);
+	void(*RHI_TakeScreenshot)(HRL_id scene, const char* target_path);
 
 	//Draw & batching//
 	void(*RHI_BeginFrame)();

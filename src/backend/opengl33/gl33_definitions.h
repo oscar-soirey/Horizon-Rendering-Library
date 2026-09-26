@@ -48,6 +48,7 @@ typedef struct {
 	// textures[3] = linear diffuse albedo, textures[4] = world-space normal.
 	GLuint textures[5]{};
 	GLuint depth_rbo = 0;
+	GLuint depth_texture = 0;
 
 	// Optional multisample render target. The regular fbo/textures remain the
 	// single-sample resolve target used by post-processing and presentation.

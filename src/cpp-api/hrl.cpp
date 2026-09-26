@@ -66,197 +66,266 @@ id T::GetID() const noexcept{return id_;} \
 bool T::IsValid() const{return id_!=INVALID_ID && VALID(id_);} \
 void T::Release(){if(id_!=INVALID_ID){DELETE(id_);id_=INVALID_ID;}}
 
-Mesh::Mesh()=default;
-Mesh::Mesh(id v,bool owned):id_(v),owned_(owned){}
-Mesh Mesh::Borrowed(id v){return Mesh(v,false);}
-Mesh::~Mesh(){Release();}
-id Mesh::GetID() const noexcept{return id_;}
-bool Mesh::IsValid() const{return id_!=INVALID_ID && HRL_IsValidMesh(id_);}
-void Mesh::Release(){if(id_!=INVALID_ID && owned_) HRL_DeleteMesh(id_); id_=INVALID_ID; owned_=false;}
-Mesh::Mesh(Mesh&& o) noexcept:id_(o.id_),owned_(o.owned_){o.id_=INVALID_ID;o.owned_=false;}
-Mesh& Mesh::operator=(Mesh&& o) noexcept{if(this!=&o){Release();id_=o.id_;owned_=o.owned_;o.id_=INVALID_ID;o.owned_=false;}return *this;}
-void Mesh::SetPivotPoint(float x,float y,float z){HRL_SetMeshPivotPoint(id_,x,y,z);}
-void Mesh::SetSpriteRegion(float a,float b,float c,float d){HRL_SetSpriteRegion(id_,a,b,c,d);}
-void Mesh::SetMaterial(const Material& m){HRL_SetMeshMaterial(id_,m.GetID());}
-void Mesh::SetLocation(float x,float y,float z){HRL_SetMeshLocation(id_,x,y,z);}
-void Mesh::SetRotation(float x,float y,float z){HRL_SetMeshRotation(id_,x,y,z);}
-void Mesh::SetScale(float x,float y,float z){HRL_SetMeshScale(id_,x,y,z);}
-float Mesh::GetCameraDistance()const{return HRL_GetMeshCameraDistance(id_);}
-void Mesh::SetLODAutomatic(bool v){HRL_SetMeshLODAutomatic(id_,v?HRL_TRUE:HRL_FALSE);}
-void Mesh::SetLODMode(ELODMode v){HRL_SetMeshLODMode(id_,ToCEnum<HRL_ELODMode>(v));}
-void Mesh::SetLODLevels(uint v){HRL_SetMeshLODLevels(id_,v);}
-void Mesh::SetLODDistance(float v){HRL_SetMeshLODDistance(id_,v);}
-void Mesh::SetLODScale(float v){HRL_SetMeshLODScale(id_,v);}
-void Mesh::SetLODMinDistance(float v){HRL_SetMeshLODMinDistance(id_,v);}
-void Mesh::SetLODMaxDistance(float v){HRL_SetMeshLODMaxDistance(id_,v);}
-void Mesh::SetLODScreenThreshold(float v){HRL_SetMeshLODScreenThreshold(id_,v);}
-void Mesh::SetLODScreenScale(float v){HRL_SetMeshLODScreenScale(id_,v);}
-void Mesh::SetLODHysteresis(float v){HRL_SetMeshLODHysteresis(id_,v);}
-void Mesh::SetLODOverride(int v){HRL_SetMeshLODOverride(id_,v);}
-void Mesh::ForceLODRebuild(){HRL_ForceMeshLODRebuild(id_);}
-uint Mesh::GetLODCount()const{return HRL_GetMeshLODCount(id_);}
-std::size_t Mesh::GetLODVertexCount(uint l)const{return HRL_GetMeshLODVertexCount(id_,l);}
-std::size_t Mesh::GetLODTriangleCount(uint l)const{return HRL_GetMeshLODTriangleCount(id_,l);}
-int Mesh::GetLODLevel()const{return HRL_GetMeshLODLevel(id_);}
-uint Mesh::GetSkeletalBoneCount()const{return HRL_GetSkeletalBoneCount(id_);}
-const SkeletalBone* Mesh::GetSkeletalBone(uint i)const{return reinterpret_cast<const SkeletalBone*>(HRL_GetSkeletalBone(id_,i));}
-uint Mesh::FindSkeletalBone(const char* n)const{return HRL_FindSkeletalBone(id_,n);}
-uint Mesh::GetSkeletalAnimationCount()const{return HRL_GetSkeletalAnimationCount(id_);}
-const SkeletalAnimation* Mesh::GetSkeletalAnimation(uint i)const{return reinterpret_cast<const SkeletalAnimation*>(HRL_GetSkeletalAnimation(id_,i));}
-uint Mesh::FindSkeletalAnimation(const char* n)const{return HRL_FindSkeletalAnimation(id_,n);}
-void Mesh::PlaySkeletalAnimation(uint i){HRL_PlaySkeletalAnimation(id_,i);}
-void Mesh::StopSkeletalAnimation(){HRL_StopSkeletalAnimation(id_);}
-void Mesh::SetSkeletalAnimationTime(float v){HRL_SetSkeletalAnimationTime(id_,v);}
-void Mesh::SetSkeletalAnimationSpeed(float v){HRL_SetSkeletalAnimationSpeed(id_,v);}
-void Mesh::SetSkeletalAnimationLoop(bool v){HRL_SetSkeletalAnimationLoop(id_,v?HRL_TRUE:HRL_FALSE);}
-int Mesh::GetCurrentSkeletalAnimation()const{return HRL_GetCurrentSkeletalAnimation(id_);}
-float Mesh::GetSkeletalAnimationTime()const{return HRL_GetSkeletalAnimationTime(id_);}
-bool Mesh::IsSkeletalAnimationPlaying()const{return HRL_IsSkeletalAnimationPlaying(id_)!=0;}
-void Mesh::SetSpriteDrawOrder(float v){HRL_SetSpriteDrawOrder(id_,v);}
-
-HRL_COMMON(Light,HRL_IsValidLight,HRL_DeleteLight)
-HRL_MOVE(Light)
-void Light::SetColor(float x,float y,float z){HRL_SetLightColor(id_,x,y,z);}
-void Light::SetIntensity(float v){HRL_SetLightIntensity(id_,v);}
-void Light::SetAttenuation(float v){HRL_SetLightAttenuation(id_,v);}
-void Light::SetLocation(float x,float y,float z){HRL_SetLightLocation(id_,x,y,z);}
-void Light::SetRotation(float x,float y,float z){HRL_SetLightRotation(id_,x,y,z);}
-void Light::SetCastShadows(bool v){HRL_SetLightCastShadows(id_,v?1:0);}
-void Light::SetShadowBias(float v){HRL_SetLightShadowBias(id_,v);}
-void Light::SetShadowResolution(int v){HRL_SetLightShadowResolution(id_,v);}
-void Light::SetSpotLightInnerCutoff(float v){HRL_SetSpotLightInnerCutoff(id_,v);}
-void Light::SetSpotLightOuterCutoff(float v){HRL_SetSpotLightOuterCutoff(id_,v);}
-
-HRL_COMMON(Texture,HRL_IsValidTexture,HRL_DeleteTexture)
-HRL_MOVE(Texture)
-Texture Texture::FromMemory(const void* d,std::size_t s){return Texture(HRL_CreateTexture(static_cast<const char*>(d),s));}
-Texture Texture::FromText(const char* t,const Font& f,float fs,float ww,float r,float g,float b,float br,float bg,float bb,float ba){
- return Texture(HRL_CreateTextureFromText(t,f.GetID(),fs,ww,r,g,b,br,bg,bb,ba));
+Mesh::Mesh(id v, bool owned) : id_(v), owned_(owned) {}
+Mesh Mesh::Borrowed(id v) { return Mesh(v, false); }
+Mesh::~Mesh() { Release(); }
+id Mesh::GetID() const noexcept { return id_; }
+bool Mesh::IsValid() const { return id_ != INVALID_ID && HRL_IsValidMesh(id_); }
+void Mesh::Release() {
+    if (id_ != INVALID_ID && owned_) HRL_DeleteMesh(id_);
+    id_ = INVALID_ID;
+    owned_ = false;
 }
-void Texture::Reload(const void* d,std::size_t s){HRL_ReloadTexture(id_,static_cast<const char*>(d),s);}
-void Texture::GetSize(int& w,int& h)const{HRL_GetTextureSize(id_,&w,&h);}
-void Texture::SetMinFilter(EFilterType f){HRL_SetTextureMinFilter(id_,ToCEnum<HRL_EFilterType>(f));}
-void Texture::SetMagFilter(EFilterType f){HRL_SetTextureMagFilter(id_,ToCEnum<HRL_EFilterType>(f));}
+Mesh::Mesh(Mesh&& o) noexcept : id_(o.id_), owned_(o.owned_) {
+    o.id_ = INVALID_ID;
+    o.owned_ = false;
+}
+Mesh& Mesh::operator=(Mesh&& o) noexcept {
+    if (this != &o) {
+        Release();
+        id_ = o.id_;
+        owned_ = o.owned_;
+        o.id_ = INVALID_ID;
+        o.owned_ = false;
+    }
+    return *this;
+}
+void Mesh::SetPivotPoint(float x, float y, float z) { HRL_SetMeshPivotPoint(id_, x, y, z); }
+void Mesh::SetMaterial(const Material& m) { HRL_SetMeshMaterial(id_, m.GetID()); }
+void Mesh::SetLocation(float x, float y, float z) { HRL_SetMeshLocation(id_, x, y, z); }
+void Mesh::SetRotation(float x, float y, float z) { HRL_SetMeshRotation(id_, x, y, z); }
+void Mesh::SetScale(float x, float y, float z) { HRL_SetMeshScale(id_, x, y, z); }
 
-Scene::Scene(id v):id_(v){}
-Scene::~Scene(){Release();}
-Scene::Scene(bool v):id_(HRL_CreateScene(v?HRL_TRUE:HRL_FALSE)){}
-id Scene::GetID() const noexcept{return id_;}
-bool Scene::IsValid() const{return id_!=INVALID_ID && HRL_IsValidScene(id_);}
-void Scene::Release(){if(id_!=INVALID_ID){HRL_DeleteScene(id_);id_=INVALID_ID;}}
+Mesh3D Mesh3D::Borrowed(id v) { return Mesh3D(v, false); }
+float Mesh3D::GetCameraDistance() const { return HRL_GetMeshCameraDistance(id_); }
+void Mesh3D::SetLODAutomatic(bool v) { HRL_SetMeshLODAutomatic(id_, v ? HRL_TRUE : HRL_FALSE); }
+void Mesh3D::SetLODMode(ELODMode v) { HRL_SetMeshLODMode(id_, ToCEnum<HRL_ELODMode>(v)); }
+void Mesh3D::SetLODLevels(uint v) { HRL_SetMeshLODLevels(id_, v); }
+void Mesh3D::SetLODDistance(float v) { HRL_SetMeshLODDistance(id_, v); }
+void Mesh3D::SetLODScale(float v) { HRL_SetMeshLODScale(id_, v); }
+void Mesh3D::SetLODMinDistance(float v) { HRL_SetMeshLODMinDistance(id_, v); }
+void Mesh3D::SetLODMaxDistance(float v) { HRL_SetMeshLODMaxDistance(id_, v); }
+void Mesh3D::SetLODScreenThreshold(float v) { HRL_SetMeshLODScreenThreshold(id_, v); }
+void Mesh3D::SetLODScreenScale(float v) { HRL_SetMeshLODScreenScale(id_, v); }
+void Mesh3D::SetLODHysteresis(float v) { HRL_SetMeshLODHysteresis(id_, v); }
+void Mesh3D::SetLODOverride(int v) { HRL_SetMeshLODOverride(id_, v); }
+void Mesh3D::ForceLODRebuild() { HRL_ForceMeshLODRebuild(id_); }
+uint Mesh3D::GetLODCount() const { return HRL_GetMeshLODCount(id_); }
+std::size_t Mesh3D::GetLODVertexCount(uint l) const { return HRL_GetMeshLODVertexCount(id_, l); }
+std::size_t Mesh3D::GetLODTriangleCount(uint l) const { return HRL_GetMeshLODTriangleCount(id_, l); }
+int Mesh3D::GetLODLevel() const { return HRL_GetMeshLODLevel(id_); }
+
+StaticMesh::StaticMesh(Scene& scene, const Vertex3D* vertices, std::size_t vertexCount,
+                       const uint* indices, std::size_t indexCount)
+    : Mesh3D(HRL_CreateMesh3D(scene.GetID(), reinterpret_cast<const HRL_Vertex3D*>(vertices),
+                              vertexCount, reinterpret_cast<const HRL_uint*>(indices), indexCount), true) {}
+StaticMesh StaticMesh::Borrowed(id v) { return StaticMesh(v, false); }
+
+SkeletalMesh::SkeletalMesh(Scene& scene, const SkeletalMeshData& data)
+    : Mesh3D(HRL_CreateSkeletalMesh(scene.GetID(), reinterpret_cast<const HRL_SkeletalMeshData*>(&data)), true) {}
+SkeletalMesh SkeletalMesh::Borrowed(id v) { return SkeletalMesh(v, false); }
+uint SkeletalMesh::GetSkeletalBoneCount() const { return HRL_GetSkeletalBoneCount(id_); }
+const SkeletalBone* SkeletalMesh::GetSkeletalBone(uint i) const { return reinterpret_cast<const SkeletalBone*>(HRL_GetSkeletalBone(id_, i)); }
+uint SkeletalMesh::FindSkeletalBone(const char* n) const { return HRL_FindSkeletalBone(id_, n); }
+uint SkeletalMesh::GetSkeletalAnimationCount() const { return HRL_GetSkeletalAnimationCount(id_); }
+const SkeletalAnimation* SkeletalMesh::GetSkeletalAnimation(uint i) const { return reinterpret_cast<const SkeletalAnimation*>(HRL_GetSkeletalAnimation(id_, i)); }
+uint SkeletalMesh::FindSkeletalAnimation(const char* n) const { return HRL_FindSkeletalAnimation(id_, n); }
+void SkeletalMesh::PlaySkeletalAnimation(uint i) { HRL_PlaySkeletalAnimation(id_, i); }
+void SkeletalMesh::StopSkeletalAnimation() { HRL_StopSkeletalAnimation(id_); }
+void SkeletalMesh::SetSkeletalAnimationTime(float v) { HRL_SetSkeletalAnimationTime(id_, v); }
+void SkeletalMesh::SetSkeletalAnimationSpeed(float v) { HRL_SetSkeletalAnimationSpeed(id_, v); }
+void SkeletalMesh::SetSkeletalAnimationLoop(bool v) { HRL_SetSkeletalAnimationLoop(id_, v ? HRL_TRUE : HRL_FALSE); }
+int SkeletalMesh::GetCurrentSkeletalAnimation() const { return HRL_GetCurrentSkeletalAnimation(id_); }
+float SkeletalMesh::GetSkeletalAnimationTime() const { return HRL_GetSkeletalAnimationTime(id_); }
+bool SkeletalMesh::IsSkeletalAnimationPlaying() const { return HRL_IsSkeletalAnimationPlaying(id_) != 0; }
+
+Sprite::Sprite(Scene& scene)
+    : Mesh(HRL_CreateMeshSprite(scene.GetID()), true) {}
+Sprite Sprite::Borrowed(id v) { return Sprite(v, false); }
+void Sprite::SetSpriteRegion(float a, float b, float c, float d) { HRL_SetSpriteRegion(id_, a, b, c, d); }
+void Sprite::SetDrawOrder(float v) { HRL_SetSpriteDrawOrder(id_, v); }
+void Sprite::SetSpriteDrawOrder(float v) { SetDrawOrder(v); }
+
+Light::Light(Scene& scene, ELightType type)
+    : id_(HRL_CreateLight(scene.GetID(), ToCEnum<HRL_ELightType>(type))) {}
+Light::~Light() { Release(); }
+HRL_MOVE(Light)
+id Light::GetID() const noexcept { return id_; }
+bool Light::IsValid() const { return id_ != INVALID_ID && HRL_IsValidLight(id_); }
+void Light::Release() { if (id_ != INVALID_ID) { HRL_DeleteLight(id_); id_ = INVALID_ID; } }
+void Light::SetColor(float x, float y, float z) { HRL_SetLightColor(id_, x, y, z); }
+void Light::SetIntensity(float v) { HRL_SetLightIntensity(id_, v); }
+void Light::SetAttenuation(float v) { HRL_SetLightAttenuation(id_, v); }
+void Light::SetLocation(float x, float y, float z) { HRL_SetLightLocation(id_, x, y, z); }
+void Light::SetRotation(float x, float y, float z) { HRL_SetLightRotation(id_, x, y, z); }
+void Light::SetCastShadows(bool v) { HRL_SetLightCastShadows(id_, v ? 1 : 0); }
+void Light::SetShadowBias(float v) { HRL_SetLightShadowBias(id_, v); }
+void Light::SetShadowResolution(int v) { HRL_SetLightShadowResolution(id_, v); }
+void Light::SetSpotLightInnerCutoff(float v) { HRL_SetSpotLightInnerCutoff(id_, v); }
+void Light::SetSpotLightOuterCutoff(float v) { HRL_SetSpotLightOuterCutoff(id_, v); }
+
+Texture::Texture(const void* d, std::size_t s)
+    : id_(HRL_CreateTexture(static_cast<const char*>(d), s)) {}
+Texture::Texture(const char* t, const Font& f, float fs, float ww,
+                 float r, float g, float b, float br, float bg, float bb, float ba)
+    : id_(HRL_CreateTextureFromText(t, f.GetID(), fs, ww, r, g, b, br, bg, bb, ba)) {}
+Texture::~Texture() { Release(); }
+HRL_MOVE(Texture)
+id Texture::GetID() const noexcept { return id_; }
+bool Texture::IsValid() const { return id_ != INVALID_ID && HRL_IsValidTexture(id_); }
+void Texture::Release() { if (id_ != INVALID_ID) { HRL_DeleteTexture(id_); id_ = INVALID_ID; } }
+void Texture::Reload(const void* d, std::size_t s) { HRL_ReloadTexture(id_, static_cast<const char*>(d), s); }
+void Texture::GetSize(int& w, int& h) const { HRL_GetTextureSize(id_, &w, &h); }
+void Texture::SetMinFilter(EFilterType f) { HRL_SetTextureMinFilter(id_, ToCEnum<HRL_EFilterType>(f)); }
+void Texture::SetMagFilter(EFilterType f) { HRL_SetTextureMagFilter(id_, ToCEnum<HRL_EFilterType>(f)); }
+
+Scene::~Scene() { Release(); }
+Scene::Scene(bool v) : id_(HRL_CreateScene(v ? HRL_TRUE : HRL_FALSE)) {}
+id Scene::GetID() const noexcept { return id_; }
+bool Scene::IsValid() const { return id_ != INVALID_ID && HRL_IsValidScene(id_); }
+void Scene::Release() { if (id_ != INVALID_ID) { HRL_DeleteScene(id_); id_ = INVALID_ID; } }
 HRL_MOVE(Scene)
-Mesh Scene::CreateSprite(){return Mesh(HRL_CreateMeshSprite(id_));}
-Mesh Scene::CreateMesh3D(const Vertex3D* v,std::size_t n,const uint* i,std::size_t ni){return Mesh(HRL_CreateMesh3D(id_,reinterpret_cast<const HRL_Vertex3D*>(v),n,reinterpret_cast<const HRL_uint*>(i),ni));}
-Mesh Scene::CreateSkeletalMesh(const SkeletalMeshData& d){return Mesh(HRL_CreateSkeletalMesh(id_,reinterpret_cast<const HRL_SkeletalMeshData*>(&d)));}
-Mesh Scene::CreateMeshFromFile(EMeshType t,const void* d,std::size_t s){return Mesh(HRL_CreateMeshFromFile(id_,ToCEnum<HRL_EMeshType>(t),static_cast<const char*>(d),s));}
-Light Scene::CreateLight(ELightType t){return Light(HRL_CreateLight(id_,ToCEnum<HRL_ELightType>(t)));}
-Camera Scene::CreateCamera(ECameraType t){return Camera(HRL_CreateCamera(id_,ToCEnum<HRL_ECameraType>(t)));}
-Viewport Scene::CreateViewport(const Camera* c,float x,float y,float w,float h){return Viewport(HRL_CreateViewport(id_,c?c->GetID():INVALID_ID,x,y,w,h));}
-PostProcess Scene::CreatePostProcess(const Material& m,int p){return PostProcess(HRL_CreatePostProcess(id_,m.GetID(),p));}
-void Scene::ResizeTexture(int w,int h){HRL_ResizeSceneTexture(id_,w,h);}
-void Scene::SetSkySphereEnabled(bool v){HRL_SetSkySphereEnabled(id_,v?1:0);}
-void Scene::SetSkySphereColors(float a,float b,float c,float d,float e,float f,float g,float h,float i){HRL_SetSkySphereColors(id_,a,b,c,d,e,f,g,h,i);}
-void Scene::SetSkySphereRotation(float a,float b,float c){HRL_SetSkySphereRotation(id_,a,b,c);}
-void Scene::SetSkySphereTexture(const Texture* t){HRL_SetSkySphereTexture(id_,t?t->GetID():INVALID_ID);}
-void Scene::SetEnvironmentMappingEnabled(bool v){HRL_SetEnvironmentMappingEnabled(id_,v?1:0);}
-void Scene::SetEnvironmentMap(const Texture* t){HRL_SetEnvironmentMap(id_,t?t->GetID():INVALID_ID);}
-void Scene::EnableColorPickingBuffer(bool v){HRL_EnableColorPickingBuffer(id_,v?1:0);}
-Mesh Scene::GetHoveredObject(int x,int y,EMeshType* t){
+void Scene::ResizeTexture(int w, int h) { HRL_ResizeSceneTexture(id_, w, h); }
+void Scene::SetSkySphereEnabled(bool v) { HRL_SetSkySphereEnabled(id_, v ? 1 : 0); }
+void Scene::SetSkySphereColors(float a, float b, float c, float d, float e, float f, float g, float h, float i) { HRL_SetSkySphereColors(id_, a, b, c, d, e, f, g, h, i); }
+void Scene::SetSkySphereRotation(float a, float b, float c) { HRL_SetSkySphereRotation(id_, a, b, c); }
+void Scene::SetSkySphereTexture(const Texture* t) { HRL_SetSkySphereTexture(id_, t ? t->GetID() : INVALID_ID); }
+void Scene::SetEnvironmentMappingEnabled(bool v) { HRL_SetEnvironmentMappingEnabled(id_, v ? 1 : 0); }
+void Scene::SetEnvironmentMap(const Texture* t) { HRL_SetEnvironmentMap(id_, t ? t->GetID() : INVALID_ID); }
+void Scene::EnableColorPickingBuffer(bool v) { HRL_EnableColorPickingBuffer(id_, v ? 1 : 0); }
+Mesh Scene::GetHoveredObject(int x, int y, EMeshType* t) {
     HRL_EMeshType cType;
-    HRL_id meshId = HRL_GetHoveredObject(id_,x,y,t ? &cType : nullptr);
+    HRL_id meshId = HRL_GetHoveredObject(id_, x, y, t ? &cType : nullptr);
     if (t) *t = static_cast<EMeshType>(cType);
     return Mesh::Borrowed(meshId);
 }
-void Scene::SetFogEnabled(bool v){HRL_SetFogEnabled(id_,v?1:0);}
-void Scene::SetFogMode(EFogType m){HRL_SetFogMode(id_,ToCEnum<HRL_EFogType>(m));}
-void Scene::SetFogColor(float r,float g,float b){HRL_SetFogColor(id_,r,g,b);}
-void Scene::SetFogDensity(float d){HRL_SetFogDensity(id_,d);}
-void Scene::SetFogLinearRange(float a,float b){HRL_SetFogLinearRange(id_,a,b);}
-void Scene::DrawAsDebugMode(EDebugView m){HRL_DrawSceneAsDebugMode(id_,ToCEnum<HRL_EDebugView>(m));}
-void Scene::TakeScreenshot(const char* p)const{HRL_TakeScreenshot(id_,p);}
+void Scene::SetFogEnabled(bool v) { HRL_SetFogEnabled(id_, v ? 1 : 0); }
+void Scene::SetFogMode(EFogType m) { HRL_SetFogMode(id_, ToCEnum<HRL_EFogType>(m)); }
+void Scene::SetFogColor(float r, float g, float b) { HRL_SetFogColor(id_, r, g, b); }
+void Scene::SetFogDensity(float d) { HRL_SetFogDensity(id_, d); }
+void Scene::SetFogLinearRange(float a, float b) { HRL_SetFogLinearRange(id_, a, b); }
+void Scene::DrawAsDebugMode(EDebugView m) { HRL_DrawSceneAsDebugMode(id_, ToCEnum<HRL_EDebugView>(m)); }
+void Scene::TakeScreenshot(const char* p) const { HRL_TakeScreenshot(id_, p); }
 
-HRL_COMMON(PostProcess,HRL_IsValidPostProcess,HRL_DeletePostProcess)
+PostProcess::PostProcess(Viewport& viewport, const Material& material, int priority)
+    : id_(HRL_CreatePostProcess(viewport.GetID(), material.GetID(), priority)) {}
+PostProcess::~PostProcess() { Release(); }
 HRL_MOVE(PostProcess)
+id PostProcess::GetID() const noexcept { return id_; }
+bool PostProcess::IsValid() const { return id_ != INVALID_ID && HRL_IsValidPostProcess(id_); }
+void PostProcess::Release() { if (id_ != INVALID_ID) { HRL_DeletePostProcess(id_); id_ = INVALID_ID; } }
 
-HRL_COMMON(Shader,HRL_IsValidShader,HRL_DeleteShader)
+Shader::Shader(const void* v, std::size_t vs, const void* f, std::size_t fs)
+    : id_(HRL_CreateShader(static_cast<const char*>(v), vs, static_cast<const char*>(f), fs)) {}
+Shader::~Shader() { Release(); }
 HRL_MOVE(Shader)
-Shader Shader::FromSource(const void* v,std::size_t vs,const void* f,std::size_t fs){
- return Shader(HRL_CreateShader(static_cast<const char*>(v),vs,static_cast<const char*>(f),fs));
-}
+id Shader::GetID() const noexcept { return id_; }
+bool Shader::IsValid() const { return id_ != INVALID_ID && HRL_IsValidShader(id_); }
+void Shader::Release() { if (id_ != INVALID_ID) { HRL_DeleteShader(id_); id_ = INVALID_ID; } }
 
-HRL_COMMON(Material,HRL_IsValidMaterial,HRL_DeleteMaterial)
+Material::Material(const Shader& s) : id_(HRL_CreateMaterial(s.GetID())) {}
+Material::~Material() { Release(); }
 HRL_MOVE(Material)
-Material Material::Create(const Shader& s){return Material(HRL_CreateMaterial(s.GetID()));}
-void Material::SetInt(const char* n,int v){HRL_MaterialSetInt(id_,n,v);}
-void Material::SetTexture(const char* n,const Texture& t){HRL_MaterialSetTexture(id_,n,t.GetID());}
-void Material::SetBool(const char* n,bool v){HRL_MaterialSetBool(id_,n,v?1:0);}
-void Material::SetFloat(const char* n,float v){HRL_MaterialSetFloat(id_,n,v);}
-void Material::SetVec2(const char* n,float x,float y){HRL_MaterialSetVec2(id_,n,x,y);}
-void Material::SetVec3(const char* n,float x,float y,float z){HRL_MaterialSetVec3(id_,n,x,y,z);}
-void Material::SetVec4(const char* n,float x,float y,float z,float w){HRL_MaterialSetVec4(id_,n,x,y,z,w);}
-void Material::SetEmissiveColor(float r,float g,float b,float a){HRL_MaterialSetEmissiveColor(id_,r,g,b,a);}
+id Material::GetID() const noexcept { return id_; }
+bool Material::IsValid() const { return id_ != INVALID_ID && HRL_IsValidMaterial(id_); }
+void Material::Release() { if (id_ != INVALID_ID) { HRL_DeleteMaterial(id_); id_ = INVALID_ID; } }
+void Material::SetInt(const char* n, int v) { HRL_MaterialSetInt(id_, n, v); }
+void Material::SetTexture(const char* n, const Texture& t) { HRL_MaterialSetTexture(id_, n, t.GetID()); }
+void Material::SetBool(const char* n, bool v) { HRL_MaterialSetBool(id_, n, v ? 1 : 0); }
+void Material::SetFloat(const char* n, float v) { HRL_MaterialSetFloat(id_, n, v); }
+void Material::SetVec2(const char* n, float x, float y) { HRL_MaterialSetVec2(id_, n, x, y); }
+void Material::SetVec3(const char* n, float x, float y, float z) { HRL_MaterialSetVec3(id_, n, x, y, z); }
+void Material::SetVec4(const char* n, float x, float y, float z, float w) { HRL_MaterialSetVec4(id_, n, x, y, z, w); }
+void Material::SetEmissiveColor(float r, float g, float b, float a) { HRL_MaterialSetEmissiveColor(id_, r, g, b, a); }
 
-HRL_COMMON(Viewport,HRL_IsValidViewport,HRL_DeleteViewport)
+Viewport::Viewport(Scene& scene, const Camera* camera, float x, float y, float w, float h)
+    : id_(HRL_CreateViewport(scene.GetID(), camera ? camera->GetID() : INVALID_ID, x, y, w, h)) {}
+Viewport::~Viewport() { Release(); }
 HRL_MOVE(Viewport)
-void Viewport::SetCamera(const Camera* c){HRL_SetViewportCamera(id_,c?c->GetID():INVALID_ID);}
-void Viewport::SetRect(float x,float y,float w,float h){HRL_SetViewportRect(id_,x,y,w,h);}
-Widget Viewport::CreateWidget(EWidgetType t){return Widget(HRL_CreateWidget(id_,ToCEnum<HRL_EWidgetType>(t)));}
+id Viewport::GetID() const noexcept { return id_; }
+bool Viewport::IsValid() const { return id_ != INVALID_ID && HRL_IsValidViewport(id_); }
+void Viewport::Release() { if (id_ != INVALID_ID) { HRL_DeleteViewport(id_); id_ = INVALID_ID; } }
+void Viewport::SetCamera(const Camera* c) { HRL_SetViewportCamera(id_, c ? c->GetID() : INVALID_ID); }
+void Viewport::SetRect(float x, float y, float w, float h) { HRL_SetViewportRect(id_, x, y, w, h); }
 
-HRL_COMMON(Camera,HRL_IsValidCamera,HRL_DeleteCamera)
+Camera::Camera(Scene& scene, ECameraType type)
+    : id_(HRL_CreateCamera(scene.GetID(), ToCEnum<HRL_ECameraType>(type))) {}
+Camera::~Camera() { Release(); }
 HRL_MOVE(Camera)
-void Camera::SetType(ECameraType t){HRL_SetCameraType(id_,ToCEnum<HRL_ECameraType>(t));}
-void Camera::SetOrthoVertical(float v){HRL_SetCameraOrthoVertical(id_,v);}
-void Camera::SetPerspectiveFov(float v){HRL_SetCameraPerspectiveFov(id_,v);}
-void Camera::SetNearPlane(float v){HRL_SetCameraNearPlane(id_,v);}
-void Camera::SetFarPlane(float v){HRL_SetCameraFarPlane(id_,v);}
-void Camera::SetLocation(float x,float y,float z){HRL_SetCameraLocation(id_,x,y,z);}
-void Camera::SetRotation(float x,float y,float z){HRL_SetCameraRotation(id_,x,y,z);}
+id Camera::GetID() const noexcept { return id_; }
+bool Camera::IsValid() const { return id_ != INVALID_ID && HRL_IsValidCamera(id_); }
+void Camera::Release() { if (id_ != INVALID_ID) { HRL_DeleteCamera(id_); id_ = INVALID_ID; } }
+void Camera::SetType(ECameraType t) { HRL_SetCameraType(id_, ToCEnum<HRL_ECameraType>(t)); }
+void Camera::SetOrthoVertical(float v) { HRL_SetCameraOrthoVertical(id_, v); }
+void Camera::SetPerspectiveFov(float v) { HRL_SetCameraPerspectiveFov(id_, v); }
+void Camera::SetNearPlane(float v) { HRL_SetCameraNearPlane(id_, v); }
+void Camera::SetFarPlane(float v) { HRL_SetCameraFarPlane(id_, v); }
+void Camera::SetLocation(float x, float y, float z) { HRL_SetCameraLocation(id_, x, y, z); }
+void Camera::SetRotation(float x, float y, float z) { HRL_SetCameraRotation(id_, x, y, z); }
 
-HRL_COMMON(Font,HRL_IsValidFont,HRL_DeleteFont)
+Font::Font(const void* d, std::size_t s)
+    : id_(HRL_CreateFont(static_cast<const char*>(d), s)) {}
+Font::~Font() { Release(); }
 HRL_MOVE(Font)
-Font Font::FromMemory(const void* d,std::size_t s){return Font(HRL_CreateFont(static_cast<const char*>(d),s));}
+id Font::GetID() const noexcept { return id_; }
+bool Font::IsValid() const { return id_ != INVALID_ID && HRL_IsValidFont(id_); }
+void Font::Release() { if (id_ != INVALID_ID) { HRL_DeleteFont(id_); id_ = INVALID_ID; } }
 
-Widget::Widget()=default;
-Widget::Widget(id v):id_(v){}
-Widget::~Widget(){Release();}
-id Widget::GetID() const noexcept{return id_;}
-bool Widget::IsValid() const{return id_!=INVALID_ID;}
-void Widget::Release(){
-    if(id_!=INVALID_ID){
-        HRL_SetButtonPressedCallback(id_,nullptr,nullptr);
+Widget::Widget(Viewport& viewport, EWidgetType type)
+    : id_(HRL_CreateWidget(viewport.GetID(), ToCEnum<HRL_EWidgetType>(type))) {}
+Widget::~Widget() { Release(); }
+id Widget::GetID() const noexcept { return id_; }
+bool Widget::IsValid() const { return id_ != INVALID_ID; }
+void Widget::Release() {
+    if (id_ != INVALID_ID) {
+        HRL_SetButtonPressedCallback(id_, nullptr, nullptr);
         HRL_DeleteWidget(id_);
-        id_=INVALID_ID;
+        id_ = INVALID_ID;
     }
     delete static_cast<ButtonCallbackState*>(buttonCallbackState_);
-    buttonCallbackState_=nullptr;
+    buttonCallbackState_ = nullptr;
 }
-HRL_MOVE(Widget)
-void Widget::SetPosition(float x,float y){HRL_SetWidgetPosition(id_,x,y);}
-void Widget::SetSize(float w,float h){HRL_SetWidgetSize(id_,w,h);}
-void Widget::SetAlpha(float a){HRL_SetWidgetAlpha(id_,a);}
-bool Widget::IsHovered()const{return HRL_IsWidgetHovered(id_)!=0;}
-void Widget::SetAnchor(float x,float y){HRL_SetWidgetAnchor(id_,x,y);}
-void Widget::SetButtonClickable(bool v){HRL_SetButtonClickable(id_,v?1:0);}
-void Widget::SetButtonText(const char* t){HRL_SetButtonText(id_,t);}
-void Widget::SetButtonTextTintColor(EWidgetState s,float r,float g,float b,float a){HRL_SetButtonTextTintColor(id_,ToCEnum<HRL_EWidgetState>(s),r,g,b,a);}
-void Widget::SetButtonTextFont(const Font& f){HRL_SetButtonTextFont(id_,f.GetID());}
-void Widget::SetButtonBackgroundTexture(EWidgetState s,const Texture* t){HRL_SetButtonBackgroundTexture(id_,ToCEnum<HRL_EWidgetState>(s),t?t->GetID():0);}
-void Widget::SetButtonBackgroundTintColor(EWidgetState s,float r,float g,float b,float a){HRL_SetButtonBackgroundTintColor(id_,ToCEnum<HRL_EWidgetState>(s),r,g,b,a);}
-void Widget::SetButtonPressedCallback(ButtonPressedCallback cb,void* u){
+Widget::Widget(Widget&& o) noexcept
+    : id_(o.id_), buttonCallbackState_(o.buttonCallbackState_) {
+    o.id_ = INVALID_ID;
+    o.buttonCallbackState_ = nullptr;
+}
+Widget& Widget::operator=(Widget&& o) noexcept {
+    if (this != &o) {
+        Release();
+        id_ = o.id_;
+        buttonCallbackState_ = o.buttonCallbackState_;
+        o.id_ = INVALID_ID;
+        o.buttonCallbackState_ = nullptr;
+    }
+    return *this;
+}
+void Widget::SetPosition(float x, float y) { HRL_SetWidgetPosition(id_, x, y); }
+void Widget::SetSize(float w, float h) { HRL_SetWidgetSize(id_, w, h); }
+void Widget::SetAlpha(float a) { HRL_SetWidgetAlpha(id_, a); }
+bool Widget::IsHovered() const { return HRL_IsWidgetHovered(id_) != 0; }
+void Widget::SetAnchor(float x, float y) { HRL_SetWidgetAnchor(id_, x, y); }
+void Widget::SetButtonClickable(bool v) { HRL_SetButtonClickable(id_, v ? 1 : 0); }
+void Widget::SetButtonText(const char* t) { HRL_SetButtonText(id_, t); }
+void Widget::SetButtonTextTintColor(EWidgetState s, float r, float g, float b, float a) { HRL_SetButtonTextTintColor(id_, ToCEnum<HRL_EWidgetState>(s), r, g, b, a); }
+void Widget::SetButtonTextFont(const Font& f) { HRL_SetButtonTextFont(id_, f.GetID()); }
+void Widget::SetButtonBackgroundTexture(EWidgetState s, const Texture* t) { HRL_SetButtonBackgroundTexture(id_, ToCEnum<HRL_EWidgetState>(s), t ? t->GetID() : 0); }
+void Widget::SetButtonBackgroundTintColor(EWidgetState s, float r, float g, float b, float a) { HRL_SetButtonBackgroundTintColor(id_, ToCEnum<HRL_EWidgetState>(s), r, g, b, a); }
+void Widget::SetButtonPressedCallback(ButtonPressedCallback cb, void* u) {
     auto* state = static_cast<ButtonCallbackState*>(buttonCallbackState_);
     delete state;
     buttonCallbackState_ = nullptr;
     if (!cb) {
-        HRL_SetButtonPressedCallback(id_,nullptr,nullptr);
+        HRL_SetButtonPressedCallback(id_, nullptr, nullptr);
         return;
     }
-    state = new ButtonCallbackState{cb,u};
+    state = new ButtonCallbackState{cb, u};
     buttonCallbackState_ = state;
-    HRL_SetButtonPressedCallback(id_,HRL_CPP_ButtonPressedBridge,state);
+    HRL_SetButtonPressedCallback(id_, HRL_CPP_ButtonPressedBridge, state);
 }
-void Widget::SetLabelText(const char* t){HRL_SetLabelText(id_,t);}
-void Widget::SetLabelFont(const Font& f){HRL_SetLabelFont(id_,f.GetID());}
-void Widget::SetLabelTintColor(float r,float g,float b,float a){HRL_SetLabelTintColor(id_,r,g,b,a);}
+void Widget::SetLabelText(const char* t) { HRL_SetLabelText(id_, t); }
+void Widget::SetLabelFont(const Font& f) { HRL_SetLabelFont(id_, f.GetID()); }
+void Widget::SetLabelTintColor(float r, float g, float b, float a) { HRL_SetLabelTintColor(id_, r, g, b, a); }
 
 void MouseMoved(float x,float y){HRL_MouseMovedCallback(x,y);}
 void UpdateSkeletalAnimations(float d){HRL_UpdateSkeletalAnimations(d);}

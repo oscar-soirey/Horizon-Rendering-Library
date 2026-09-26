@@ -1,354 +1,145 @@
 #include "gi.h"
+#include "gl33_texture.h"
+#include "gl33_renderer.h"
 #include "../../core/utils_functions.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <string>
+#include <utility>
+#include <glm/gtc/matrix_transform.hpp>
+
+extern HRL_Context* GetPrivateContext();
 
 namespace {
 
-static const char* kFullscreenVertexShader = R"GLSL(
-#version 330 core
-layout(location = 0) in vec2 aPos;
-out vec2 vUV;
-void main()
+constexpr float kPi = 3.14159265358979323846f;
+constexpr float kInvPi = 1.0f / kPi;
+constexpr float kRayEpsilon = 0.003f;
+constexpr float kProbeMargin = 0.75f;
+constexpr int kProbeNX = 8;
+constexpr int kProbeNY = 6;
+constexpr int kProbeNZ = 8;
+constexpr int kRaysPerProbe = 12;
+constexpr int kProbeBudgetPerFrame = 8;
+constexpr int kBVHLeafSize = 4;
+constexpr float kIndirectBounceWeight = 0.28f;
+constexpr float kGIShaderStrength = 1.5f;
+constexpr int kMaxTriangleCount = 200000;
+
+const glm::vec3 kProbeAxes[6] = {
+    glm::vec3( 1.f, 0.f, 0.f),
+    glm::vec3(-1.f, 0.f, 0.f),
+    glm::vec3( 0.f, 1.f, 0.f),
+    glm::vec3( 0.f,-1.f, 0.f),
+    glm::vec3( 0.f, 0.f, 1.f),
+    glm::vec3( 0.f, 0.f,-1.f),
+};
+
+static glm::vec3 SafeNormalize(const glm::vec3& v, const glm::vec3& fallback)
 {
-    vUV = aPos * 0.5 + 0.5;
-    gl_Position = vec4(aPos, 0.0, 1.0);
-}
-)GLSL";
-
-//
-// This is deliberately a screen-space radiance gather rather than a fragile
-// view-space ray tracer. It gathers nearby visible surfaces from Scene Color,
-// weights them by receiver/source orientation and 3D proximity, and leaves the
-// receiver albedo multiplication to the composite stage.
-//
-static const char* kRawSSGIFragmentShader = R"GLSL(
-#version 330 core
-
-in vec2 vUV;
-out vec4 FragColor;
-
-uniform sampler2D uSceneColor;
-uniform sampler2D uNormal;
-uniform sampler2D uDepth;
-uniform mat4 uInvProjection;
-uniform mat4 uView;
-uniform vec2 uViewportSize;
-uniform vec4 uViewportRect;
-uniform float uRadiusPixels;
-uniform float uGIIntensity;
-uniform float uMaxRadiance;
-uniform float uFrameIndex;
-
-const float PI = 3.14159265358979323846;
-const int SAMPLE_COUNT = 24;
-
-vec2 GlobalUV(vec2 localUV)
-{
-    return mix(uViewportRect.xy, uViewportRect.zw, localUV);
+    const float l2 = glm::dot(v, v);
+    return std::isfinite(l2) && l2 > 1e-10f ? v * (1.0f / std::sqrt(l2)) : fallback;
 }
 
-float SampleDepth(vec2 localUV)
+static glm::vec3 FibonacciSphereDirection(int i, int count)
 {
-    return texture(uDepth, GlobalUV(clamp(localUV, vec2(0.0), vec2(1.0)))).r;
+    const float goldenAngle = 2.39996322972865332f;
+    const float y = 1.0f - 2.0f * (float(i) + 0.5f) / float(count);
+    const float r = std::sqrt(std::max(0.0f, 1.0f - y * y));
+    const float angle = goldenAngle * float(i);
+    return SafeNormalize(
+        glm::vec3(std::cos(angle) * r, y, std::sin(angle) * r),
+        glm::vec3(0.f, 1.f, 0.f));
 }
 
-vec3 ViewPosition(vec2 localUV, float depth)
+static glm::vec3 RotateAroundY(const glm::vec3& v, float angle)
 {
-    vec2 ndc = localUV * 2.0 - 1.0;
-    float ndcZ = depth * 2.0 - 1.0;
-    vec4 p = uInvProjection * vec4(ndc, ndcZ, 1.0);
-    return p.xyz / max(abs(p.w), 1e-6);
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    return glm::vec3(c * v.x - s * v.z, v.y, s * v.x + c * v.z);
 }
 
-vec3 SampleNormalVS(vec2 localUV)
+static bool RayAabb(
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    const glm::vec3& bmin,
+    const glm::vec3& bmax,
+    float maxDistance)
 {
-    vec3 nWorld = texture(uNormal, GlobalUV(clamp(localUV, vec2(0.0), vec2(1.0)))).xyz;
-    float n2 = dot(nWorld, nWorld);
-    if (n2 <= 1e-8)
-        return vec3(0.0, 0.0, 1.0);
-    return normalize(mat3(uView) * nWorld);
-}
+    float tmin = 0.f;
+    float tmax = maxDistance;
 
-float Hash12(vec2 p)
-{
-    p = fract(p * vec2(0.1031, 0.11369));
-    p += dot(p, p.yx + 33.33);
-    return fract((p.x + p.y) * p.x);
-}
-
-void main()
-{
-    float receiverDepth = SampleDepth(vUV);
-    if (receiverDepth >= 0.99999)
+    for (int axis = 0; axis < 3; ++axis)
     {
-        FragColor = vec4(0.0);
-        return;
-    }
-
-    vec3 receiverPosition = ViewPosition(vUV, receiverDepth);
-    vec3 receiverNormal = SampleNormalVS(vUV);
-
-    float pixelNoise = Hash12(gl_FragCoord.xy + vec2(uFrameIndex * 0.37, uFrameIndex * 1.13));
-    float goldenAngle = 2.399963229728653;
-    vec2 invViewport = 1.0 / max(uViewportSize, vec2(1.0));
-
-    vec3 accumulated = vec3(0.0);
-    float accumulatedWeight = 0.0;
-
-    for (int i = 0; i < SAMPLE_COUNT; ++i)
-    {
-        float fi = float(i) + 0.5;
-        float normalized = fi / float(SAMPLE_COUNT);
-        float radius = sqrt(normalized) * uRadiusPixels;
-        float angle = goldenAngle * float(i) + pixelNoise * 2.0 * PI;
-
-        vec2 dir = vec2(cos(angle), sin(angle));
-        vec2 sampleUV = vUV + dir * radius * invViewport;
-
-        if (sampleUV.x <= 0.002 || sampleUV.y <= 0.002 ||
-            sampleUV.x >= 0.998 || sampleUV.y >= 0.998)
-            continue;
-
-        float sampleDepth = SampleDepth(sampleUV);
-        if (sampleDepth >= 0.99999)
-            continue;
-
-        vec3 samplePosition = ViewPosition(sampleUV, sampleDepth);
-        vec3 toSource = samplePosition - receiverPosition;
-        float distanceToSource = length(toSource);
-        if (distanceToSource < 0.025)
-            continue;
-
-        vec3 lightDirection = toSource / distanceToSource;
-        vec3 sourceNormal = SampleNormalVS(sampleUV);
-
-        float receiverCos = max(dot(receiverNormal, lightDirection), 0.0);
-        // Keep a small floor so nearby visible radiance can still bleed between
-        // surfaces whose exact projected direction is imperfect in screen space.
-        receiverCos = max(receiverCos, 0.10);
-
-        float sourceCos = max(dot(sourceNormal, -lightDirection), 0.0);
-        float sourceWeight = mix(0.30, 1.0, sourceCos);
-
-        // Depth-aware proximity. The tolerance scales with view distance, making
-        // the gather work with both small and large scenes.
-        float depthScale = max(0.04, abs(receiverPosition.z) * 0.12);
-        float depthDifference = abs(samplePosition.z - receiverPosition.z);
-        float depthWeight = exp(-depthDifference / max(depthScale, 1e-4));
-
-        float radiusWeight = 1.0 - smoothstep(0.05 * uRadiusPixels, uRadiusPixels, radius);
-        radiusWeight = max(radiusWeight, 0.06);
-
-        vec3 sourceRadiance = max(texture(uSceneColor, GlobalUV(sampleUV)).rgb, vec3(0.0));
-        sourceRadiance = min(sourceRadiance, vec3(4.0));
-        float sourceLuma = dot(sourceRadiance, vec3(0.2126, 0.7152, 0.0722));
-        if (sourceLuma <= 1e-4)
-            continue;
-
-        // Mild world-distance attenuation. It prevents distant screen samples from
-        // becoming an unbounded ambient term without making the effect scale-away.
-        float distanceWeight = 1.0 / (1.0 + distanceToSource * distanceToSource * 0.01);
-        float weight = receiverCos * sourceWeight * depthWeight * radiusWeight * distanceWeight;
-
-        accumulated += sourceRadiance * weight;
-        accumulatedWeight += weight;
-    }
-
-    // Normalize by the valid sample weight instead of the fixed sample count.
-    // This keeps the bounce visible even when only a small part of the neighborhood
-    // contains useful radiance, while the radiance clamp below limits outliers.
-    vec3 gi = accumulated / max(accumulatedWeight, 0.75);
-    gi *= uGIIntensity;
-
-    float luminance = dot(gi, vec3(0.2126, 0.7152, 0.0722));
-    if (luminance > uMaxRadiance)
-        gi *= uMaxRadiance / max(luminance, 1e-5);
-
-    FragColor = vec4(max(gi, vec3(0.0)), 1.0);
-}
-)GLSL";
-
-static const char* kDenoiseFragmentShader = R"GLSL(
-#version 330 core
-
-in vec2 vUV;
-out vec4 FragColor;
-
-uniform sampler2D uInputGI;
-uniform sampler2D uDepth;
-uniform sampler2D uNormal;
-uniform mat4 uInvProjection;
-uniform mat4 uView;
-uniform vec4 uViewportRect;
-uniform vec2 uViewportSize;
-uniform vec2 uDirection;
-uniform float uSigma;
-uniform float uDepthSigma;
-uniform float uNormalPower;
-
-vec2 GlobalUV(vec2 localUV)
-{
-    return mix(uViewportRect.xy, uViewportRect.zw, localUV);
-}
-
-float SampleDepth(vec2 localUV)
-{
-    return texture(uDepth, GlobalUV(clamp(localUV, vec2(0.0), vec2(1.0)))).r;
-}
-
-vec3 ViewPosition(vec2 localUV, float depth)
-{
-    vec2 ndc = localUV * 2.0 - 1.0;
-    float ndcZ = depth * 2.0 - 1.0;
-    vec4 p = uInvProjection * vec4(ndc, ndcZ, 1.0);
-    return p.xyz / max(abs(p.w), 1e-6);
-}
-
-vec3 SampleNormalVS(vec2 localUV)
-{
-    vec3 nWorld = texture(uNormal, GlobalUV(clamp(localUV, vec2(0.0), vec2(1.0)))).xyz;
-    float n2 = dot(nWorld, nWorld);
-    if (n2 <= 1e-8)
-        return vec3(0.0, 0.0, 1.0);
-    return normalize(mat3(uView) * nWorld);
-}
-
-void main()
-{
-    float centerDepth = SampleDepth(vUV);
-    if (centerDepth >= 0.99999)
-    {
-        FragColor = vec4(0.0);
-        return;
-    }
-
-    vec2 texel = 1.0 / max(uViewportSize, vec2(1.0));
-    vec3 centerGI = texture(uInputGI, GlobalUV(vUV)).rgb;
-    vec3 centerP = ViewPosition(vUV, centerDepth);
-    vec3 centerN = SampleNormalVS(vUV);
-
-    vec3 sum = centerGI;
-    float weightSum = 1.0;
-
-    const int RADIUS = 2;
-    for (int i = 1; i <= RADIUS; ++i)
-    {
-        float fi = float(i);
-        float spatialWeight = exp(-(fi * fi) / (2.0 * uSigma * uSigma));
-
-        for (int sign = -1; sign <= 1; sign += 2)
+        const float o = origin[axis];
+        const float d = direction[axis];
+        if (std::abs(d) < 1e-8f)
         {
-            vec2 offsetUV = clamp(vUV + uDirection * texel * fi * float(sign), 0.0, 1.0);
-            float d = SampleDepth(offsetUV);
-            if (d >= 0.99999)
-                continue;
-
-            vec3 P = ViewPosition(offsetUV, d);
-            vec3 N = SampleNormalVS(offsetUV);
-
-            float depthScale = max(0.05, abs(centerP.z) * 0.10);
-            float depthWeight = exp(-abs(P.z - centerP.z) /
-                max(uDepthSigma * depthScale, 1e-4));
-            float normalWeight = pow(max(dot(centerN, N), 0.0), uNormalPower);
-            float w = spatialWeight * depthWeight * normalWeight;
-
-            sum += texture(uInputGI, GlobalUV(offsetUV)).rgb * w;
-            weightSum += w;
+            if (o < bmin[axis] || o > bmax[axis])
+                return false;
+            continue;
         }
+
+        const float invD = 1.f / d;
+        float t0 = (bmin[axis] - o) * invD;
+        float t1 = (bmax[axis] - o) * invD;
+        if (t0 > t1)
+            std::swap(t0, t1);
+        tmin = std::max(tmin, t0);
+        tmax = std::min(tmax, t1);
+        if (tmax < tmin)
+            return false;
     }
-
-    FragColor = vec4(sum / max(weightSum, 1e-5), 1.0);
+    return tmax >= 0.f && tmin <= maxDistance;
 }
-)GLSL";
 
-static const char* kCompositeFragmentShader = R"GLSL(
-#version 330 core
-
-in vec2 vUV;
-out vec4 FragColor;
-
-uniform sampler2D uSceneColor;
-uniform sampler2D uGI;
-uniform sampler2D uAlbedo;
-uniform vec4 uViewportRect;
-uniform float uStrength;
-
-vec2 GlobalUV(vec2 localUV)
+static bool RayTriangle(
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    const GL_33_GI::Triangle& tri,
+    float maxDistance,
+    float& outT,
+    float& outU,
+    float& outV)
 {
-    return mix(uViewportRect.xy, uViewportRect.zw, localUV);
+    const glm::vec3 edge1 = tri.p1 - tri.p0;
+    const glm::vec3 edge2 = tri.p2 - tri.p0;
+    const glm::vec3 pvec = glm::cross(direction, edge2);
+    const float det = glm::dot(edge1, pvec);
+    if (std::abs(det) < 1e-8f)
+        return false;
+
+    const float invDet = 1.f / det;
+    const glm::vec3 tvec = origin - tri.p0;
+    const float u = glm::dot(tvec, pvec) * invDet;
+    if (u < 0.f || u > 1.f)
+        return false;
+
+    const glm::vec3 qvec = glm::cross(tvec, edge1);
+    const float v = glm::dot(direction, qvec) * invDet;
+    if (v < 0.f || u + v > 1.f)
+        return false;
+
+    const float t = glm::dot(edge2, qvec) * invDet;
+    if (t <= kRayEpsilon || t > maxDistance)
+        return false;
+    outT = t;
+    outU = u;
+    outV = v;
+    return true;
 }
 
-void main()
+static size_t ProbeLinearIndex(int x, int y, int z, int nx, int ny)
 {
-    vec2 uv = GlobalUV(vUV);
-    vec4 scene = texture(uSceneColor, uv);
-    vec3 gi = max(texture(uGI, uv).rgb, vec3(0.0));
-    vec3 albedo = max(texture(uAlbedo, uv).rgb, vec3(0.0));
-
-    // Indirect diffuse is reconstructed separately from the receiver material.
-    // Scene Color is already lit, while albedo is the local diffuse response.
-    vec3 indirect = gi * albedo * uStrength;
-    FragColor = vec4(max(scene.rgb + indirect, vec3(0.0)), scene.a);
-}
-)GLSL";
-
-static GLuint CompileShader(GLenum type, const char* source, const char* label)
-{
-    GLuint shader = glCreateShader(type);
-    if (!shader)
-        return 0;
-
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
-
-    GLint ok = GL_FALSE;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-    if (ok != GL_TRUE)
-    {
-        char log[4096] = {};
-        glGetShaderInfoLog(shader, (GLsizei)sizeof(log), nullptr, log);
-        SetErrorCode(HRL_SHADER_COMPILE_FAIL, HRL_SEVERITY_ERROR,
-            "GL33 SSGI " + std::string(label) + " shader compilation failed: " + log);
-        glDeleteShader(shader);
-        return 0;
-    }
-    return shader;
+    return (size_t(z) * size_t(ny) + size_t(y)) * size_t(nx) + size_t(x);
 }
 
-static GLuint LinkProgram(GLuint vs, GLuint fs, const char* label)
-{
-    GLuint program = glCreateProgram();
-    if (!program)
-        return 0;
-
-    glAttachShader(program, vs);
-    glAttachShader(program, fs);
-    glLinkProgram(program);
-
-    GLint ok = GL_FALSE;
-    glGetProgramiv(program, GL_LINK_STATUS, &ok);
-    if (ok != GL_TRUE)
-    {
-        char log[4096] = {};
-        glGetProgramInfoLog(program, (GLsizei)sizeof(log), nullptr, log);
-        SetErrorCode(HRL_SHADER_COMPILE_FAIL, HRL_SEVERITY_ERROR,
-            std::string("GL33 SSGI ") + label + " program link failed: " + log);
-        glDeleteProgram(program);
-        return 0;
-    }
-    return program;
-}
-
-static void DrawFullscreen(GLuint vao)
-{
-    glBindVertexArray(vao);
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
-    glBindVertexArray(0);
-}
 
 } // namespace
 
@@ -362,253 +153,30 @@ void GL_33_GI::Initialize(GLuint fullscreenVao)
     fullscreenVao_ = fullscreenVao;
 }
 
-GLuint GL_33_GI::CreateProgram(const char* vertexSource, const char* fragmentSource, const char* label)
-{
-    GLuint vs = CompileShader(GL_VERTEX_SHADER, vertexSource, label);
-    if (!vs)
-        return 0;
-
-    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fragmentSource, label);
-    if (!fs)
-    {
-        glDeleteShader(vs);
-        return 0;
-    }
-
-    GLuint program = LinkProgram(vs, fs, label);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    return program;
-}
-
-bool GL_33_GI::EnsureProgram()
-{
-    if (rawProgram_ && denoiseProgram_ && compositeProgram_)
-        return true;
-
-    if (!rawProgram_)
-        rawProgram_ = CreateProgram(kFullscreenVertexShader, kRawSSGIFragmentShader, "raw");
-    if (!rawProgram_)
-        return false;
-
-    if (!denoiseProgram_)
-        denoiseProgram_ = CreateProgram(kFullscreenVertexShader, kDenoiseFragmentShader, "denoise");
-    if (!denoiseProgram_)
-        return false;
-
-    if (!compositeProgram_)
-        compositeProgram_ = CreateProgram(kFullscreenVertexShader, kCompositeFragmentShader, "composite");
-    if (!compositeProgram_)
-        return false;
-
-    rawLocSceneColor_ = glGetUniformLocation(rawProgram_, "uSceneColor");
-    rawLocNormal_ = glGetUniformLocation(rawProgram_, "uNormal");
-    rawLocDepth_ = glGetUniformLocation(rawProgram_, "uDepth");
-    rawLocInvProjection_ = glGetUniformLocation(rawProgram_, "uInvProjection");
-    rawLocView_ = glGetUniformLocation(rawProgram_, "uView");
-    rawLocViewportRect_ = glGetUniformLocation(rawProgram_, "uViewportRect");
-    rawLocViewportSize_ = glGetUniformLocation(rawProgram_, "uViewportSize");
-    rawLocRadiusPixels_ = glGetUniformLocation(rawProgram_, "uRadiusPixels");
-    rawLocGIIntensity_ = glGetUniformLocation(rawProgram_, "uGIIntensity");
-    rawLocMaxRadiance_ = glGetUniformLocation(rawProgram_, "uMaxRadiance");
-    rawLocFrameIndex_ = glGetUniformLocation(rawProgram_, "uFrameIndex");
-
-    glUseProgram(rawProgram_);
-    glUniform1i(rawLocSceneColor_, 0);
-    glUniform1i(rawLocDepth_, 1);
-    glUniform1i(rawLocNormal_, 2);
-
-    denoiseLocInputGI_ = glGetUniformLocation(denoiseProgram_, "uInputGI");
-    denoiseLocDepth_ = glGetUniformLocation(denoiseProgram_, "uDepth");
-    denoiseLocNormal_ = glGetUniformLocation(denoiseProgram_, "uNormal");
-    denoiseLocInvProjection_ = glGetUniformLocation(denoiseProgram_, "uInvProjection");
-    denoiseLocView_ = glGetUniformLocation(denoiseProgram_, "uView");
-    denoiseLocViewportRect_ = glGetUniformLocation(denoiseProgram_, "uViewportRect");
-    denoiseLocViewportSize_ = glGetUniformLocation(denoiseProgram_, "uViewportSize");
-    denoiseLocDirection_ = glGetUniformLocation(denoiseProgram_, "uDirection");
-    denoiseLocSigma_ = glGetUniformLocation(denoiseProgram_, "uSigma");
-    denoiseLocDepthSigma_ = glGetUniformLocation(denoiseProgram_, "uDepthSigma");
-    denoiseLocNormalPower_ = glGetUniformLocation(denoiseProgram_, "uNormalPower");
-
-    glUseProgram(denoiseProgram_);
-    glUniform1i(denoiseLocInputGI_, 0);
-    glUniform1i(denoiseLocDepth_, 1);
-    glUniform1i(denoiseLocNormal_, 2);
-
-    compositeLocSceneColor_ = glGetUniformLocation(compositeProgram_, "uSceneColor");
-    compositeLocGI_ = glGetUniformLocation(compositeProgram_, "uGI");
-    compositeLocAlbedo_ = glGetUniformLocation(compositeProgram_, "uAlbedo");
-    compositeLocStrength_ = glGetUniformLocation(compositeProgram_, "uStrength");
-    compositeLocViewportRect_ = glGetUniformLocation(compositeProgram_, "uViewportRect");
-
-    glUseProgram(compositeProgram_);
-    glUniform1i(compositeLocSceneColor_, 0);
-    glUniform1i(compositeLocGI_, 1);
-    glUniform1i(compositeLocAlbedo_, 2);
-
-    glUseProgram(0);
-    return true;
-}
-
 void GL_33_GI::Shutdown()
 {
-    for (auto& sceneEntry : scenes_)
-        for (auto& viewportEntry : sceneEntry.second)
-            DestroySceneResources(viewportEntry.second);
+    for (auto& [sceneId, resources] : scenes_)
+    {
+        (void)sceneId;
+        glDeleteBuffers(3, resources.probeUbo);
+        resources.probeUbo[0] = resources.probeUbo[1] = resources.probeUbo[2] = 0;
+    }
     scenes_.clear();
-
-    if (rawProgram_) glDeleteProgram(rawProgram_);
-    if (denoiseProgram_) glDeleteProgram(denoiseProgram_);
-    if (compositeProgram_) glDeleteProgram(compositeProgram_);
-    rawProgram_ = denoiseProgram_ = compositeProgram_ = 0;
-
-    rawLocSceneColor_ = rawLocNormal_ = rawLocDepth_ = -1;
-    rawLocInvProjection_ = rawLocView_ = -1;
-    rawLocViewportRect_ = rawLocViewportSize_ = -1;
-    rawLocRadiusPixels_ = rawLocGIIntensity_ = rawLocMaxRadiance_ = rawLocFrameIndex_ = -1;
-
-    denoiseLocInputGI_ = denoiseLocDepth_ = denoiseLocNormal_ = -1;
-    denoiseLocInvProjection_ = denoiseLocView_ = -1;
-    denoiseLocViewportRect_ = denoiseLocViewportSize_ = denoiseLocDirection_ = -1;
-    denoiseLocSigma_ = denoiseLocDepthSigma_ = denoiseLocNormalPower_ = -1;
-
-    compositeLocSceneColor_ = compositeLocGI_ = compositeLocAlbedo_ = -1;
-    compositeLocStrength_ = compositeLocViewportRect_ = -1;
     fullscreenVao_ = 0;
+    lastShaderProgram_ = 0;
+    lastSceneId_ = HRL_INVALID_ID;
+    lastUploadSerial_ = 0;
+    lastEnabled_ = false;
 }
 
 bool GL_33_GI::Supports(HRL_EGlobalIlluminationMethod method) const
 {
-    return method == HRL_GI_SSGI;
+    return method == HRL_GI_DDGI;
 }
 
 uint32_t GL_33_GI::GetSupportedMethods() const
 {
-    return 1u << (unsigned)HRL_GI_SSGI;
-}
-
-void GL_33_GI::DestroySceneResources(ViewportResources& resources)
-{
-    if (resources.depthTexture) glDeleteTextures(1, &resources.depthTexture);
-    if (resources.depthFbo) glDeleteFramebuffers(1, &resources.depthFbo);
-
-    if (resources.sceneColorTexture) glDeleteTextures(1, &resources.sceneColorTexture);
-    if (resources.sceneColorFbo) glDeleteFramebuffers(1, &resources.sceneColorFbo);
-
-    if (resources.rawTexture) glDeleteTextures(1, &resources.rawTexture);
-    if (resources.rawFbo) glDeleteFramebuffers(1, &resources.rawFbo);
-
-    if (resources.denoiseTexture) glDeleteTextures(1, &resources.denoiseTexture);
-    if (resources.denoiseFbo) glDeleteFramebuffers(1, &resources.denoiseFbo);
-
-    if (resources.denoisePingTexture) glDeleteTextures(1, &resources.denoisePingTexture);
-    if (resources.denoisePingFbo) glDeleteFramebuffers(1, &resources.denoisePingFbo);
-
-    resources = {};
-}
-
-static bool AttachColorTexture(GLuint fbo, GLuint texture, int width, int height)
-{
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
-        GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
-}
-
-static bool AttachDepthTexture(GLuint fbo, GLuint texture, int width, int height)
-{
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
-        GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, texture, 0);
-    glDrawBuffer(GL_NONE);
-    glReadBuffer(GL_NONE);
-    return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
-}
-
-bool GL_33_GI::EnsureSceneResources(HRL_id sceneId, HRL_id viewportId, int width, int height)
-{
-    auto& viewportMap = scenes_[sceneId];
-    auto it = viewportMap.find(viewportId);
-    if (it == viewportMap.end())
-        it = viewportMap.emplace(viewportId, ViewportResources{}).first;
-
-    ViewportResources& r = it->second;
-    if (r.width == width && r.height == height &&
-        r.depthFbo && r.sceneColorFbo && r.rawFbo && r.denoiseFbo && r.denoisePingFbo)
-        return true;
-
-    DestroySceneResources(r);
-    r.width = width;
-    r.height = height;
-
-    glGenFramebuffers(1, &r.depthFbo);
-    glGenTextures(1, &r.depthTexture);
-    if (!AttachDepthTexture(r.depthFbo, r.depthTexture, width, height))
-    {
-        DestroySceneResources(r);
-        SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
-            "GL33 SSGI: failed to create depth texture framebuffer");
-        return false;
-    }
-
-    glGenFramebuffers(1, &r.sceneColorFbo);
-    glGenTextures(1, &r.sceneColorTexture);
-    if (!AttachColorTexture(r.sceneColorFbo, r.sceneColorTexture, width, height))
-    {
-        DestroySceneResources(r);
-        SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
-            "GL33 SSGI: failed to create scene color copy framebuffer");
-        return false;
-    }
-
-    glGenFramebuffers(1, &r.rawFbo);
-    glGenTextures(1, &r.rawTexture);
-    if (!AttachColorTexture(r.rawFbo, r.rawTexture, width, height))
-    {
-        DestroySceneResources(r);
-        SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
-            "GL33 SSGI: failed to create raw GI framebuffer");
-        return false;
-    }
-
-    glGenFramebuffers(1, &r.denoiseFbo);
-    glGenTextures(1, &r.denoiseTexture);
-    if (!AttachColorTexture(r.denoiseFbo, r.denoiseTexture, width, height))
-    {
-        DestroySceneResources(r);
-        SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
-            "GL33 SSGI: failed to create GI denoise framebuffer");
-        return false;
-    }
-
-    glGenFramebuffers(1, &r.denoisePingFbo);
-    glGenTextures(1, &r.denoisePingTexture);
-    if (!AttachColorTexture(r.denoisePingFbo, r.denoisePingTexture, width, height))
-    {
-        DestroySceneResources(r);
-        SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
-            "GL33 SSGI: failed to create GI denoise ping framebuffer");
-        return false;
-    }
-
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    return true;
+    return 1u << (unsigned)HRL_GI_DDGI;
 }
 
 void GL_33_GI::ReleaseScene(HRL_id sceneId)
@@ -616,222 +184,860 @@ void GL_33_GI::ReleaseScene(HRL_id sceneId)
     auto it = scenes_.find(sceneId);
     if (it == scenes_.end())
         return;
-    for (auto& viewportEntry : it->second)
-        DestroySceneResources(viewportEntry.second);
+    glDeleteBuffers(3, it->second.probeUbo);
     scenes_.erase(it);
-}
-
-bool GL_33_GI::CopyDepth(ViewportResources& resources, GLuint sourceFbo, int width, int height)
-{
-    (void)glGetError();
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFbo);
-    glReadBuffer(GL_NONE);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resources.depthFbo);
-    glDrawBuffer(GL_NONE);
-    glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
-        GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-    GLenum err = glGetError();
-    if (err != GL_NO_ERROR)
-        printf("GL33 SSGI: depth copy OpenGL error: 0x%x\n", (unsigned)err);
-    return err == GL_NO_ERROR;
-}
-
-bool GL_33_GI::CopySceneColor(ViewportResources& resources, const GL_Scene* scene, int width, int height)
-{
-    (void)glGetError();
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, scene->fbo);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resources.sceneColorFbo);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
-        GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    GLenum err = glGetError();
-    if (err != GL_NO_ERROR)
-        printf("GL33 SSGI: scene color copy OpenGL error: 0x%x\n", (unsigned)err);
-    return err == GL_NO_ERROR;
-}
-
-bool GL_33_GI::RenderSSGI(
-    HRL_id sceneId,
-    HRL_id viewportId,
-    const GL_Scene* scene,
-    GLuint depthSourceFbo,
-    const glm::mat4& projection,
-    const glm::mat4& view,
-    float farPlane,
-    const glm::vec4& viewportRect,
-    int viewportX,
-    int viewportY,
-    int viewportWidth,
-    int viewportHeight)
-{
-    (void)farPlane;
-
-    if (!scene || !fullscreenVao_ || !depthSourceFbo || !scene->fbo)
-        return false;
-    if (!EnsureProgram())
-        return false;
-    if (!EnsureSceneResources(sceneId, viewportId, scene->width, scene->height))
-        return false;
-
-    auto sceneIt = scenes_.find(sceneId);
-    if (sceneIt == scenes_.end())
-        return false;
-    auto viewportIt = sceneIt->second.find(viewportId);
-    if (viewportIt == sceneIt->second.end())
-        return false;
-    ViewportResources& r = viewportIt->second;
-
-    if (!CopySceneColor(r, scene, scene->width, scene->height))
+    if (lastSceneId_ == sceneId)
     {
-        printf("GL33 SSGI: scene color copy failed.\n");
-        return false;
+        lastShaderProgram_ = 0;
+        lastSceneId_ = HRL_INVALID_ID;
+        lastUploadSerial_ = 0;
+        lastEnabled_ = false;
     }
-    if (!CopyDepth(r, depthSourceFbo, scene->width, scene->height))
+}
+
+glm::mat4 GL_33_GI::CalculateModelMatrix(const HRL_Mesh* mesh) const
+{
+    glm::mat4 model(1.f);
+    if (!mesh)
+        return model;
+    model = glm::translate(model, mesh->position_);
+    model = glm::translate(model, mesh->pivot_point_);
+    model = glm::rotate(model, glm::radians(mesh->rotation_.x), glm::vec3(1.f, 0.f, 0.f));
+    model = glm::rotate(model, glm::radians(mesh->rotation_.y), glm::vec3(0.f, 1.f, 0.f));
+    model = glm::rotate(model, glm::radians(mesh->rotation_.z), glm::vec3(0.f, 0.f, 1.f));
+    model = glm::translate(model, -mesh->pivot_point_);
+    model = glm::scale(model, mesh->scale_);
+    return model;
+}
+
+glm::vec3 GL_33_GI::GetMaterialTint(HRL_id materialId) const
+{
+    HRL_Context* context = GetPrivateContext();
+    if (!context)
+        return glm::vec3(1.f);
+    auto it = context->materials.find(materialId);
+    if (it == context->materials.end() || !it->second)
+        return glm::vec3(1.f);
+    const auto* material = it->second;
+    auto tintIt = material->vec3Params_.find("TintColor");
+    if (tintIt != material->vec3Params_.end())
+        return glm::clamp(tintIt->second, glm::vec3(0.f), glm::vec3(4.f));
+    return glm::vec3(1.f);
+}
+
+float GL_33_GI::SampleMaterialScalar(
+    HRL_id materialId,
+    const char* useValueName,
+    const char* valueName,
+    const char* textureName,
+    const glm::vec2& uv,
+    float fallback) const
+{
+    HRL_Context* context = GetPrivateContext();
+    if (!context || !useValueName || !valueName || !textureName)
+        return fallback;
+    auto matIt = context->materials.find(materialId);
+    if (matIt == context->materials.end() || !matIt->second)
+        return fallback;
+    const HRL_Material* material = matIt->second;
+
+    bool useValue = false;
+    auto useIt = material->intParams_.find(useValueName);
+    if (useIt != material->intParams_.end())
+        useValue = useIt->second != 0;
+
+    auto valueIt = material->floatParams_.find(valueName);
+    const float scalarValue = valueIt != material->floatParams_.end() ? valueIt->second : fallback;
+    if (useValue)
+        return std::clamp(scalarValue, 0.f, 1.f);
+
+    auto texIt = material->textureParams_.find(textureName);
+    if (texIt == material->textureParams_.end())
+        return std::clamp(scalarValue, 0.f, 1.f);
+
+    const GL33_Texture* texture = GL33_FindTexture(texIt->second);
+    if (!texture || texture->GetWidth() == 0 || texture->GetHeight() == 0)
+        return std::clamp(scalarValue, 0.f, 1.f);
+
+    const auto& rgba = texture->GetCpuRGBA();
+    const int width = static_cast<int>(texture->GetWidth());
+    const int height = static_cast<int>(texture->GetHeight());
+    if (rgba.size() != size_t(width) * size_t(height) * 4u || width <= 0 || height <= 0)
+        return std::clamp(scalarValue, 0.f, 1.f);
+
+    const float fx = uv.x - std::floor(uv.x);
+    const float fy = uv.y - std::floor(uv.y);
+    const float px = fx * float(width) - 0.5f;
+    const float py = fy * float(height) - 0.5f;
+    const int x0 = static_cast<int>(std::floor(px));
+    const int y0 = static_cast<int>(std::floor(py));
+    const int x1 = x0 + 1;
+    const int y1 = y0 + 1;
+    const float tx = px - float(x0);
+    const float ty = py - float(y0);
+
+    auto sample = [&](int x, int y) -> float
     {
-        printf("GL33 SSGI: depth copy failed.\n");
-        return false;
-    }
-
-    const glm::mat4 invProjection = glm::inverse(projection);
-
-    GLint oldViewport[4] = {0, 0, 0, 0};
-    GLint oldReadFramebuffer = 0;
-    GLint oldDrawFramebuffer = 0;
-    glGetIntegerv(GL_VIEWPORT, oldViewport);
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &oldReadFramebuffer);
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &oldDrawFramebuffer);
-
-    const GLboolean oldDepthTest = glIsEnabled(GL_DEPTH_TEST);
-    const GLboolean oldBlend = glIsEnabled(GL_BLEND);
-    const GLboolean oldCull = glIsEnabled(GL_CULL_FACE);
-    const GLboolean oldScissor = glIsEnabled(GL_SCISSOR_TEST);
-    GLboolean oldDepthMask = GL_TRUE;
-    glGetBooleanv(GL_DEPTH_WRITEMASK, &oldDepthMask);
-
-    glDisable(GL_DEPTH_TEST);
-    glDepthMask(GL_FALSE);
-    glDisable(GL_BLEND);
-    glDisable(GL_CULL_FACE);
-    glDisable(GL_SCISSOR_TEST);
-
-    // 1. Raw screen-space radiance gather.
-    glBindFramebuffer(GL_FRAMEBUFFER, r.rawFbo);
-    glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    glUseProgram(rawProgram_);
-    glUniformMatrix4fv(rawLocInvProjection_, 1, GL_FALSE, &invProjection[0][0]);
-    glUniformMatrix4fv(rawLocView_, 1, GL_FALSE, &view[0][0]);
-    glUniform4f(rawLocViewportRect_, viewportRect.x, viewportRect.y, viewportRect.z, viewportRect.w);
-    glUniform2f(rawLocViewportSize_, (float)std::max(1, viewportWidth), (float)std::max(1, viewportHeight));
-    glUniform1f(rawLocRadiusPixels_, 72.0f);
-    glUniform1f(rawLocGIIntensity_, 0.85f);
-    glUniform1f(rawLocMaxRadiance_, 2.0f);
-    glUniform1f(rawLocFrameIndex_, (float)(r.frameIndex & 1048575ull));
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, r.sceneColorTexture);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, r.depthTexture);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, scene->textures[4]);
-    DrawFullscreen(fullscreenVao_);
-
-    // 2. Horizontal bilateral denoise.
-    glBindFramebuffer(GL_FRAMEBUFFER, r.denoiseFbo);
-    glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    glUseProgram(denoiseProgram_);
-    glUniformMatrix4fv(denoiseLocInvProjection_, 1, GL_FALSE, &invProjection[0][0]);
-    glUniformMatrix4fv(denoiseLocView_, 1, GL_FALSE, &view[0][0]);
-    glUniform4f(denoiseLocViewportRect_, viewportRect.x, viewportRect.y, viewportRect.z, viewportRect.w);
-    glUniform2f(denoiseLocViewportSize_, (float)std::max(1, viewportWidth), (float)std::max(1, viewportHeight));
-    glUniform2f(denoiseLocDirection_, 1.0f, 0.0f);
-    glUniform1f(denoiseLocSigma_, 1.35f);
-    glUniform1f(denoiseLocDepthSigma_, 1.35f);
-    glUniform1f(denoiseLocNormalPower_, 8.0f);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, r.rawTexture);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, r.depthTexture);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, scene->textures[4]);
-    DrawFullscreen(fullscreenVao_);
-
-    // 3. Vertical bilateral denoise.
-    glBindFramebuffer(GL_FRAMEBUFFER, r.denoisePingFbo);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    glUniform2f(denoiseLocDirection_, 0.0f, 1.0f);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, r.denoiseTexture);
-    DrawFullscreen(fullscreenVao_);
-
-    // 4. Composite directly into the real scene color attachment. The sampled
-    // scene texture is the immutable sceneColorCopy, so there is no feedback loop.
-    glBindFramebuffer(GL_FRAMEBUFFER, scene->fbo);
-    glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    glUseProgram(compositeProgram_);
-    glUniform4f(compositeLocViewportRect_, viewportRect.x, viewportRect.y, viewportRect.z, viewportRect.w);
-    glUniform1f(compositeLocStrength_, 0.70f);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, r.sceneColorTexture);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, r.denoisePingTexture);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, scene->textures[3]);
-    DrawFullscreen(fullscreenVao_);
-
-    GLenum attachments[5] = {
-        GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2,
-        GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4
+        x = (x % width + width) % width;
+        y = (y % height + height) % height;
+        const size_t idx = (size_t(y) * size_t(width) + size_t(x)) * 4u;
+        return float(rgba[idx]) / 255.f;
     };
-    glDrawBuffers(5, attachments);
 
-    // MSAA scenes are rendered into the MSAA target first. Publish the composited
-    // attachment 0 back to that target so a later viewport resolve cannot erase GI.
-    if (scene->msaa_samples > 1 && scene->msaa_fbo != 0 && depthSourceFbo == scene->msaa_fbo)
+    const float v00 = sample(x0, y0);
+    const float v10 = sample(x1, y0);
+    const float v01 = sample(x0, y1);
+    const float v11 = sample(x1, y1);
+    const float a = v00 + (v10 - v00) * tx;
+    const float b = v01 + (v11 - v01) * tx;
+    return std::clamp(a + (b - a) * ty, 0.f, 1.f);
+}
+
+glm::vec3 GL_33_GI::SampleMaterialAlbedo(HRL_id materialId, const glm::vec2& uv, const glm::vec3& fallback) const
+{
+    HRL_Context* context = GetPrivateContext();
+    if (!context)
+        return fallback;
+    auto matIt = context->materials.find(materialId);
+    if (matIt == context->materials.end() || !matIt->second)
+        return fallback;
+
+    const HRL_Material* material = matIt->second;
+    const glm::vec3 tint = GetMaterialTint(materialId);
+    auto texIt = material->textureParams_.find("T_Albedo");
+    if (texIt == material->textureParams_.end() || texIt->second == HRL_INVALID_ID)
+        return fallback * tint;
+
+    const GL33_Texture* texture = GL33_FindTexture(texIt->second);
+    if (!texture || texture->GetWidth() == 0 || texture->GetHeight() == 0)
+        return fallback * tint;
+    const auto& pixels = texture->GetCpuRGBA();
+    if (pixels.size() != size_t(texture->GetWidth()) * size_t(texture->GetHeight()) * 4u)
+        return fallback * tint;
+
+    const float u = uv.x - std::floor(uv.x);
+    const float v = uv.y - std::floor(uv.y);
+    const float fx = u * float(texture->GetWidth() - 1);
+    const float fy = v * float(texture->GetHeight() - 1);
+    const int x0 = std::clamp((int)std::floor(fx), 0, (int)texture->GetWidth() - 1);
+    const int y0 = std::clamp((int)std::floor(fy), 0, (int)texture->GetHeight() - 1);
+    const int x1 = std::min(x0 + 1, (int)texture->GetWidth() - 1);
+    const int y1 = std::min(y0 + 1, (int)texture->GetHeight() - 1);
+    const float tx = fx - float(x0);
+    const float ty = fy - float(y0);
+
+    auto sample = [&](int x, int y) {
+        const size_t base = (size_t(y) * size_t(texture->GetWidth()) + size_t(x)) * 4u;
+        return glm::vec3(
+            pixels[base + 0], pixels[base + 1], pixels[base + 2]) / 255.f;
+    };
+
+    const glm::vec3 c00 = sample(x0, y0);
+    const glm::vec3 c10 = sample(x1, y0);
+    const glm::vec3 c01 = sample(x0, y1);
+    const glm::vec3 c11 = sample(x1, y1);
+    const glm::vec3 row0 = glm::mix(c00, c10, tx);
+    const glm::vec3 row1 = glm::mix(c01, c11, tx);
+    return glm::clamp(glm::mix(row0, row1, ty) * tint, glm::vec3(0.f), glm::vec3(1.f));
+}
+
+bool GL_33_GI::EnsureGeometryCache(HRL_id sceneId, GeometryCache& geometry)
+{
+    HRL_Context* context = GetPrivateContext();
+    if (!context)
+        return false;
+    auto sceneIt = context->scenes.find(sceneId);
+    if (sceneIt == context->scenes.end() || !sceneIt->second)
+        return false;
+    const hrl_scene_t* scene = sceneIt->second;
+
+    const uint64_t revision = scene->gi_geometry_revision;
+    if (geometry.valid && geometry.revision == revision)
+        return true;
+
+    geometry.triangles.clear();
+    geometry.indices.clear();
+    geometry.nodes.clear();
+    geometry.valid = false;
+
+    glm::vec3 minBounds(std::numeric_limits<float>::max());
+    glm::vec3 maxBounds(std::numeric_limits<float>::lowest());
+    bool hasGeometry = false;
+    geometry.triangles.reserve(8192);
+
+    for (const auto& [meshId, mesh] : scene->meshes)
     {
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, scene->fbo);
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene->msaa_fbo);
-        glDrawBuffer(GL_COLOR_ATTACHMENT0);
-        glBlitFramebuffer(
-            viewportX, viewportY, viewportX + viewportWidth, viewportY + viewportHeight,
-            viewportX, viewportY, viewportX + viewportWidth, viewportY + viewportHeight,
-            GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        (void)meshId;
+        if (!mesh || mesh->type_ != HRL_3D_MESH || mesh->lods_.empty())
+            continue;
+        const auto& lod = mesh->lods_[0];
+        if (lod.vertices.empty())
+            continue;
 
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene->msaa_fbo);
-        glDrawBuffers(5, attachments);
+        const glm::mat4 model = CalculateModelMatrix(mesh);
+
+        auto emitTriangle = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
+            if (i0 >= lod.vertices.size() || i1 >= lod.vertices.size() || i2 >= lod.vertices.size())
+                return;
+            if ((int)geometry.triangles.size() >= kMaxTriangleCount)
+                return;
+
+            const glm::vec3 p0 = glm::vec3(model * glm::vec4(
+                lod.vertices[i0].position[0], lod.vertices[i0].position[1], lod.vertices[i0].position[2], 1.f));
+            const glm::vec3 p1 = glm::vec3(model * glm::vec4(
+                lod.vertices[i1].position[0], lod.vertices[i1].position[1], lod.vertices[i1].position[2], 1.f));
+            const glm::vec3 p2 = glm::vec3(model * glm::vec4(
+                lod.vertices[i2].position[0], lod.vertices[i2].position[1], lod.vertices[i2].position[2], 1.f));
+
+            glm::vec3 normal = glm::cross(p1 - p0, p2 - p0);
+            const float area2 = glm::dot(normal, normal);
+            if (area2 < 1e-10f)
+                return;
+            normal *= 1.f / std::sqrt(area2);
+
+            Triangle tri;
+            tri.p0 = p0;
+            tri.p1 = p1;
+            tri.p2 = p2;
+            tri.normal = normal;
+            tri.centroid = (p0 + p1 + p2) / 3.f;
+            tri.material = mesh->material_;
+            tri.uv0 = glm::vec2(lod.vertices[i0].uv[0], lod.vertices[i0].uv[1]);
+            tri.uv1 = glm::vec2(lod.vertices[i1].uv[0], lod.vertices[i1].uv[1]);
+            tri.uv2 = glm::vec2(lod.vertices[i2].uv[0], lod.vertices[i2].uv[1]);
+            geometry.triangles.push_back(tri);
+
+            minBounds = glm::min(minBounds, glm::min(p0, glm::min(p1, p2)));
+            maxBounds = glm::max(maxBounds, glm::max(p0, glm::max(p1, p2)));
+            hasGeometry = true;
+        };
+
+        if (!lod.indices.empty())
+        {
+            for (size_t i = 0; i + 2 < lod.indices.size() && (int)geometry.triangles.size() < kMaxTriangleCount; i += 3)
+                emitTriangle(lod.indices[i], lod.indices[i + 1], lod.indices[i + 2]);
+        }
+        else
+        {
+            for (size_t i = 0; i + 2 < lod.vertices.size() && (int)geometry.triangles.size() < kMaxTriangleCount; i += 3)
+                emitTriangle((uint32_t)i, (uint32_t)i + 1u, (uint32_t)i + 2u);
+        }
     }
 
-    // Cleanup / restore the GL state used by the caller.
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glUseProgram(0);
+    if (!hasGeometry || geometry.triangles.empty())
+        return false;
 
-    if (oldDepthTest) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
-    if (oldBlend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
-    if (oldCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
-    if (oldScissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
-    glDepthMask(oldDepthMask ? GL_TRUE : GL_FALSE);
-    glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+    geometry.boundsMin = minBounds;
+    geometry.boundsMax = maxBounds;
+    geometry.indices.resize(geometry.triangles.size());
+    for (uint32_t i = 0; i < geometry.indices.size(); ++i)
+        geometry.indices[i] = i;
 
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)oldDrawFramebuffer);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)oldReadFramebuffer);
+    BuildBVH(geometry);
+    geometry.revision = revision;
+    geometry.valid = !geometry.nodes.empty();
 
-    GLenum finalError = glGetError();
-    if (finalError != GL_NO_ERROR)
-        printf("GL33 SSGI: OpenGL error after GI pass: 0x%x\n", (unsigned)finalError);
+    std::printf("[HRL][DDGI] geometry cache: %zu triangles, BVH nodes=%zu\n",
+        geometry.triangles.size(), geometry.nodes.size());
+    return geometry.valid;
+}
 
-    ++r.frameIndex;
+void GL_33_GI::BuildBVH(GeometryCache& geometry)
+{
+    geometry.nodes.clear();
+    if (geometry.indices.empty())
+        return;
+    geometry.nodes.reserve(geometry.indices.size() * 2u);
+    BuildBVHNode(geometry, 0u, (uint32_t)geometry.indices.size());
+}
+
+uint32_t GL_33_GI::BuildBVHNode(GeometryCache& geometry, uint32_t first, uint32_t count)
+{
+    BVHNode node;
+    node.first = first;
+    node.count = count;
+
+    glm::vec3 bmin(std::numeric_limits<float>::max());
+    glm::vec3 bmax(std::numeric_limits<float>::lowest());
+    glm::vec3 cmin(std::numeric_limits<float>::max());
+    glm::vec3 cmax(std::numeric_limits<float>::lowest());
+
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const Triangle& tri = geometry.triangles[geometry.indices[first + i]];
+        const glm::vec3 triMin = glm::min(tri.p0, glm::min(tri.p1, tri.p2));
+        const glm::vec3 triMax = glm::max(tri.p0, glm::max(tri.p1, tri.p2));
+        const glm::vec3 centroid = tri.centroid;
+        bmin = glm::min(bmin, triMin);
+        bmax = glm::max(bmax, triMax);
+        cmin = glm::min(cmin, centroid);
+        cmax = glm::max(cmax, centroid);
+    }
+
+    const uint32_t nodeIndex = (uint32_t)geometry.nodes.size();
+    geometry.nodes.push_back(node);
+    geometry.nodes[nodeIndex].bmin = bmin;
+    geometry.nodes[nodeIndex].bmax = bmax;
+
+    if (count <= kBVHLeafSize)
+        return nodeIndex;
+
+    const glm::vec3 extent = cmax - cmin;
+    int axis = 0;
+    if (extent.y > extent.x) axis = 1;
+    if (extent.z > extent[axis]) axis = 2;
+    if (extent[axis] < 1e-6f)
+        return nodeIndex;
+
+    const uint32_t mid = first + count / 2u;
+    std::nth_element(
+        geometry.indices.begin() + first,
+        geometry.indices.begin() + mid,
+        geometry.indices.begin() + first + count,
+        [&](uint32_t a, uint32_t b) {
+            const Triangle& ta = geometry.triangles[a];
+            const Triangle& tb = geometry.triangles[b];
+            return ta.centroid[axis] < tb.centroid[axis];
+        });
+
+    const uint32_t left = BuildBVHNode(geometry, first, mid - first);
+    const uint32_t right = BuildBVHNode(geometry, mid, first + count - mid);
+    geometry.nodes[nodeIndex].left = left;
+    geometry.nodes[nodeIndex].right = right;
+    geometry.nodes[nodeIndex].first = 0;
+    geometry.nodes[nodeIndex].count = 0;
+    return nodeIndex;
+}
+
+bool GL_33_GI::TraceNearest(
+    const GeometryCache& geometry,
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    float maxDistance,
+    Hit& hit,
+    int ignoredTriangle) const
+{
+    if (!geometry.valid || geometry.nodes.empty())
+        return false;
+
+    float closest = maxDistance;
+    float closestU = 0.f;
+    float closestV = 0.f;
+    int triangleIndex = -1;
+    uint32_t stack[96];
+    int stackSize = 0;
+    stack[stackSize++] = 0u;
+
+    while (stackSize > 0)
+    {
+        const uint32_t nodeIndex = stack[--stackSize];
+        const BVHNode& node = geometry.nodes[nodeIndex];
+        if (!RayAabb(origin, direction, node.bmin, node.bmax, closest))
+            continue;
+
+        if (node.IsLeaf())
+        {
+            for (uint32_t i = 0; i < node.count; ++i)
+            {
+                const int triIndex = (int)geometry.indices[node.first + i];
+                if (triIndex == ignoredTriangle)
+                    continue;
+                float t = 0.f, u = 0.f, v = 0.f;
+                if (RayTriangle(origin, direction, geometry.triangles[triIndex], closest, t, u, v))
+                {
+                    closest = t;
+                    closestU = u;
+                    closestV = v;
+                    triangleIndex = triIndex;
+                }
+            }
+            continue;
+        }
+
+        if (node.left != UINT32_MAX && stackSize < 96)
+            stack[stackSize++] = node.left;
+        if (node.right != UINT32_MAX && stackSize < 96)
+            stack[stackSize++] = node.right;
+    }
+
+    if (triangleIndex < 0)
+        return false;
+
+    const Triangle& tri = geometry.triangles[triangleIndex];
+    hit.t = closest;
+    hit.position = origin + direction * closest;
+    hit.normal = tri.normal;
+    hit.uv = tri.uv0 * (1.f - closestU - closestV) + tri.uv1 * closestU + tri.uv2 * closestV;
+    hit.material = tri.material;
+    hit.triangle = triangleIndex;
     return true;
 }
 
+glm::vec3 GL_33_GI::SampleSky(const hrl_scene_t* scene, const glm::vec3& direction) const
+{
+    if (!scene || !scene->sky_sphere_enabled)
+        return glm::vec3(0.f);
+    const float t = std::clamp(direction.y * 0.5f + 0.5f, 0.f, 1.f);
+    if (t > 0.5f)
+        return glm::mix(scene->sky_horizon_color, scene->sky_top_color, (t - 0.5f) * 2.f);
+    return glm::mix(scene->sky_bottom_color, scene->sky_horizon_color, t * 2.f);
+}
+
+glm::vec3 GL_33_GI::SampleCpuIrradiance(
+    const ProbeVolume& probes,
+    const glm::vec3& position,
+    const glm::vec3& normal) const
+{
+    if (!probes.initialized || probes.nx <= 0 || probes.ny <= 0 || probes.nz <= 0)
+        return glm::vec3(0.f);
+
+    glm::vec3 grid = (position - probes.origin) / glm::max(probes.spacing, glm::vec3(1e-4f));
+    if (grid.x < 0.f || grid.y < 0.f || grid.z < 0.f ||
+        grid.x > float(probes.nx - 1) || grid.y > float(probes.ny - 1) || grid.z > float(probes.nz - 1))
+        return glm::vec3(0.f);
+
+    const glm::vec3 base = glm::floor(grid);
+    const glm::vec3 f = grid - base;
+    const int x0 = std::clamp((int)base.x, 0, probes.nx - 1);
+    const int y0 = std::clamp((int)base.y, 0, probes.ny - 1);
+    const int z0 = std::clamp((int)base.z, 0, probes.nz - 1);
+    const int x1 = std::min(x0 + 1, probes.nx - 1);
+    const int y1 = std::min(y0 + 1, probes.ny - 1);
+    const int z1 = std::min(z0 + 1, probes.nz - 1);
+
+    const int xs[2] = {x0, x1};
+    const int ys[2] = {y0, y1};
+    const int zs[2] = {z0, z1};
+    const float wx[2] = {1.f - f.x, f.x};
+    const float wy[2] = {1.f - f.y, f.y};
+    const float wz[2] = {1.f - f.z, f.z};
+
+    const glm::vec3 n = SafeNormalize(normal, glm::vec3(0.f, 1.f, 0.f));
+    glm::vec3 result(0.f);
+    float totalWeight = 0.f;
+
+    for (int ix = 0; ix < 2; ++ix)
+        for (int iy = 0; iy < 2; ++iy)
+            for (int iz = 0; iz < 2; ++iz)
+            {
+                const size_t index = ProbeLinearIndex(xs[ix], ys[iy], zs[iz], probes.nx, probes.ny);
+                if (!probes.valid[index])
+                    continue;
+                const float spatial = wx[ix] * wy[iy] * wz[iz];
+                if (spatial <= 0.f)
+                    continue;
+
+                glm::vec3 local(0.f);
+                float directionalWeight = 0.f;
+                for (int d = 0; d < 6; ++d)
+                {
+                    const float w = std::max(glm::dot(n, kProbeAxes[d]), 0.f);
+                    local += probes.radiance[d][index] * w;
+                    directionalWeight += w;
+                }
+                if (directionalWeight <= 1e-5f)
+                    continue;
+
+                local /= directionalWeight;
+                result += local * spatial;
+                totalWeight += spatial;
+            }
+
+    return totalWeight > 1e-5f ? result / totalWeight : glm::vec3(0.f);
+}
+
+glm::vec3 GL_33_GI::EvaluateHitRadiance(
+    HRL_id sceneId,
+    const SceneResources& resources,
+    const Hit& hit) const
+{
+    HRL_Context* context = GetPrivateContext();
+    if (!context)
+        return glm::vec3(0.f);
+    auto sceneIt = context->scenes.find(sceneId);
+    if (sceneIt == context->scenes.end() || !sceneIt->second)
+        return glm::vec3(0.f);
+    const hrl_scene_t* scene = sceneIt->second;
+
+    const glm::vec3 N = SafeNormalize(hit.normal, glm::vec3(0.f, 1.f, 0.f));
+    const glm::vec3 albedo = SampleMaterialAlbedo(hit.material, hit.uv, glm::vec3(1.f));
+    const float metallic = SampleMaterialScalar(
+        hit.material, "MetallicUseValue", "MetallicValue", "T_Metallic", hit.uv, 0.f);
+    const glm::vec3 diffuseAlbedo = albedo * (1.f - metallic);
+    glm::vec3 directIrradiance(0.f);
+
+    // Cast a secondary BVH ray for shadow-casting lights so direct probe
+    // irradiance does not leak through occluders.
+    for (const auto& [lightId, light] : scene->lights)
+    {
+        (void)lightId;
+        if (!light || light->intensity_ <= 0.f)
+            continue;
+
+        glm::vec3 lightDir(0.f);
+        float attenuation = 1.f;
+        float lightDistance = std::numeric_limits<float>::infinity();
+
+        if (light->type_ == HRL_POINT_LIGHT || light->type_ == HRL_SPOT_LIGHT)
+        {
+            const glm::vec3 toLight = light->position_ - hit.position;
+            lightDistance = glm::length(toLight);
+            if (lightDistance <= 1e-4f)
+                continue;
+            lightDir = toLight / lightDistance;
+            attenuation = 1.f / (1.f + std::max(0.f, light->attenuation_) * lightDistance * lightDistance);
+
+            if (light->type_ == HRL_SPOT_LIGHT)
+            {
+                const float pitch = glm::radians(light->rotation_.x);
+                const float yaw = glm::radians(light->rotation_.y);
+                const glm::vec3 spotForward = SafeNormalize(glm::vec3(
+                    std::cos(yaw) * std::cos(pitch),
+                    std::sin(pitch),
+                    std::sin(yaw) * std::cos(pitch)),
+                    glm::vec3(0.f, -1.f, 0.f));
+                const float cosTheta = glm::dot(lightDir, -spotForward);
+                const float inner = std::cos(glm::radians(light->innerCutoff));
+                const float outer = std::cos(glm::radians(light->outerCutoff));
+                attenuation *= std::clamp(
+                    (cosTheta - outer) / std::max(inner - outer, 1e-4f), 0.f, 1.f);
+            }
+        }
+        else if (light->type_ == HRL_DIRECTIONAL_LIGHT)
+        {
+            lightDir = SafeNormalize(-light->rotation_, glm::vec3(0.f, 1.f, 0.f));
+        }
+        else
+        {
+            continue;
+        }
+
+        const float nDotL = std::max(glm::dot(N, lightDir), 0.f);
+        if (nDotL <= 0.f || attenuation <= 0.f)
+            continue;
+
+        if (light->cast_shadows_)
+        {
+            const float maxShadowDistance = (light->type_ == HRL_POINT_LIGHT || light->type_ == HRL_SPOT_LIGHT)
+                ? std::max(lightDistance - std::max(kRayEpsilon, light->shadow_bias_), kRayEpsilon)
+                : std::max(glm::length(resources.probes.extent) * 2.f, 10.f);
+            Hit shadowHit;
+            if (TraceNearest(resources.geometry,
+                hit.position + N * std::max(kRayEpsilon, light->shadow_bias_),
+                lightDir, maxShadowDistance, shadowHit, hit.triangle))
+                continue;
+        }
+
+        directIrradiance += light->color_ * light->intensity_ * attenuation * nDotL;
+    }
+
+    const glm::vec3 directRadiance = directIrradiance * diffuseAlbedo * kInvPi;
+    const glm::vec3 previousIndirect = SampleCpuIrradiance(
+        resources.probes,
+        hit.position + N * kRayEpsilon * 4.f,
+        N);
+
+    return glm::max(directRadiance + previousIndirect * kIndirectBounceWeight, glm::vec3(0.f));
+}
+
+bool GL_33_GI::BuildOrUpdateProbeScene(ProbeVolume& probes, const GeometryCache& geometry)
+{
+    if (probes.initialized && probes.geometryRevision == geometry.revision)
+        return true;
+
+    glm::vec3 extent = glm::max(geometry.boundsMax - geometry.boundsMin, glm::vec3(2.f));
+    const float longest = std::max(extent.x, std::max(extent.y, extent.z));
+    const float marginAmount = std::max(kProbeMargin, longest * 0.03f);
+    const glm::vec3 margin(marginAmount);
+    const glm::vec3 boundsMin = geometry.boundsMin - margin;
+    const glm::vec3 boundsMax = geometry.boundsMax + margin;
+    extent = glm::max(boundsMax - boundsMin, glm::vec3(2.f));
+
+    probes = {};
+    probes.nx = kProbeNX;
+    probes.ny = kProbeNY;
+    probes.nz = kProbeNZ;
+    probes.origin = boundsMin;
+    probes.extent = extent;
+    probes.spacing = glm::vec3(
+        extent.x / float(std::max(1, probes.nx - 1)),
+        extent.y / float(std::max(1, probes.ny - 1)),
+        extent.z / float(std::max(1, probes.nz - 1)));
+
+    const size_t count = size_t(probes.nx) * size_t(probes.ny) * size_t(probes.nz);
+    for (int d = 0; d < 6; ++d)
+        probes.radiance[d].assign(count, glm::vec3(0.f));
+    probes.valid.assign(count, 1u);
+    probes.historyValid.assign(count, 0u);
+    probes.updateOrder.resize(count);
+    for (size_t i = 0; i < count; ++i)
+        probes.updateOrder[i] = (uint32_t)i;
+    probes.updateCursor = 0;
+    probes.geometryRevision = geometry.revision;
+    probes.lightingRevision = 0;
+    probes.initialized = true;
+    probes.dirty = true;
+    probes.converged = false;
+
+    std::printf("[HRL][DDGI] rebuilt probe volume: %dx%dx%d (%zu probes, %zu triangles)\n",
+        probes.nx, probes.ny, probes.nz, count, geometry.triangles.size());
+    return true;
+}
+
+bool GL_33_GI::UpdateProbeBatch(HRL_id sceneId, SceneResources& resources, int budget)
+{
+    HRL_Context* context = GetPrivateContext();
+    if (!context)
+        return false;
+    auto sceneIt = context->scenes.find(sceneId);
+    if (sceneIt == context->scenes.end() || !sceneIt->second || !resources.geometry.valid)
+        return false;
+    const hrl_scene_t* scene = sceneIt->second;
+
+    bool initialPass = resources.probes.dirty;
+    if (resources.probes.lightingRevision != scene->gi_lighting_revision)
+    {
+        resources.probes.lightingRevision = scene->gi_lighting_revision;
+        resources.probes.updateCursor = 0;
+        resources.probes.dirty = true;
+        resources.probes.converged = false;
+        std::fill(resources.probes.historyValid.begin(), resources.probes.historyValid.end(), uint8_t(0));
+        for (int d = 0; d < 6; ++d)
+            std::fill(resources.probes.radiance[d].begin(), resources.probes.radiance[d].end(), glm::vec3(0.f));
+        initialPass = true;
+        std::printf("[HRL][DDGI] lighting revision changed; refreshing probe cache\n");
+    }
+
+    if (resources.probes.updateOrder.empty())
+        return false;
+
+    if (!resources.probes.dirty && resources.probes.converged && resources.probes.updateCursor >= resources.probes.updateOrder.size())
+        resources.probes.updateCursor = 0;
+
+    if (!resources.probes.dirty && resources.probes.converged)
+        budget = std::min(budget, 4); // cheap temporal refinement once the volume is stable
+
+    const float sceneDiagonal = glm::length(resources.probes.extent);
+    const float rayLength = std::max(sceneDiagonal * 2.f, 10.f);
+    int updated = 0;
+    while (updated < budget && resources.probes.updateCursor < resources.probes.updateOrder.size())
+    {
+        const size_t probeIndex = resources.probes.updateOrder[resources.probes.updateCursor++];
+        const int x = int(probeIndex % size_t(resources.probes.nx));
+        const size_t yz = probeIndex / size_t(resources.probes.nx);
+        const int y = int(yz % size_t(resources.probes.ny));
+        const int z = int(yz / size_t(resources.probes.ny));
+
+        const glm::vec3 position = resources.probes.origin +
+            resources.probes.spacing * glm::vec3(float(x), float(y), float(z));
+
+        glm::vec3 sums[6] = { glm::vec3(0.f), glm::vec3(0.f), glm::vec3(0.f),
+                              glm::vec3(0.f), glm::vec3(0.f), glm::vec3(0.f) };
+        float weights[6] = {0.f,0.f,0.f,0.f,0.f,0.f};
+        int hitCount = 0;
+        float closestSurface = std::numeric_limits<float>::max();
+
+        for (int rayIndex = 0; rayIndex < kRaysPerProbe; ++rayIndex)
+        {
+            glm::vec3 direction = FibonacciSphereDirection(rayIndex, kRaysPerProbe);
+            const float phase = 0.37f * float((probeIndex * 17u + resources.frameIndex * 13u) & 1023u) / 1024.f;
+            direction = SafeNormalize(RotateAroundY(direction, phase), direction);
+
+            Hit hit;
+            glm::vec3 radiance(0.f);
+            if (TraceNearest(resources.geometry,
+                position + direction * kRayEpsilon * 2.f,
+                direction, rayLength, hit))
+            {
+                ++hitCount;
+                closestSurface = std::min(closestSurface, hit.t);
+                radiance = EvaluateHitRadiance(sceneId, resources, hit);
+            }
+            else
+            {
+                radiance = SampleSky(scene, direction);
+            }
+
+            for (int d = 0; d < 6; ++d)
+            {
+                const float cosine = std::max(glm::dot(direction, kProbeAxes[d]), 0.f);
+                const float w = cosine * cosine;
+                sums[d] += radiance * w;
+                weights[d] += w;
+            }
+        }
+
+        const float minSpacing = std::min(resources.probes.spacing.x,
+            std::min(resources.probes.spacing.y, resources.probes.spacing.z));
+        const bool probablyInside =
+            hitCount >= int(float(kRaysPerProbe) * 0.75f) &&
+            closestSurface < minSpacing * 0.30f;
+        resources.probes.valid[probeIndex] = probablyInside ? 0u : 1u;
+
+        if (!resources.probes.valid[probeIndex])
+        {
+            resources.probes.historyValid[probeIndex] = 0u;
+            for (int d = 0; d < 6; ++d)
+                resources.probes.radiance[d][probeIndex] = glm::vec3(0.f);
+        }
+        else
+        {
+            const float blend = resources.probes.historyValid[probeIndex] ? 0.15f : 1.f;
+            for (int d = 0; d < 6; ++d)
+            {
+                const glm::vec3 sample = (weights[d] > 1e-5f) ? sums[d] / weights[d] : glm::vec3(0.f);
+                resources.probes.radiance[d][probeIndex] =
+                    glm::mix(resources.probes.radiance[d][probeIndex], sample, blend);
+            }
+            resources.probes.historyValid[probeIndex] = 1u;
+        }
+        ++updated;
+    }
+
+    if (resources.probes.dirty && resources.probes.updateCursor >= resources.probes.updateOrder.size())
+    {
+        resources.probes.dirty = false;
+        resources.probes.converged = true;
+        resources.probes.updateCursor = 0;
+        std::printf("[HRL][DDGI] initial probe volume converged (%zu probes)\n", resources.probes.updateOrder.size());
+    }
+    else if (!resources.probes.dirty && resources.probes.converged &&
+             resources.probes.updateCursor >= resources.probes.updateOrder.size())
+    {
+        resources.probes.updateCursor = 0;
+    }
+
+    return updated > 0 || initialPass;
+}
+
+void GL_33_GI::UploadProbeVolume(SceneResources& resources)
+{
+    if (resources.probeUbo[0] == 0 || resources.probeUbo[1] == 0 || resources.probeUbo[2] == 0)
+        glGenBuffers(3, resources.probeUbo);
+
+    const size_t probeCount = resources.probes.radiance[0].size();
+    const size_t count = std::min(probeCount, size_t(kMaxProbeCount));
+
+    // One vec4 = one RGB radiance lobe + padding alpha. Each UBO stores two
+    // lobes per probe, so the block remains <= 16 KiB for the guaranteed 512 probes.
+    std::array<glm::vec4, kProbeVec4CountPerBlock> block{};
+
+    for (int blockIndex = 0; blockIndex < 3; ++blockIndex)
+    {
+        std::fill(block.begin(), block.end(), glm::vec4(0.f));
+        const int lobe0 = blockIndex * kProbeLobesPerBlock;
+        const int lobe1 = lobe0 + 1;
+
+        for (size_t probe = 0; probe < count; ++probe)
+        {
+            const size_t base = probe * size_t(kProbeLobesPerBlock);
+            const float valid = resources.probes.valid[probe] ? 1.f : 0.f;
+            block[base + 0] = glm::vec4(resources.probes.radiance[lobe0][probe], valid);
+            block[base + 1] = glm::vec4(resources.probes.radiance[lobe1][probe], valid);
+        }
+
+        glBindBuffer(GL_UNIFORM_BUFFER, resources.probeUbo[blockIndex]);
+        glBufferData(
+            GL_UNIFORM_BUFFER,
+            (GLsizeiptr)(block.size() * sizeof(glm::vec4)),
+            block.data(),
+            GL_DYNAMIC_DRAW);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 2 + blockIndex, resources.probeUbo[blockIndex]);
+    }
+
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    ++resources.uploadSerial;
+}
+
+bool GL_33_GI::UpdateDDGI(HRL_id sceneId)
+{
+    HRL_Context* context = GetPrivateContext();
+    if (!context)
+        return false;
+    auto sceneIt = context->scenes.find(sceneId);
+    if (sceneIt == context->scenes.end() || !sceneIt->second)
+        return false;
+
+    SceneResources& resources = scenes_[sceneId];
+    if (!EnsureGeometryCache(sceneId, resources.geometry))
+        return false;
+    if (!BuildOrUpdateProbeScene(resources.probes, resources.geometry))
+        return false;
+
+    ++resources.frameIndex;
+    const int budget = resources.probes.dirty
+        ? ((resources.probes.updateCursor == 0) ? 48 : kProbeBudgetPerFrame)
+        : 4;
+    const bool updated = UpdateProbeBatch(sceneId, resources, budget);
+
+    if (updated || resources.probeUbo[0] == 0)
+        UploadProbeVolume(resources);
+
+    return true;
+}
+
+void GL_33_GI::ApplyToShader(HRL_id sceneId, GL33_Shader* shader)
+{
+    if (!shader)
+        return;
+
+    const GLuint program = (GLuint)shader->GetId();
+    if (program == 0)
+        return;
+
+    auto sceneIt = scenes_.find(sceneId);
+    HRL_Context* context = GetPrivateContext();
+    const bool enabled = context &&
+        context->scenes.find(sceneId) != context->scenes.end() &&
+        context->scenes.at(sceneId) &&
+        context->scenes.at(sceneId)->global_illumination_enabled &&
+        context->scenes.at(sceneId)->global_illumination_method == HRL_GI_DDGI &&
+        sceneIt != scenes_.end() && sceneIt->second.probeUbo[0] != 0 &&
+        sceneIt->second.probes.initialized;
+
+    const uint64_t serial = sceneIt != scenes_.end() ? sceneIt->second.uploadSerial : 0;
+    if (program == lastShaderProgram_ &&
+        sceneId == lastSceneId_ &&
+        serial == lastUploadSerial_ &&
+        enabled == lastEnabled_)
+    {
+        if (enabled && sceneIt != scenes_.end())
+        {
+            glBindBufferBase(GL_UNIFORM_BUFFER, 2, sceneIt->second.probeUbo[0]);
+            glBindBufferBase(GL_UNIFORM_BUFFER, 3, sceneIt->second.probeUbo[1]);
+            glBindBufferBase(GL_UNIFORM_BUFFER, 4, sceneIt->second.probeUbo[2]);
+        }
+        return;
+    }
+
+    shader->Use();
+    shader->SetInt("DDGIEnabled", enabled ? 1 : 0);
+
+    if (enabled)
+    {
+        const ProbeVolume& probes = sceneIt->second.probes;
+        shader->SetVec3("DDGIProbeOrigin", probes.origin);
+        shader->SetVec3("DDGIProbeSpacing", probes.spacing);
+        shader->SetVec3("DDGIProbeResolution", glm::vec3(
+            float(probes.nx), float(probes.ny), float(probes.nz)));
+        shader->SetFloat("DDGIStrength", kGIShaderStrength);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 2, sceneIt->second.probeUbo[0]);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 3, sceneIt->second.probeUbo[1]);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 4, sceneIt->second.probeUbo[2]);
+    }
+    else
+    {
+        shader->SetVec3("DDGIProbeOrigin", glm::vec3(0.f));
+        shader->SetVec3("DDGIProbeSpacing", glm::vec3(1.f));
+        shader->SetVec3("DDGIProbeResolution", glm::vec3(1.f));
+        shader->SetFloat("DDGIStrength", 0.f);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 2, 0);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 3, 0);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 4, 0);
+    }
+
+    lastShaderProgram_ = program;
+    lastSceneId_ = sceneId;
+    lastUploadSerial_ = serial;
+    lastEnabled_ = enabled;
+}

@@ -12,6 +12,7 @@ HRL_vtable GetOpenGL33Backend()
 	vtable.RHI_Shutdown = GL33_Shutdown;
 
 	vtable.RHI_WindowResizeCallback = GL33_WindowResizeCallback;
+	vtable.RHI_TakeScreenshot = GL33_TakeScreenshot;
 
 	vtable.RHI_ResetFramebuffer = GL33_ResetFramebuffer;
 

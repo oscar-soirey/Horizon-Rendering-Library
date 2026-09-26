@@ -23,14 +23,17 @@ public:
   HRL_uint GetHeight() const;
 
   GLuint GetGL_ID() const;
+  const std::vector<unsigned char>& GetCpuRGBA() const { return cpu_rgba_; }
 
   void SetMinFilter(HRL_uint filter);
   void SetMaxFilter(HRL_uint filter);
 
 
 private:
-  GLuint glID_;
-  GLint width_, height_, nr_channels_;
+  GLuint glID_ = 0;
+  GLint width_ = 0, height_ = 0, nr_channels_ = 4;
+  std::vector<unsigned char> cpu_rgba_;
+  bool mipmaps_generated_ = false;
 };
 
 #endif

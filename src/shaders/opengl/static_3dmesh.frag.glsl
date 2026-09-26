@@ -101,6 +101,148 @@ layout(std140) uniform LightBlock
     Light lights[MAX_LIGHTS];
 };
 
+// World-space DDGI probe volume. Six directional radiance lobes are stored
+// as plain vec4 values across three small std140 blocks. This deliberately
+// avoids integer bit-packing so the shader remains conservative on older
+// OpenGL 3.3 drivers.
+#define DDGI_MAX_PROBES 384
+#define DDGI_LOBES 6
+#define DDGI_LOBES_PER_BLOCK 2
+layout(std140) uniform DDGIBlock0
+{
+    vec4 DDGIProbeData0[DDGI_MAX_PROBES * DDGI_LOBES_PER_BLOCK];
+};
+layout(std140) uniform DDGIBlock1
+{
+    vec4 DDGIProbeData1[DDGI_MAX_PROBES * DDGI_LOBES_PER_BLOCK];
+};
+layout(std140) uniform DDGIBlock2
+{
+    vec4 DDGIProbeData2[DDGI_MAX_PROBES * DDGI_LOBES_PER_BLOCK];
+};
+uniform int DDGIEnabled;
+uniform vec3 DDGIProbeOrigin;
+uniform vec3 DDGIProbeSpacing;
+uniform vec3 DDGIProbeResolution;
+uniform float DDGIStrength;
+
+vec4 DDGIGetLobeData(int probeIndex, int lobe)
+{
+    int localLobe = lobe % DDGI_LOBES_PER_BLOCK;
+    int localIndex = probeIndex * DDGI_LOBES_PER_BLOCK + localLobe;
+    if (lobe < 2)
+        return DDGIProbeData0[localIndex];
+    if (lobe < 4)
+        return DDGIProbeData1[localIndex];
+    return DDGIProbeData2[localIndex];
+}
+
+vec3 DDGIGetLobe(int probeIndex, int lobe)
+{
+    return DDGIGetLobeData(probeIndex, lobe).rgb;
+}
+
+vec3 DDGIProbeLobe(int x, int y, int z, int lobe)
+{
+    int nx = int(DDGIProbeResolution.x);
+    int ny = int(DDGIProbeResolution.y);
+    int index = (z * ny + y) * nx + x;
+    if (index < 0 || index >= DDGI_MAX_PROBES)
+        return vec3(0.0);
+    return DDGIGetLobe(index, lobe);
+}
+
+float DDGIProbeValid(int x, int y, int z)
+{
+    int nx = int(DDGIProbeResolution.x);
+    int ny = int(DDGIProbeResolution.y);
+    int index = (z * ny + y) * nx + x;
+    if (index < 0 || index >= DDGI_MAX_PROBES)
+        return 0.0;
+    return DDGIGetLobeData(index, 0).a > 0.5 ? 1.0 : 0.0;
+}
+
+vec3 DDGIProbeRadianceAt(int x, int y, int z, vec3 normalWorld)
+{
+    if (DDGIProbeValid(x, y, z) < 0.5)
+        return vec3(0.0);
+
+    vec3 n = normalize(normalWorld);
+    float wx  = max(dot(n, vec3( 1.0, 0.0, 0.0)), 0.0);
+    float wnx = max(dot(n, vec3(-1.0, 0.0, 0.0)), 0.0);
+    float wy  = max(dot(n, vec3( 0.0, 1.0, 0.0)), 0.0);
+    float wny = max(dot(n, vec3( 0.0,-1.0, 0.0)), 0.0);
+    float wz  = max(dot(n, vec3( 0.0, 0.0, 1.0)), 0.0);
+    float wnz = max(dot(n, vec3( 0.0, 0.0,-1.0)), 0.0);
+    float sumW = wx + wnx + wy + wny + wz + wnz;
+    if (sumW <= 1e-5)
+        return vec3(0.0);
+
+    vec3 result = vec3(0.0);
+    result += DDGIProbeLobe(x, y, z, 0) * wx;
+    result += DDGIProbeLobe(x, y, z, 1) * wnx;
+    result += DDGIProbeLobe(x, y, z, 2) * wy;
+    result += DDGIProbeLobe(x, y, z, 3) * wny;
+    result += DDGIProbeLobe(x, y, z, 4) * wz;
+    result += DDGIProbeLobe(x, y, z, 5) * wnz;
+    return result / sumW;
+}
+
+vec3 SampleDDGI(vec3 worldPos, vec3 normalWorld)
+{
+    if (DDGIEnabled == 0 || DDGIStrength <= 0.0)
+        return vec3(0.0);
+
+    vec3 grid = (worldPos - DDGIProbeOrigin) / max(DDGIProbeSpacing, vec3(1e-4));
+    vec3 maxGrid = max(DDGIProbeResolution - vec3(1.0), vec3(0.0));
+
+    if (any(lessThan(grid, vec3(0.0))) || any(greaterThan(grid, maxGrid)))
+        return vec3(0.0);
+
+    vec3 base = floor(grid);
+    vec3 f = grid - base;
+    int x0 = int(base.x);
+    int y0 = int(base.y);
+    int z0 = int(base.z);
+    int x1 = min(x0 + 1, int(maxGrid.x));
+    int y1 = min(y0 + 1, int(maxGrid.y));
+    int z1 = min(z0 + 1, int(maxGrid.z));
+
+    float wx0 = 1.0 - f.x;
+    float wx1 = f.x;
+    float wy0 = 1.0 - f.y;
+    float wy1 = f.y;
+    float wz0 = 1.0 - f.z;
+    float wz1 = f.z;
+
+    vec3 result = vec3(0.0);
+    float totalWeight = 0.0;
+
+    for (int ix = 0; ix < 2; ++ix)
+        for (int iy = 0; iy < 2; ++iy)
+            for (int iz = 0; iz < 2; ++iz)
+            {
+                int px = (ix == 0) ? x0 : x1;
+                int py = (iy == 0) ? y0 : y1;
+                int pz = (iz == 0) ? z0 : z1;
+                float wx = (ix == 0) ? wx0 : wx1;
+                float wy = (iy == 0) ? wy0 : wy1;
+                float wz = (iz == 0) ? wz0 : wz1;
+                float spatial = wx * wy * wz;
+                if (spatial <= 0.0)
+                    continue;
+
+                float valid = DDGIProbeValid(px, py, pz);
+                if (valid <= 0.0)
+                    continue;
+
+                result += DDGIProbeRadianceAt(px, py, pz, normalWorld) * spatial;
+                totalWeight += spatial;
+            }
+
+    return totalWeight > 1e-5 ? result / totalWeight : vec3(0.0);
+}
+
 float computeFogFactor(float dist)
 {
     float f;
@@ -283,7 +425,10 @@ void main()
     vec3 normalTex = texture(T_Normal, uv).rgb * 2.0 - 1.0;
 
     vec3 N = normalize(worldNormal);
-    vec3 T = normalize(worldTangent - N * dot(N, worldTangent));
+    vec3 tangent = worldTangent - N * dot(N, worldTangent);
+    if (dot(tangent, tangent) < 1e-8)
+        tangent = abs(N.y) < 0.999 ? cross(N, vec3(0.0, 1.0, 0.0)) : cross(N, vec3(1.0, 0.0, 0.0));
+    vec3 T = normalize(tangent);
     vec3 B = normalize(cross(N, T));
     if (dot(B, worldBitangent) < 0.0)
         B = -B;
@@ -336,6 +481,16 @@ void main()
     }
 
     vec3 litResult = lighting * albedo * TintColor;
+
+    // Diffuse world-space GI is evaluated directly in the material shader.
+    // This keeps GI independent of the camera and avoids any framebuffer copy or
+    // depth reconstruction in the GI path. DDGIProbeRadiance already represents
+    // outgoing diffuse radiance, so the surface albedo is applied exactly once.
+    if (DDGIEnabled != 0)
+    {
+        vec3 diffuseAlbedo = albedo * TintColor * (1.0 - metallic);
+        litResult += SampleDDGI(fragPos, normalWorld) * diffuseAlbedo * DDGIStrength;
+    }
     if (EnvironmentEnabled != 0 && EnvironmentStrength > 0.0)
     {
         vec3 reflectionDir = reflect(-viewDir, normalWorld);

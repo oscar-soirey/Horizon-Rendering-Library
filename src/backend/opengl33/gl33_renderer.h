@@ -6,12 +6,15 @@
 
 #include <vector>
 
+class GL33_Texture;
+
 //Control//
 void GL33_Init();
 void GL33_InitContext(HRL_uint _width, HRL_uint _height, void* loader);
 void GL33_Shutdown();
 
 void GL33_WindowResizeCallback(int width, int height);
+void GL33_TakeScreenshot(HRL_id scene, const char* target_path);
 
 void GL33_ResetFramebuffer();
 
@@ -46,6 +49,7 @@ void GL33_DeleteTexture(HRL_id _id);
 void GL33_GetTextureSize(HRL_id id, int* width, int* height);
 void GL33_SetTextureMinFilter(HRL_id id, HRL_EFilterType _filter);
 void GL33_SetTextureMaxFilter(HRL_id id, HRL_EFilterType _filter);
+const GL33_Texture* GL33_FindTexture(HRL_id id);
 
 //Scene//
 void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen);

@@ -209,6 +209,10 @@ using ButtonPressedCallback = void(*)(id button, int clicked, int released, void
 
 class Instance;
 class Mesh;
+class Mesh3D;
+class StaticMesh;
+class SkeletalMesh;
+class Sprite;
 class Light;
 class Texture;
 class Scene;
@@ -289,413 +293,185 @@ public:
 
 class HRL_CPP_API Mesh {
 public:
-/** Constructs a Mesh wrapper. */
-    Mesh();
-/** Constructs a Mesh wrapper. */
-    explicit Mesh(id value, bool owned = true);
-/** Creates a non-owning mesh wrapper for an existing HRL mesh ID. */
     static Mesh Borrowed(id value);
-/** Releases the owned Mesh resource. */
-    ~Mesh();
+    virtual ~Mesh();
 
-/** Constructs a Mesh wrapper. */
     Mesh(const Mesh&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Mesh& operator=(const Mesh&) = delete;
-/** Constructs a Mesh wrapper. */
     Mesh(Mesh&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Mesh& operator=(Mesh&& other) noexcept;
 
-/** Returns the underlying HRL resource identifier. */
     id GetID() const noexcept;
-/**
-	 * @brief Returns whether the given ID refers to a live mesh object.
-	 * @param _id ID to test.
-	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
-	 */
     bool IsValid() const;
-/**
-	 * @brief Destroys a mesh and frees its associated GPU resources.
-	 * @param _meshid ID of the mesh to delete.
-	 */
     void Release();
 
-/**
-	 * @brief Sets the pivot (origin) point of a mesh or sprite.
-	 * Coordinates are normalized: (0,0,0) is center, (-0.5,-0.5,0) is top-left.
-	 * Affects how translation and rotation are applied to the object.
-	 */
+    /** Common operations shared by every concrete mesh type. */
     void SetPivotPoint(float x, float y, float z);
-/**
-	 * @brief Defines the UV region of the texture displayed on a sprite.
-	 * Useful for sprite atlases. (min_u, min_v) is the top-left corner,
-	 * (max_u, max_v) is the bottom-right corner, in normalized [0..1] coordinates.
-	 */
-    void SetSpriteRegion(float minU, float minV, float maxU, float maxV);
-/**
-	 * @brief Assigns a material to a mesh, controlling how it is shaded.
-	 * @param _meshid ID of the target mesh.
-	 * @param _matid  ID of the material to apply.
-	 */
     void SetMaterial(const Material& material);
-/**
-	 * @brief Sets the world-space position of a mesh.
-	 */
     void SetLocation(float x, float y, float z);
-/**
-	 * @brief Sets the rotation of a mesh using Euler angles (in degrees).
-	 * @param pitch Rotation around the X axis.
-	 * @param yaw   Rotation around the Y axis.
-	 * @param roll  Rotation around the Z axis.
-	 */
     void SetRotation(float pitch, float yaw, float roll);
-/**
-	 * @brief Sets the scale of a mesh along each local axis.
-	 */
     void SetScale(float x, float y, float z);
-/** Returns the minimum world-space distance from the mesh LOD center to any viewport camera.
-	 * Uses the same object-center and camera-position metric as distance-based LOD. */
-    float GetCameraDistance() const;
 
-/** Enables or disables automatic LOD selection for a 3D mesh. */
-    void SetLODAutomatic(bool enabled);
-/** Selects distance-based or projected screen-size LOD selection. */
-    void SetLODMode(ELODMode mode);
-/** Sets the number of LOD levels, including LOD 0. Range: 1..8. */
-    void SetLODLevels(uint levels);
-/** Sets the first transition distance in world units. */
-    void SetLODDistance(float baseDistance);
-/** Multiplies the distance threshold for each next LOD. */
-    void SetLODScale(float distanceScale);
-/** C++ convenience function for SetLODMinDistance. */
-    void SetLODMinDistance(float distance);
-/** C++ convenience function for SetLODMaxDistance. */
-    void SetLODMaxDistance(float distance);
-/** Sets the LOD 0 screen-height threshold in [0,1]. */
-    void SetLODScreenThreshold(float threshold);
-/** Multiplies the screen-size threshold for each next LOD. */
-    void SetLODScreenScale(float scale);
-/** Adds transition hysteresis in [0,0.49] to reduce LOD popping. */
-    void SetLODHysteresis(float hysteresis);
-/** Forces a fixed LOD level. Pass -1 to return to automatic selection. */
-    void SetLODOverride(int level);
-/** Regenerates the internal LOD geometry from LOD 0. */
-    void ForceLODRebuild();
-/** C++ convenience function for GetLODCount. */
-    uint GetLODCount() const;
-/** C++ convenience function for GetLODVertexCount. */
-    std::size_t GetLODVertexCount(uint level) const;
-/** C++ convenience function for GetLODTriangleCount. */
-    std::size_t GetLODTriangleCount(uint level) const;
-/** Returns the LOD chosen by the most recently rendered viewport. */
-    int GetLODLevel() const;
+protected:
+    Mesh() = default;
+    explicit Mesh(id value, bool owned);
 
-/** C++ convenience function for GetSkeletalBoneCount. */
-    uint GetSkeletalBoneCount() const;
-/** C++ convenience function for GetSkeletalBone. */
-    const SkeletalBone* GetSkeletalBone(uint index) const;
-/** C++ convenience function for FindSkeletalBone. */
-    uint FindSkeletalBone(const char* name) const;
-/** C++ convenience function for GetSkeletalAnimationCount. */
-    uint GetSkeletalAnimationCount() const;
-/** C++ convenience function for GetSkeletalAnimation. */
-    const SkeletalAnimation* GetSkeletalAnimation(uint index) const;
-/** C++ convenience function for FindSkeletalAnimation. */
-    uint FindSkeletalAnimation(const char* name) const;
-/** C++ convenience function for PlaySkeletalAnimation. */
-    void PlaySkeletalAnimation(uint animation);
-/** C++ convenience function for StopSkeletalAnimation. */
-    void StopSkeletalAnimation();
-/** C++ convenience function for SetSkeletalAnimationTime. */
-    void SetSkeletalAnimationTime(float time);
-/** C++ convenience function for SetSkeletalAnimationSpeed. */
-    void SetSkeletalAnimationSpeed(float speed);
-/** C++ convenience function for SetSkeletalAnimationLoop. */
-    void SetSkeletalAnimationLoop(bool loop);
-/** C++ convenience function for GetCurrentSkeletalAnimation. */
-    int GetCurrentSkeletalAnimation() const;
-/** C++ convenience function for GetSkeletalAnimationTime. */
-    float GetSkeletalAnimationTime() const;
-/** C++ convenience function for IsSkeletalAnimationPlaying. */
-    bool IsSkeletalAnimationPlaying() const;
-/**
-	 * @brief Controls the rendering order of a sprite on the Z axis.
-	 * Only relevant when two or more sprites share the same Z depth.
-	 * Higher values are drawn on top.
-	 */
-    void SetSpriteDrawOrder(float drawOrder);
-
-private:
     id id_ = INVALID_ID;
-    bool owned_ = true;
+    bool owned_ = false;
+};
+
+/** Common 3D mesh functionality, primarily level-of-detail support. */
+class HRL_CPP_API Mesh3D : public Mesh {
+protected:
+    explicit Mesh3D(id value, bool owned) : Mesh(value, owned) {}
+
+public:
+    static Mesh3D Borrowed(id value);
+
+    float GetCameraDistance() const;
+    void SetLODAutomatic(bool enabled);
+    void SetLODMode(ELODMode mode);
+    void SetLODLevels(uint levels);
+    void SetLODDistance(float baseDistance);
+    void SetLODScale(float distanceScale);
+    void SetLODMinDistance(float distance);
+    void SetLODMaxDistance(float distance);
+    void SetLODScreenThreshold(float threshold);
+    void SetLODScreenScale(float scale);
+    void SetLODHysteresis(float hysteresis);
+    void SetLODOverride(int level);
+    void ForceLODRebuild();
+    uint GetLODCount() const;
+    std::size_t GetLODVertexCount(uint level) const;
+    std::size_t GetLODTriangleCount(uint level) const;
+    int GetLODLevel() const;
+};
+
+/** A conventional non-skinned 3D mesh created inside a Scene. */
+class HRL_CPP_API StaticMesh : public Mesh3D {
+public:
+    explicit StaticMesh(Scene& scene,
+                         const Vertex3D* vertices,
+                         std::size_t vertexCount,
+                         const uint* indices = nullptr,
+                         std::size_t indexCount = 0);
+
+    static StaticMesh Borrowed(id value);
+
+protected:
+    explicit StaticMesh(id value, bool owned) : Mesh3D(value, owned) {}
+};
+
+/** A skinned 3D mesh created inside a Scene. */
+class HRL_CPP_API SkeletalMesh : public Mesh3D {
+public:
+    explicit SkeletalMesh(Scene& scene, const SkeletalMeshData& data);
+
+    static SkeletalMesh Borrowed(id value);
+
+protected:
+    explicit SkeletalMesh(id value, bool owned) : Mesh3D(value, owned) {}
+
+    uint GetSkeletalBoneCount() const;
+    const SkeletalBone* GetSkeletalBone(uint index) const;
+    uint FindSkeletalBone(const char* name) const;
+
+    uint GetSkeletalAnimationCount() const;
+    const SkeletalAnimation* GetSkeletalAnimation(uint index) const;
+    uint FindSkeletalAnimation(const char* name) const;
+
+    void PlaySkeletalAnimation(uint animation);
+    void StopSkeletalAnimation();
+    void SetSkeletalAnimationTime(float time);
+    void SetSkeletalAnimationSpeed(float speed);
+    void SetSkeletalAnimationLoop(bool loop);
+    int GetCurrentSkeletalAnimation() const;
+    float GetSkeletalAnimationTime() const;
+    bool IsSkeletalAnimationPlaying() const;
+};
+
+/** A camera-facing 2D sprite mesh created inside a Scene. */
+class HRL_CPP_API Sprite : public Mesh {
+public:
+    explicit Sprite(Scene& scene);
+
+    static Sprite Borrowed(id value);
+
+protected:
+    explicit Sprite(id value, bool owned) : Mesh(value, owned) {}
+
+    void SetSpriteRegion(float minU, float minV, float maxU, float maxV);
+    void SetDrawOrder(float drawOrder);
+    void SetSpriteDrawOrder(float drawOrder);
 };
 
 class HRL_CPP_API Light {
 public:
-/** Constructs a Light wrapper. */
-    Light();
-/** Wraps an existing HRL light identifier. */
-    explicit Light(id value);
-/** Releases the owned Light resource. */
+    explicit Light(Scene& scene, ELightType type);
     ~Light();
-/** Constructs a Light wrapper. */
+
     Light(const Light&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Light& operator=(const Light&) = delete;
-/** Constructs a Light wrapper. */
     Light(Light&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Light& operator=(Light&& other) noexcept;
-/** Returns the underlying HRL resource identifier. */
+
     id GetID() const noexcept;
-/**
-	 * @brief Returns whether the given ID refers to a live light object.
-	 * @param _id ID to test.
-	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
-	 */
     bool IsValid() const;
-/** Releases the owned HRL resource and invalidates this wrapper. */
     void Release();
 
-/**
-	 * @brief Sets the RGB color emitted by a light.
-	 * Values are typically in [0..1] but may exceed 1 for HDR workflows.
-	 */
     void SetColor(float x, float y, float z);
-/**
-	 * @brief Sets the intensity (brightness multiplier) of a light.
-	 * @param i Intensity value. 1.0 is the default, higher values produce brighter results.
-	 */
     void SetIntensity(float intensity);
-/**
-	 * @brief Sets the attenuation (falloff) factor of a light.
-	 * Controls how quickly the light fades with distance.
-	 * @param a Attenuation coefficient.
-	 */
     void SetAttenuation(float attenuation);
-/**
-	 * @brief Sets the world-space position of a light.
-	 * Relevant for point lights and spot lights.
-	 */
     void SetLocation(float x, float y, float z);
-/**
-	 * @brief Sets the orientation of a light using Euler angles (in degrees).
-	 * Primarily relevant for directional and spot lights.
-	 */
     void SetRotation(float pitch, float yaw, float roll);
-/**
-	 * @brief Enables or disables shadow casting for a light.
-	 * OpenGL 3.3 supports shadows for point, directional and spot lights.
-	 */
     void SetCastShadows(bool enabled);
-/**
-	 * @brief Sets the shadow bias used to reduce self-shadowing artifacts.
-	 */
     void SetShadowBias(float bias);
-/**
-	 * @brief Sets the resolution of the private shadow map for a light.
-	 * Supported values are positive powers of two; the OpenGL backend may clamp
-	 * the requested value to the implementation limits.
-	 */
     void SetShadowResolution(int resolution);
-/**
-	 * 
-	 * @param _lightid
-	 * @param inner_cutoff Degrees
-	 */
     void SetSpotLightInnerCutoff(float degrees);
-/** C++ convenience function for SetSpotLightOuterCutoff. */
     void SetSpotLightOuterCutoff(float degrees);
+
 private:
     id id_ = INVALID_ID;
 };
 
 class HRL_CPP_API Texture {
 public:
-/** Constructs a Texture wrapper. */
-    Texture();
-/** Wraps an existing HRL texture identifier. */
-    explicit Texture(id value);
-/** Releases the owned Texture resource. */
+    Texture(const void* data, std::size_t size);
+    Texture(const char* text, const Font& font, float fontSize, float wrapWidth,
+            float r, float g, float b, float bgR, float bgG, float bgB, float bgA);
     ~Texture();
-/** Constructs a Texture wrapper. */
+
     Texture(const Texture&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Texture& operator=(const Texture&) = delete;
-/** Constructs a Texture wrapper. */
     Texture(Texture&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Texture& operator=(Texture&& other) noexcept;
-/** Returns the underlying HRL resource identifier. */
+
     id GetID() const noexcept;
-/**
-	 * @brief Returns whether the given ID refers to a live texture object.
-	 * @param _id ID to test.
-	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
-	 */
     bool IsValid() const;
-/** Releases the owned HRL resource and invalidates this wrapper. */
     void Release();
 
-/**
-	 * @brief Creates a GPU texture from a raw file buffer.
-	 * Supported formats: png, jpeg, jpg, bmp, tga, gif (first frame), hdr, psd (partial).
-	 * @param _data       Pointer to the file contents (opened in binary mode).
-	 * @param _bufferSize Size of the buffer in bytes.
-	 * @return HRL_id of the new texture, or HRL_INVALID_ID on failure.
-	 */
-    static Texture FromMemory(const void* data, std::size_t size);
-/**
-	 * @brief Rasterizes a UTF-8 text string into a new texture using the given font.
-	 * @param _text        Null-terminated UTF-8 string to render.
-	 * @param _fontid      ID of a font created with HRL_CreateFont.
-	 * @param _font_size   Glyph height in pixels.
-	 * @param _wrap_width  Line wrap threshold in pixels. Pass 0 to disable wrapping.
-	 * @param r,g,b        Text foreground color in [0..1].
-	 * @param bg_r,bg_g,bg_b,bg_a Background color. Set bg_a = 0 for a transparent background.
-	 * @return HRL_id of the newly created texture, or HRL_INVALID_ID on failure.
-	 */
-    static Texture FromText(const char* text, const Font& font, float fontSize, float wrapWidth,
-                             float r, float g, float b, float bgR, float bgG, float bgB, float bgA);
-
-/**
-	 * @brief Replaces the pixel data of an existing texture from a new file buffer.
-	 * The texture ID remains valid; any material referencing it will use the updated image.
-	 * @param _textureid  ID of the texture to update.
-	 * @param _data       Pointer to the new file contents (opened in binary mode).
-	 * @param _bufferSize Size of the buffer in bytes.
-	 */
     void Reload(const void* data, std::size_t size);
-/**
-	 * @brief Retrieves the current dimensions of a texture in pixels.
-	 * @param _width  Output width.
-	 * @param _height Output height.
-	 */
     void GetSize(int& width, int& height) const;
-/**
-	 * @brief Sets the minification filter used when the texture appears smaller than its native size.
-	 * @param _filter One of HRL_Filter_Nearest, HRL_Filter_Linear, HRL_Filter_Trilinear, etc.
-	 */
     void SetMinFilter(EFilterType filter);
-/**
-	 * @brief Sets the magnification filter used when the texture appears larger than its native size.
-	 * @param _filter One of HRL_Filter_Nearest, HRL_Filter_Linear, etc.
-	 */
     void SetMagFilter(EFilterType filter);
+
 private:
     id id_ = INVALID_ID;
 };
 
 class HRL_CPP_API Scene {
 public:
-/**
-	 * @brief Creates a new scene that acts as a container for meshes, lights and cameras.
-	 * @param _renderOnScreen If HRL_True, the scene renders directly to the screen.
-	 *                        If HRL_False, it renders into an off-screen texture buffer (default 480x480).
-	 * @return HRL_id of the new scene, or HRL_INVALID_ID on failure.
-	 */
     explicit Scene(bool renderOnScreen);
-/** Wraps an existing HRL scene identifier without creating a new scene. */
-    explicit Scene(id value);
-/** Releases the owned Scene resource. */
     ~Scene();
-/**
-	 * @brief Creates a new scene that acts as a container for meshes, lights and cameras.
-	 * @param _renderOnScreen If HRL_True, the scene renders directly to the screen.
-	 *                        If HRL_False, it renders into an off-screen texture buffer (default 480x480).
-	 * @return HRL_id of the new scene, or HRL_INVALID_ID on failure.
-	 */
+
     Scene(const Scene&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Scene& operator=(const Scene&) = delete;
-/**
-	 * @brief Creates a new scene that acts as a container for meshes, lights and cameras.
-	 * @param _renderOnScreen If HRL_True, the scene renders directly to the screen.
-	 *                        If HRL_False, it renders into an off-screen texture buffer (default 480x480).
-	 * @return HRL_id of the new scene, or HRL_INVALID_ID on failure.
-	 */
     Scene(Scene&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Scene& operator=(Scene&& other) noexcept;
 
-/** Returns the underlying HRL resource identifier. */
     id GetID() const noexcept;
-/**
-	 * @brief Returns whether the given ID refers to a live scene object.
-	 * @param _id ID to test.
-	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
-	 */
     bool IsValid() const;
-/**
-	 * @brief Destroys a scene and all objects it owns.
-	 * @param _sceneid ID of the scene to delete.
-	 */
     void Release();
-
-/**
-	 * @brief Creates a sprite mesh in the given scene.
-	 * A sprite is a textured quad that always faces the camera.
-	 * @param _sceneid ID of the target scene.
-	 * @return HRL_id of the new sprite, or HRL_InvalidID on failure.
-	 */
-    Mesh CreateSprite();
-/**
-	 * @brief Creates a static 3D mesh from caller-owned vertex/index arrays.
-	 *
-	 * The mesh data is copied by HRL and may be released by the caller as soon
-	 * as the function returns. When _indexCount is zero, the vertices are drawn
-	 * sequentially as triangles. Otherwise _indices must contain triangle indices
-	 * and _indexCount must be a multiple of 3.
-	 *
-	 * No standard 3D file format importer is involved in this API.
-	 *
-	 * @param _sceneid      ID of the target scene.
-	 * @param _vertices     Pointer to _vertexCount HRL_Vertex3D values.
-	 * @param _vertexCount  Number of vertices.
-	 * @param _indices      Optional pointer to _indexCount HRL_uint indices.
-	 * @param _indexCount   Number of indices, or 0 for non-indexed rendering.
-	 * @return HRL_id of the new mesh, or HRL_INVALID_ID on failure.
-	 */
-    Mesh CreateMesh3D(const Vertex3D* vertices, std::size_t vertexCount,
-                      const uint* indices = nullptr, std::size_t indexCount = 0);
-/** Creates a skeletal mesh from CPU-side data returned by the FBX importer.
-	 * HRL copies the data and the caller may free the source structure afterwards. */
-    Mesh CreateSkeletalMesh(const SkeletalMeshData& data);
-/**
-	 * @brief Reserved generic file-based mesh entry point.
-	 *
-	 * This entry point remains reserved. FBX conversion is intentionally exposed
-	 * separately through HRL_GetVertex3DFromFBX.
-	 */
-    Mesh CreateMeshFromFile(EMeshType type, const void* data, std::size_t size);
-/**
-	 * @brief Creates a light source in the given scene.
-	 * @param _type One of HRL_PointLight, HRL_DirectionalLight, HRL_SpotLight.
-	 * @return HRL_id of the new light, or HRL_INVALID_ID on failure.
-	 */
-    Light CreateLight(ELightType type);
-/**
-	 * @brief Creates a camera in the given scene.
-	 * @param _type One of HRL_Ortho or HRL_Perspective. Defaults to HRL_Ortho.
-	 * @return HRL_id of the new camera, or HRL_INVALID_ID on failure.
-	 */
-    Camera CreateCamera(ECameraType type);
-/**
-	 * @brief Creates a viewport that renders a scene through a camera into a screen region.
-	 * Useful for split-screen or picture-in-picture setups.
-	 * All coordinates are normalized [0..1]: (0,0) is top-left, (1,1) is bottom-right.
-	 * @param _cameraid Camera to use, or HRL_INVALID_ID to leave unassigned.
-	 * @return HRL_id of the new viewport, or HRL_INVALID_ID on failure.
-	 */
-    Viewport CreateViewport(const Camera* camera, float x, float y, float width, float height);
-/**
-	 * @brief Attaches a post-process pass to a viewport using a custom material.
-	 * Passes are applied in creation order after the scene is rendered.
-	 * @param _matid Material containing the full-screen shader to apply.
-	 * @return HRL_id of the new post-process object, or HRL_INVALID_ID on failure.
-	 */
-    PostProcess CreatePostProcess(const Material& material, int priority);
 
 /**
 	 * @brief Resizes the off-screen render texture of a scene.
@@ -803,363 +579,163 @@ private:
 
 class HRL_CPP_API PostProcess {
 public:
-/** Constructs a PostProcess wrapper. */
-    PostProcess();
-/** Wraps an existing HRL postprocess identifier. */
-    explicit PostProcess(id value);
-/** Releases the owned PostProcess resource. */
+    explicit PostProcess(Viewport& viewport, const Material& material, int priority);
     ~PostProcess();
-/** Constructs a PostProcess wrapper. */
+
     PostProcess(const PostProcess&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     PostProcess& operator=(const PostProcess&) = delete;
-/** Constructs a PostProcess wrapper. */
     PostProcess(PostProcess&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     PostProcess& operator=(PostProcess&& other) noexcept;
-/** Returns the underlying HRL resource identifier. */
+
     id GetID() const noexcept;
-/**
-	 * @brief Returns whether the given ID refers to a live post-process object.
-	 * @param _id ID to test.
-	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
-	 */
     bool IsValid() const;
-/** Releases the owned HRL resource and invalidates this wrapper. */
     void Release();
+
 private:
     id id_ = INVALID_ID;
 };
 
 class HRL_CPP_API Shader {
 public:
-/** Constructs a Shader wrapper. */
-    Shader();
-/** Wraps an existing HRL shader identifier. */
-    explicit Shader(id value);
-/** Releases the owned Shader resource. */
+    Shader(const void* vertexData, std::size_t vertexSize,
+           const void* fragmentData, std::size_t fragmentSize);
     ~Shader();
-/** Constructs a Shader wrapper. */
+
     Shader(const Shader&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Shader& operator=(const Shader&) = delete;
-/** Constructs a Shader wrapper. */
     Shader(Shader&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Shader& operator=(Shader&& other) noexcept;
-/** Returns the underlying HRL resource identifier. */
+
     id GetID() const noexcept;
-/**
-	 * @brief Returns whether the given ID refers to a live shader object.
-	 * @param _id ID to test.
-	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
-	 */
     bool IsValid() const;
-/** Releases the owned HRL resource and invalidates this wrapper. */
     void Release();
-/**
-	 * @brief Compiles and links a shader program from GLSL vertex and fragment source.
-	 * @param _vertData  Pointer to the vertex shader source buffer.
-	 * @param _vertSize  Size of the vertex shader source in bytes.
-	 * @param _fragData  Pointer to the fragment shader source buffer.
-	 * @param _fragSize  Size of the fragment shader source in bytes.
-	 * @return HRL_id of the compiled shader, or HRL_INVALID_ID on compilation failure.
-	 */
-    static Shader FromSource(const void* vertexData, std::size_t vertexSize,
-                             const void* fragmentData, std::size_t fragmentSize);
+
 private:
     id id_ = INVALID_ID;
 };
 
 class HRL_CPP_API Material {
 public:
-/** Constructs a Material wrapper. */
-    Material();
-/** Wraps an existing HRL material identifier. */
-    explicit Material(id value);
-/** Releases the owned Material resource. */
+    explicit Material(const Shader& shader);
     ~Material();
-/** Constructs a Material wrapper. */
-    Material(const Material&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
-    Material& operator=(const Material&) = delete;
-/** Constructs a Material wrapper. */
-    Material(Material&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
-    Material& operator=(Material&& other) noexcept;
-/** Returns the underlying HRL resource identifier. */
-    id GetID() const noexcept;
-/**
-	 * @brief Returns whether the given ID refers to a live material object.
-	 * @param _id ID to test.
-	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
-	 */
-    bool IsValid() const;
-/** Releases the owned HRL resource and invalidates this wrapper. */
-    void Release();
-/**
-	 * @brief Creates a material instance backed by the given shader.
-	 * A material stores the uniform values (textures, floats, etc.) passed to its shader.
-	 * @param _shaderid ID of the shader this material uses.
-	 * @return HRL_id of the new material, or HRL_INVALID_ID on failure.
-	 */
-    static Material Create(const Shader& shader);
 
-/**
-	 * @brief Sets an integer uniform on a material.
-	 */
+    Material(const Material&) = delete;
+    Material& operator=(const Material&) = delete;
+    Material(Material&& other) noexcept;
+    Material& operator=(Material&& other) noexcept;
+
+    id GetID() const noexcept;
+    bool IsValid() const;
+    void Release();
+
     void SetInt(const char* name, int value);
-/**
-	 * @brief Binds a texture to a named sampler uniform on a material.
-	 */
     void SetTexture(const char* name, const Texture& texture);
-/**
-	 * @brief Sets a boolean uniform on a material (internally stored as int 0 or 1).
-	 */
     void SetBool(const char* name, bool value);
-/**
-	 * @brief Sets a float uniform on a material.
-	 */
     void SetFloat(const char* name, float value);
-/**
-	 * @brief Sets a vec2 uniform on a material.
-	 */
     void SetVec2(const char* name, float x, float y);
-/**
-	 * @brief Sets a vec3 uniform on a material.
-	 */
     void SetVec3(const char* name, float x, float y, float z);
-/**
-	 * @brief Sets a vec4 uniform on a material.
-	 */
     void SetVec4(const char* name, float x, float y, float z, float w);
-/**
-	 * @brief Sets the emissive color tint of a material, additively blended with the emissive texture.
-	 * @param matid    ID of the target material.
-	 * @param r,g,b,a  Emissive color and alpha multiplier in [0..1].
-	 */
-    void SetEmissiveColor(float r,float g,float b,float a);
+    void SetEmissiveColor(float r, float g, float b, float a);
+
 private:
     id id_ = INVALID_ID;
 };
 
 class HRL_CPP_API Viewport {
 public:
-/** Constructs a Viewport wrapper. */
-    Viewport();
-/** Wraps an existing HRL viewport identifier. */
-    explicit Viewport(id value);
-/** Releases the owned Viewport resource. */
+    Viewport(Scene& scene, const Camera* camera, float x, float y, float width, float height);
     ~Viewport();
-/** Constructs a Viewport wrapper. */
+
     Viewport(const Viewport&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Viewport& operator=(const Viewport&) = delete;
-/** Constructs a Viewport wrapper. */
     Viewport(Viewport&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Viewport& operator=(Viewport&& other) noexcept;
-/** Returns the underlying HRL resource identifier. */
+
     id GetID() const noexcept;
-/**
-	 * @brief Returns whether the given ID refers to a live viewport object.
-	 * @param _id ID to test.
-	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
-	 */
     bool IsValid() const;
-/** Releases the owned HRL resource and invalidates this wrapper. */
     void Release();
-/**
-	 * @brief Reassigns the camera used by a viewport.
-	 * @param _camid New camera ID, or HRL_INVALID_ID to detach.
-	 */
+
     void SetCamera(const Camera* camera);
-/**
-	 * @brief Updates the screen-space rectangle of a viewport.
-	 * All values are normalized [0..1].
-	 */
-    void SetRect(float x,float y,float width,float height);
-/** C++ convenience function for CreateWidget. */
-    Widget CreateWidget(EWidgetType type);
+    void SetRect(float x, float y, float width, float height);
+
 private:
     id id_ = INVALID_ID;
 };
 
 class HRL_CPP_API Camera {
 public:
-/** Constructs a Camera wrapper. */
-    Camera();
-/** Wraps an existing HRL camera identifier. */
-    explicit Camera(id value);
-/** Releases the owned Camera resource. */
+    explicit Camera(Scene& scene, ECameraType type);
     ~Camera();
-/** Constructs a Camera wrapper. */
+
     Camera(const Camera&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Camera& operator=(const Camera&) = delete;
-/** Constructs a Camera wrapper. */
     Camera(Camera&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Camera& operator=(Camera&& other) noexcept;
-/** Returns the underlying HRL resource identifier. */
+
     id GetID() const noexcept;
-/**
-	 * @brief Returns whether the given ID refers to a live camera object.
-	 * @param _id ID to test.
-	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
-	 */
     bool IsValid() const;
-/** Releases the owned HRL resource and invalidates this wrapper. */
     void Release();
-/**
-	 * @brief Changes the projection type of an existing camera at runtime.
-	 * @param _type HRL_Ortho or HRL_Perspective.
-	 */
+
     void SetType(ECameraType type);
-/**
-	 * @brief Sets the vertical extent of an orthographic camera's view volume.
-	 * @param _height World-space height visible on screen.
-	 */
     void SetOrthoVertical(float height);
-/**
-	 * @brief Sets the vertical field of view for a perspective camera.
-	 * @param _fov Vertical FOV in degrees.
-	 */
     void SetPerspectiveFov(float fov);
-/**
-	 * @brief Sets the near clipping plane distance.
-	 * Objects closer than this value will not be rendered.
-	 */
     void SetNearPlane(float nearPlane);
-/**
-	 * @brief Sets the far clipping plane distance.
-	 * Objects farther than this value will not be rendered.
-	 */
     void SetFarPlane(float farPlane);
-/**
-	 * @brief Sets the world-space position of a camera.
-	 */
-    void SetLocation(float x,float y,float z);
-/**
-	 * @brief Sets the orientation of a camera using Euler angles (in degrees).
-	 * Axis mapping: Pitch = X, Yaw = Y, Roll = Z.
-	 */
-    void SetRotation(float pitch,float yaw,float roll);
+    void SetLocation(float x, float y, float z);
+    void SetRotation(float pitch, float yaw, float roll);
+
 private:
     id id_ = INVALID_ID;
 };
 
 class HRL_CPP_API Font {
 public:
-/** Constructs a Font wrapper. */
-    Font();
-/** Wraps an existing HRL font identifier. */
-    explicit Font(id value);
-/** Releases the owned Font resource. */
+    Font(const void* data, std::size_t size);
     ~Font();
-/** Constructs a Font wrapper. */
+
     Font(const Font&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Font& operator=(const Font&) = delete;
-/** Constructs a Font wrapper. */
     Font(Font&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Font& operator=(Font&& other) noexcept;
-/** Returns the underlying HRL resource identifier. */
+
     id GetID() const noexcept;
-/**
-	 * @brief Returns whether the given ID refers to a live font object.
-	 * @param _id ID to test.
-	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
-	 */
     bool IsValid() const;
-/** Releases the owned HRL resource and invalidates this wrapper. */
     void Release();
-/**
-	 * @brief Loads a TrueType font from a memory buffer for use with HRL_CreateTextureFromText.
-	 * @param data       Pointer to the raw .ttf file contents.
-	 * @param _data_size Size of the buffer in bytes.
-	 * @return HRL_id of the new font, or HRL_INVALID_ID on failure.
-	 */
-    static Font FromMemory(const void* data, std::size_t size);
+
 private:
     id id_ = INVALID_ID;
 };
 
 class HRL_CPP_API Widget {
 public:
-/** Constructs a Widget wrapper. */
-    Widget();
-/** Wraps an existing HRL widget identifier. */
-    explicit Widget(id value);
-/** Releases the owned Widget resource. */
+    Widget(Viewport& viewport, EWidgetType type);
     ~Widget();
-/** Constructs a Widget wrapper. */
+
     Widget(const Widget&) = delete;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Widget& operator=(const Widget&) = delete;
-/** Constructs a Widget wrapper. */
     Widget(Widget&& other) noexcept;
-/** Move/copy assignment operator for this C++ resource wrapper. */
     Widget& operator=(Widget&& other) noexcept;
-/** Returns the underlying HRL resource identifier. */
+
     id GetID() const noexcept;
-/** Returns whether this widget wrapper contains a valid widget identifier. */
     bool IsValid() const;
-/** Releases the owned HRL resource and invalidates this wrapper. */
     void Release();
 
-/**
-	 * @param widget
-	 * @param x Normalized position in viewport [0;1]
-	 */
-    void SetPosition(float x,float y);
-/**
-	 * @param widget
-	 * @param width Normalized in [0;1]
-	 */
-    void SetSize(float width,float height);
-/** C++ convenience function for SetAlpha. */
+    void SetPosition(float x, float y);
+    void SetSize(float width, float height);
     void SetAlpha(float alpha);
-/** C++ convenience function for IsHovered. */
     bool IsHovered() const;
-/**
-	 *
-	 * @param widget
-	 * @param ax [0;1], [0.5, 0.5] is centered
-	 * @param ay
-	 */
-    void SetAnchor(float ax,float ay);
-/** BUTTON CONTROL FUNCTIONS **/
+    void SetAnchor(float ax, float ay);
     void SetButtonClickable(bool clickable);
-/** C++ convenience function for SetButtonText. */
     void SetButtonText(const char* text);
-/** C++ convenience function for SetButtonTextTintColor. */
-    void SetButtonTextTintColor(EWidgetState state,float r,float g,float b,float a);
-/** C++ convenience function for SetButtonTextFont. */
+    void SetButtonTextTintColor(EWidgetState state, float r, float g, float b, float a);
     void SetButtonTextFont(const Font& font);
-/**
-	 *
-	 * @param widget
-	 * @param state HRL_BUTTON_IDLE, HRL_BUTTON_HOVERED, HRL_BUTTON_PRESSED
-	 * @param texture The id of the texture to be set on background, pass 0 to set the image to white
-	 */
-    void SetButtonBackgroundTexture(EWidgetState state,const Texture* texture);
-/** C++ convenience function for SetButtonBackgroundTintColor. */
-    void SetButtonBackgroundTintColor(EWidgetState state,float r,float g,float b,float a);
-/**
-	 * Called every frame the button is pressed
-	 * @param widget
-	 * @param callback
-	 * @param user_data
-	 */
+    void SetButtonBackgroundTexture(EWidgetState state, const Texture* texture);
+    void SetButtonBackgroundTintColor(EWidgetState state, float r, float g, float b, float a);
     void SetButtonPressedCallback(ButtonPressedCallback callback, void* userData);
-/** TEXT SPECIFIC CONTROL **/
     void SetLabelText(const char* text);
-/** C++ convenience function for SetLabelFont. */
     void SetLabelFont(const Font& font);
-/** C++ convenience function for SetLabelTintColor. */
-    void SetLabelTintColor(float r,float g,float b,float a);
+    void SetLabelTintColor(float r, float g, float b, float a);
+
 private:
     id id_ = INVALID_ID;
     void* buttonCallbackState_ = nullptr;

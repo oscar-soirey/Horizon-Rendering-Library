@@ -117,12 +117,42 @@ static void UpdateSceneLights(HRL_id _scene)
 	g_Backend.RHI_UpdateLights(GetLightsVector(_scene));
 }
 
+static void MarkSceneGIGeometryDirty(hrl_scene_t* scene)
+{
+	if (!scene)
+		return;
+	++scene->gi_geometry_revision;
+	scene->shadows_dirty = true;
+}
+
+static void MarkSceneGILightingDirty(hrl_scene_t* scene)
+{
+	if (scene)
+		++scene->gi_lighting_revision;
+}
+
+static void MarkAllScenesGILightingDirty()
+{
+	for (auto& [sceneId, scene] : ctx_.scenes)
+	{
+		(void)sceneId;
+		MarkSceneGILightingDirty(scene);
+	}
+}
+
 
 
 /// API Implementation ///
 
 void HRL_Init(HRL_E_APIs _api)
 {
+	if (_api != HRL_OPENGL_33)
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
+			"HRL_Init: selected backend is not implemented");
+		return;
+	}
+
 	switch (_api)
 	{
 	case HRL_OPENGL_33 :
@@ -176,6 +206,22 @@ void HRL_InitContext(HRL_uint _width, HRL_uint _height, void* _loader)
 
 void HRL_Shutdown()
 {
+	// Destroy flat resources that are referenced by scene viewports first.
+	{
+		std::vector<HRL_id> ids;
+		ids.reserve(ctx_.post_processes.size());
+		for (const auto& [id, pp] : ctx_.post_processes)
+		{ (void)pp; ids.push_back(id); }
+		for (HRL_id id : ids) HRL_DeletePostProcess(id);
+	}
+	{
+		std::vector<HRL_id> ids;
+		ids.reserve(ctx_.widgets.size());
+		for (const auto& [id, widget] : ctx_.widgets)
+		{ (void)widget; ids.push_back(id); }
+		for (HRL_id id : ids) HRL_DeleteWidget(id);
+	}
+
 	//supprimer tous les objets de toutes les scenes
 	for (const auto& [scene_id, scene] : ctx_.scenes)
 	{
@@ -210,6 +256,7 @@ void HRL_Shutdown()
 		delete scene;
 	}
 	ctx_.scenes.clear();
+	ctx_.debug_renderers.clear();
 
 	//nettoyer les caches flat
 	ctx_.meshes.clear();
@@ -217,6 +264,7 @@ void HRL_Shutdown()
 	ctx_.viewports.clear();
 	ctx_.cameras.clear();
 	ctx_.post_processes.clear();
+	ctx_.pending_screenshots.clear();
 
 	for (const auto& [id, material] : ctx_.materials)
 	{
@@ -301,6 +349,16 @@ void HRL_EndFrame()
 		// context, so refresh it immediately before rendering this scene.
 		UpdateSceneLights(scene_id);
 		g_Backend.RHI_RenderScene(scene, scene_id);
+
+		// Screenshot requests are captured after the scene has completed its
+		// post-process/UI passes for the frame.
+		auto screenshotIt = ctx_.pending_screenshots.find(scene_id);
+		if (screenshotIt != ctx_.pending_screenshots.end())
+		{
+			if (g_Backend.RHI_TakeScreenshot)
+				g_Backend.RHI_TakeScreenshot(scene_id, screenshotIt->second.c_str());
+			ctx_.pending_screenshots.erase(screenshotIt);
+		}
 
 		// Debug primitives are one-frame submissions. The backend consumes them
 		// while rendering the complete scene (all viewports) above.
@@ -427,7 +485,8 @@ void HRL_SetMeshPivotPoint(HRL_id _meshid, float x, float y, float z)
 	}
 	it->second->pivot_point_ = {x, y, z};
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
-	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE) scene_it->second->shadows_dirty = true;
+	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
+		MarkSceneGIGeometryDirty(scene_it->second);
 }
 
 void HRL_SetSpriteRegion(HRL_id _meshid, float min_u, float min_v, float max_u, float max_v)
@@ -468,7 +527,7 @@ void HRL_DeleteMesh(HRL_id _meshid)
 	{
 		scene_it->second->meshes.erase(_meshid);
 		if (it->second->type_ != HRL_SPRITE)
-			scene_it->second->shadows_dirty = true;
+			MarkSceneGIGeometryDirty(scene_it->second);
 	}
 
 	g_Backend.RHI_DeleteMesh(_meshid);
@@ -485,6 +544,9 @@ void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid)
 		return;
 	}
 	it->second->material_ = _matid;
+	auto scene_it = ctx_.scenes.find(it->second->scene_);
+	if (scene_it != ctx_.scenes.end() && it->second->type_ == HRL_3D_MESH)
+		MarkSceneGILightingDirty(scene_it->second);
 }
 
 void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
@@ -497,7 +559,8 @@ void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
 	}
 	it->second->position_ = glm::vec3(x, y, z);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
-	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE) scene_it->second->shadows_dirty = true;
+	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
+		MarkSceneGIGeometryDirty(scene_it->second);
 }
 
 void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll)
@@ -511,7 +574,8 @@ void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll)
 	//glm attend : X-pitch, Y-yaw, Z-roll.
 	it->second->rotation_ = glm::vec3(pitch, yaw, roll);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
-	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE) scene_it->second->shadows_dirty = true;
+	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
+		MarkSceneGIGeometryDirty(scene_it->second);
 }
 
 void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z)
@@ -524,7 +588,8 @@ void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z)
 	}
 	it->second->scale_ = glm::vec3(x, y, z);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
-	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE) scene_it->second->shadows_dirty = true;
+	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
+		MarkSceneGIGeometryDirty(scene_it->second);
 }
 
 
@@ -887,6 +952,7 @@ HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_ELightType _type)
 	l->id_ = newId;
 	it_scene->second->lights.emplace(newId, l);
 	ctx_.lights.emplace(newId, l);
+	MarkSceneGILightingDirty(it_scene->second);
 
 	UpdateSceneLights(_sceneid);
 
@@ -908,6 +974,7 @@ void HRL_DeleteLight(HRL_id _lightid)
 	if (scene_it != ctx_.scenes.end())
 	{
 		scene_it->second->lights.erase(_lightid);
+		MarkSceneGILightingDirty(scene_it->second);
 		scene_it->second->shadows_dirty = true;
 	}
 
@@ -928,6 +995,10 @@ void HRL_SetLightColor(HRL_id _lightid, float x, float y, float z)
 	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
 	it->second->color_ = glm::vec4(x, y, z, 0.f);
 
+	auto scene_it = ctx_.scenes.find(it->second->scene_);
+	if (scene_it != ctx_.scenes.end())
+		MarkSceneGILightingDirty(scene_it->second);
+
 	UpdateSceneLights(it->second->scene_);
 }
 
@@ -941,6 +1012,10 @@ void HRL_SetLightIntensity(HRL_id _lightid, float i)
 	}
 	it->second->intensity_ = i;
 
+	auto scene_it = ctx_.scenes.find(it->second->scene_);
+	if (scene_it != ctx_.scenes.end())
+		MarkSceneGILightingDirty(scene_it->second);
+
 	UpdateSceneLights(it->second->scene_);
 }
 
@@ -953,6 +1028,10 @@ void HRL_SetLightAttenuation(HRL_id _lightid, float a)
 		return;
 	}
 	it->second->attenuation_ = a;
+
+	auto scene_it = ctx_.scenes.find(it->second->scene_);
+	if (scene_it != ctx_.scenes.end())
+		MarkSceneGILightingDirty(scene_it->second);
 
 	UpdateSceneLights(it->second->scene_);
 }
@@ -968,7 +1047,7 @@ void HRL_SetLightLocation(HRL_id _lightid, float x, float y, float z)
 	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
 	it->second->position_ = glm::vec4(x, y, z, 0.f);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
-	if (scene_it != ctx_.scenes.end()) scene_it->second->shadows_dirty = true;
+	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
 
 	UpdateSceneLights(it->second->scene_);
 }
@@ -984,7 +1063,7 @@ void HRL_SetLightRotation(HRL_id _lightid, float pitch, float yaw, float roll)
 	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
 	it->second->rotation_ = glm::vec4(pitch, yaw, roll, 0.f);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
-	if (scene_it != ctx_.scenes.end()) scene_it->second->shadows_dirty = true;
+	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
 
 	UpdateSceneLights(it->second->scene_);
 }
@@ -999,7 +1078,7 @@ void HRL_SetLightCastShadows(HRL_id _lightid, int _enable)
 	}
 	it->second->cast_shadows_ = (_enable != HRL_FALSE);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
-	if (scene_it != ctx_.scenes.end()) scene_it->second->shadows_dirty = true;
+	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
 	UpdateSceneLights(it->second->scene_);
 }
 
@@ -1017,6 +1096,12 @@ void HRL_SetLightShadowBias(HRL_id _lightid, float _bias)
 		return;
 	}
 	it->second->shadow_bias_ = _bias;
+	auto scene_it = ctx_.scenes.find(it->second->scene_);
+	if (scene_it != ctx_.scenes.end())
+	{
+		MarkSceneGILightingDirty(scene_it->second);
+		scene_it->second->shadows_dirty = true;
+	}
 }
 
 void HRL_SetLightShadowResolution(HRL_id _lightid, int _resolution)
@@ -1051,7 +1136,7 @@ void HRL_SetSpotLightInnerCutoff(HRL_id _lightid, float inner_cutoff)
 
 	it->second->innerCutoff = inner_cutoff;
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
-	if (scene_it != ctx_.scenes.end()) scene_it->second->shadows_dirty = true;
+	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
 
 	UpdateSceneLights(it->second->scene_);
 }
@@ -1072,7 +1157,7 @@ void HRL_SetSpotLightOuterCutoff(HRL_id _lightid, float outer_cutoff)
 
 	it->second->outerCutoff = outer_cutoff;
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
-	if (scene_it != ctx_.scenes.end()) scene_it->second->shadows_dirty = true;
+	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
 
 	UpdateSceneLights(it->second->scene_);
 }
@@ -1089,6 +1174,7 @@ HRL_id HRL_CreateTexture(const char* _fileContent, size_t _bufferSize)
 void HRL_DeleteTexture(HRL_id _textureid)
 {
 	g_Backend.RHI_DeleteTexture(_textureid);
+	MarkAllScenesGILightingDirty();
 }
 
 
@@ -1196,6 +1282,7 @@ void HRL_DeleteScene(HRL_id _sceneid)
 
 	delete it->second;
 
+	ctx_.pending_screenshots.erase(_sceneid);
 	g_Backend.RHI_DeleteScene(_sceneid);
 
 	ctx_.scenes.erase(it);
@@ -1330,6 +1417,7 @@ void HRL_SetSkySphereEnabled(HRL_id _sceneid, int _enable)
 		return;
 	}
 	it->second->sky_sphere_enabled = (_enable != HRL_FALSE);
+	MarkSceneGILightingDirty(it->second);
 }
 
 void HRL_SetSkySphereColors(
@@ -1348,6 +1436,7 @@ void HRL_SetSkySphereColors(
 	it->second->sky_top_color = glm::vec3(top_r, top_g, top_b);
 	it->second->sky_horizon_color = glm::vec3(horizon_r, horizon_g, horizon_b);
 	it->second->sky_bottom_color = glm::vec3(bottom_r, bottom_g, bottom_b);
+	MarkSceneGILightingDirty(it->second);
 }
 
 void HRL_SetSkySphereRotation(HRL_id _sceneid, float pitch, float yaw, float roll)
@@ -1359,6 +1448,7 @@ void HRL_SetSkySphereRotation(HRL_id _sceneid, float pitch, float yaw, float rol
 		return;
 	}
 	it->second->sky_rotation = glm::vec3(pitch, yaw, roll);
+	MarkSceneGILightingDirty(it->second);
 }
 
 void HRL_SetSkySphereTexture(HRL_id _sceneid, HRL_id _textureid)
@@ -1370,6 +1460,7 @@ void HRL_SetSkySphereTexture(HRL_id _sceneid, HRL_id _textureid)
 		return;
 	}
 	it->second->sky_texture = _textureid;
+	MarkSceneGILightingDirty(it->second);
 }
 
 void HRL_SetEnvironmentMappingEnabled(HRL_id _sceneid, int _enable)
@@ -1413,12 +1504,14 @@ HRL_id HRL_CreatePostProcess(HRL_id _viewport, HRL_id _matid, int priority)
 	}
 
 	auto pp = new HRL_PostProcess();
+	pp->id_ = GenerateHRL_ID();
 	pp->material_ = _matid;
+	pp->priority_ = priority;
 
-	HRL_id newId = GenerateHRL_ID();
+	HRL_id newId = pp->id_;
 
 	ctx_.post_processes.emplace(newId, pp);
-	it_viewport->second->post_processes.emplace(priority, pp);
+	it_viewport->second->post_processes.emplace(newId, pp);
 
 	g_Backend.RHI_CreatePostProcess(_matid, priority);
 
@@ -1433,15 +1526,11 @@ void HRL_DeletePostProcess(HRL_id _postid)
 		return;
 	}
 
-	//retire de la scene propriétaire
-	for (auto& [scene_id, viewports] : ctx_.viewports)
+	// Remove all viewport references before freeing the object.
+	for (auto& [viewport_id, viewport] : ctx_.viewports)
 	{
-		auto sit = viewports->post_processes.find(_postid);
-		if (sit != viewports->post_processes.end())
-		{
-			viewports->post_processes.erase(sit);
-			break;
-		}
+		(void)viewport_id;
+		if (viewport) viewport->post_processes.erase(_postid);
 	}
 
 	g_Backend.RHI_DeletePostProcess(_postid);
@@ -1495,6 +1584,7 @@ void HRL_DeleteMaterial(HRL_id _matid)
 	}
 	delete it->second;
 	ctx_.materials.erase(it);
+	MarkAllScenesGILightingDirty();
 }
 
 void HRL_MaterialSetInt(HRL_id _matid, const char* _uniformName, int a)
@@ -1507,6 +1597,7 @@ void HRL_MaterialSetInt(HRL_id _matid, const char* _uniformName, int a)
 	}
 	//si la clée n'existe pas, elle est créée
 	it->second->intParams_[_uniformName] = a;
+	MarkAllScenesGILightingDirty();
 }
 
 void HRL_MaterialSetTexture(HRL_id _matid, const char* _uniformName, HRL_id _textureid)
@@ -1520,6 +1611,7 @@ void HRL_MaterialSetTexture(HRL_id _matid, const char* _uniformName, HRL_id _tex
 
 	//on vérifie que la texture existe au moment de RHI_BindMaterial, car ici on a pas acces aux textures
 	it_mat->second->textureParams_[_uniformName] = _textureid;
+	MarkAllScenesGILightingDirty();
 }
 
 void HRL_MaterialSetBool(HRL_id _matid, const char* _uniformName, int a)
@@ -1531,6 +1623,7 @@ void HRL_MaterialSetBool(HRL_id _matid, const char* _uniformName, int a)
 		return;
 	}
 	it->second->intParams_[_uniformName] = a;
+	MarkAllScenesGILightingDirty();
 }
 
 void HRL_MaterialSetFloat(HRL_id _matid, const char* _uniformName, float a)
@@ -1542,6 +1635,7 @@ void HRL_MaterialSetFloat(HRL_id _matid, const char* _uniformName, float a)
 		return;
 	}
 	it->second->floatParams_[_uniformName] = a;
+	MarkAllScenesGILightingDirty();
 }
 
 void HRL_MaterialSetVec2(HRL_id _matid, const char* _uniformName, float x, float y)
@@ -1553,6 +1647,7 @@ void HRL_MaterialSetVec2(HRL_id _matid, const char* _uniformName, float x, float
 		return;
 	}
 	it->second->vec2Params_[_uniformName] = glm::vec2(x, y);
+	MarkAllScenesGILightingDirty();
 }
 
 void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float x, float y, float z)
@@ -1564,6 +1659,7 @@ void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float x, float
 		return;
 	}
 	it->second->vec3Params_[_uniformName] = glm::vec3(x, y, z);
+	MarkAllScenesGILightingDirty();
 }
 
 void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float y, float z, float w)
@@ -1575,6 +1671,7 @@ void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float
 		return;
 	}
 	it->second->vec4Params_[_uniformName] = glm::vec4(x, y, z, w);
+	MarkAllScenesGILightingDirty();
 }
 
 
@@ -1588,18 +1685,24 @@ HRL_id HRL_CreateViewport(HRL_id _sceneid, HRL_id _cameraid, float x, float y, f
 		return HRL_INVALID_ID;
 	}
 
-	HRL_Camera* cam = nullptr;
-
 	auto it = ctx_.cameras.find(_cameraid);
-	if (it != ctx_.cameras.end())
+	if (it == ctx_.cameras.end())
 	{
-		cam = it->second;
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateViewport: invalid camera ID");
+		return HRL_INVALID_ID;
+	}
+	HRL_Camera* cam = it->second;
+
+	if (cam->scene_ != _sceneid)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_CreateViewport: camera belongs to another scene");
+		return HRL_INVALID_ID;
 	}
 
-	//camera valide
 	auto* v = new HRL_Viewport(cam, x, y, _width, _height);
 
 	HRL_id newId = GenerateHRL_ID();
+	v->scene_ = _sceneid;
 	it_scene->second->viewports.emplace(newId, v);
 	ctx_.viewports.emplace(newId, v);
 
@@ -1614,6 +1717,17 @@ void HRL_DeleteViewport(HRL_id _viewportid)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteViewport: invalid ID");
 		return;
 	}
+
+	// Destroy viewport-owned resources before the viewport itself.
+	std::vector<HRL_id> postIds;
+	for (const auto& [id, pp] : it->second->post_processes)
+	{ (void)pp; postIds.push_back(id); }
+	for (HRL_id id : postIds) HRL_DeletePostProcess(id);
+
+	std::vector<HRL_id> widgetIds;
+	for (const auto& [id, widget] : it->second->widgets)
+	{ (void)widget; widgetIds.push_back(id); }
+	for (HRL_id id : widgetIds) HRL_DeleteWidget(id);
 
 	//retire de la scene propriétaire
 	for (auto& [scene_id, scene] : ctx_.scenes)
@@ -1639,15 +1753,20 @@ void HRL_SetViewportCamera(HRL_id _viewportid, HRL_id _camid)
 		return;
 	}
 
-	HRL_Camera* cam = nullptr;
-
 	auto cam_it = ctx_.cameras.find(_camid);
-	if (cam_it != ctx_.cameras.end())
+	if (cam_it == ctx_.cameras.end())
 	{
-		cam = cam_it->second;
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetViewportCamera: invalid camera ID");
+		return;
+	}
+	if (viewport_it->second->scene_ != HRL_INVALID_ID &&
+		cam_it->second->scene_ != viewport_it->second->scene_)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetViewportCamera: camera belongs to another scene");
+		return;
 	}
 
-	viewport_it->second->camera_ = cam;
+	viewport_it->second->camera_ = cam_it->second;
 }
 
 void HRL_SetViewportRect(HRL_id _viewportid, float x, float y, float _width, float _height)
@@ -1689,6 +1808,7 @@ HRL_id HRL_CreateCamera(HRL_id _sceneid, HRL_ECameraType _type)
 			1000.f
 			);
 		HRL_id newId = GenerateHRL_ID();
+		cam->scene_ = _sceneid;
 		it_scene->second->cameras.emplace(newId, cam);
 		ctx_.cameras.emplace(newId, cam);
 		return newId;
@@ -1707,6 +1827,14 @@ void HRL_DeleteCamera(HRL_id _camid)
 	{
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteCamera: invalid ID");
 		return;
+	}
+
+	// Invalidate every viewport reference before deleting the camera.
+	for (auto& [viewportId, viewport] : ctx_.viewports)
+	{
+		(void)viewportId;
+		if (viewport && viewport->camera_ == it->second)
+			viewport->camera_ = nullptr;
 	}
 
 	//retire de la scene propriétaire
@@ -1882,6 +2010,99 @@ void HRL_SetFogLinearRange(HRL_id scene, float start, float end)
 	it->second->fog.range_start = start;
 	it->second->fog.range_end = end;
 	g_Backend.RHI_FogPropertyChanged(scene, &it->second->fog);
+}
+
+void HRL_SetVolumetricFogEnabled(HRL_id scene, int enable)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricFogEnabled: invalid scene ID"); return; }
+	it->second->volumetric_fog.enabled = (enable != HRL_FALSE);
+}
+
+void HRL_SetVolumetricFogPosition(HRL_id scene, float x, float y, float z)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricFogPosition: invalid scene ID"); return; }
+	it->second->volumetric_fog.position = glm::vec3(x, y, z);
+}
+
+void HRL_SetVolumetricFogRadius(HRL_id scene, float radius)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricFogRadius: invalid scene ID"); return; }
+	if (!std::isfinite(radius) || radius <= 0.f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricFogRadius: radius must be > 0"); return; }
+	it->second->volumetric_fog.radius = radius;
+}
+
+void HRL_SetVolumetricFogDensity(HRL_id scene, float density)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricFogDensity: invalid scene ID"); return; }
+	if (!std::isfinite(density) || density < 0.f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricFogDensity: density must be >= 0"); return; }
+	it->second->volumetric_fog.density = density;
+}
+
+void HRL_SetVolumetricFogColor(HRL_id scene, float r, float g, float b)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricFogColor: invalid scene ID"); return; }
+	it->second->volumetric_fog.color = glm::clamp(glm::vec3(r, g, b), glm::vec3(0.f), glm::vec3(1.f));
+}
+
+void HRL_SetVolumetricFogSteps(HRL_id scene, HRL_uint steps)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricFogSteps: invalid scene ID"); return; }
+	it->second->volumetric_fog.steps = std::max<HRL_uint>(4u, std::min<HRL_uint>(64u, steps));
+}
+
+void HRL_SetGodRaysEnabled(HRL_id scene, int enable)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetGodRaysEnabled: invalid scene ID"); return; }
+	it->second->god_rays.enabled = (enable != HRL_FALSE);
+}
+
+void HRL_SetGodRaysPosition(HRL_id scene, float x, float y, float z)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetGodRaysPosition: invalid scene ID"); return; }
+	it->second->god_rays.position = glm::vec3(x, y, z);
+}
+
+void HRL_SetGodRaysColor(HRL_id scene, float r, float g, float b)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetGodRaysColor: invalid scene ID"); return; }
+	it->second->god_rays.color = glm::clamp(glm::vec3(r, g, b), glm::vec3(0.f), glm::vec3(1.f));
+}
+
+void HRL_SetGodRaysDensity(HRL_id scene, float density)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetGodRaysDensity: invalid scene ID"); return; }
+	it->second->god_rays.density = glm::clamp(density, 0.f, 2.f);
+}
+
+void HRL_SetGodRaysDecay(HRL_id scene, float decay)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetGodRaysDecay: invalid scene ID"); return; }
+	it->second->god_rays.decay = glm::clamp(decay, 0.8f, 0.999f);
+}
+
+void HRL_SetGodRaysWeight(HRL_id scene, float weight)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetGodRaysWeight: invalid scene ID"); return; }
+	it->second->god_rays.weight = glm::clamp(weight, 0.f, 4.f);
+}
+
+void HRL_SetGodRaysSamples(HRL_id scene, HRL_uint samples)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetGodRaysSamples: invalid scene ID"); return; }
+	it->second->god_rays.samples = std::max<HRL_uint>(8u, std::min<HRL_uint>(96u, samples));
 }
 
 
@@ -2197,7 +2418,17 @@ int HRL_IsValidFont(HRL_id _id)
 
 void HRL_TakeScreenshot(HRL_id _sceneid, const char *_target_path)
 {
-
+	if (_target_path == nullptr || *_target_path == '\0')
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_TakeScreenshot: target path is empty");
+		return;
+	}
+	if (ctx_.scenes.find(_sceneid) == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_TakeScreenshot: invalid scene ID");
+		return;
+	}
+	ctx_.pending_screenshots[_sceneid] = _target_path;
 }
 
 void HRL_ReloadTexture(HRL_id _textureid, const char *_data, size_t _bufferSize)
@@ -2260,6 +2491,21 @@ HRL_id HRL_CreateMesh3D(HRL_id _sceneid, const HRL_Vertex3D* _vertices, size_t _
 		}
 	}
 
+	for (size_t i = 0; i < _vertexCount; ++i)
+	{
+		const HRL_Vertex3D& v = _vertices[i];
+		for (float value : v.position)
+			if (!std::isfinite(value)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateMesh3D: vertex position contains NaN or infinity"); return HRL_INVALID_ID; }
+		for (float value : v.normal)
+			if (!std::isfinite(value)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateMesh3D: vertex normal contains NaN or infinity"); return HRL_INVALID_ID; }
+		for (float value : v.uv)
+			if (!std::isfinite(value)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateMesh3D: vertex UV contains NaN or infinity"); return HRL_INVALID_ID; }
+		for (float value : v.tangent)
+			if (!std::isfinite(value)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateMesh3D: vertex tangent contains NaN or infinity"); return HRL_INVALID_ID; }
+		for (float value : v.bitangent)
+			if (!std::isfinite(value)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateMesh3D: vertex bitangent contains NaN or infinity"); return HRL_INVALID_ID; }
+	}
+
 	HRL_id newId = GenerateHRL_ID();
 	if (g_Backend.RHI_CreateMesh(newId, _vertices, _vertexCount, _indices, _indexCount) != HRL_TRUE)
 	{
@@ -2306,7 +2552,7 @@ HRL_id HRL_CreateMesh3D(HRL_id _sceneid, const HRL_Vertex3D* _vertices, size_t _
 		mesh->bounds_radius_ = std::sqrt(radius2);
 	}
 	it_scene->second->meshes.emplace(newId, mesh);
-	it_scene->second->shadows_dirty = true;
+	MarkSceneGIGeometryDirty(it_scene->second);
 	ctx_.meshes.emplace(newId, mesh);
 
 	return newId;
@@ -4373,6 +4619,17 @@ HRL_id HRL_CreateSkeletalMesh(HRL_id _sceneid, const HRL_SkeletalMeshData* _data
 	}
 	for (size_t vertexIndex = 0; vertexIndex < _data->vertexCount; ++vertexIndex)
 	{
+		const HRL_Vertex3D& vertex = _data->vertices[vertexIndex].vertex;
+		for (float value : vertex.position)
+			if (!std::isfinite(value)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: vertex position contains NaN or infinity"); return HRL_INVALID_ID; }
+		for (float value : vertex.normal)
+			if (!std::isfinite(value)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: vertex normal contains NaN or infinity"); return HRL_INVALID_ID; }
+		for (float value : vertex.uv)
+			if (!std::isfinite(value)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: vertex UV contains NaN or infinity"); return HRL_INVALID_ID; }
+		for (float value : vertex.tangent)
+			if (!std::isfinite(value)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: vertex tangent contains NaN or infinity"); return HRL_INVALID_ID; }
+		for (float value : vertex.bitangent)
+			if (!std::isfinite(value)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateSkeletalMesh: vertex bitangent contains NaN or infinity"); return HRL_INVALID_ID; }
 		float weightSum = 0.f;
 		for (size_t influence = 0; influence < HRL_SKELETAL_MAX_INFLUENCES; ++influence)
 		{
@@ -4919,7 +5176,11 @@ HRL_id HRL_CreateWidget(HRL_id viewport, HRL_EWidgetType type)
 			widget = new HRL_WidgetButton{};
 			break;
 		}
-		default: { break; }
+		default:
+		{
+			SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_CreateWidget: unsupported widget type");
+			return HRL_INVALID_ID;
+		}
 	}
 
 	ctx_.widgets.emplace(newId, widget);
@@ -4929,7 +5190,21 @@ HRL_id HRL_CreateWidget(HRL_id viewport, HRL_EWidgetType type)
 
 void HRL_DeleteWidget(HRL_id widget)
 {
+	auto it = ctx_.widgets.find(widget);
+	if (it == ctx_.widgets.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteWidget: invalid widget ID");
+		return;
+	}
 
+	for (auto& [viewportId, viewport] : ctx_.viewports)
+	{
+		(void)viewportId;
+		if (viewport) viewport->widgets.erase(widget);
+	}
+
+	delete it->second;
+	ctx_.widgets.erase(it);
 }
 
 void HRL_SetWidgetPosition(HRL_id widget, float x, float y)

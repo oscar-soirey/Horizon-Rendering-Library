@@ -12,6 +12,7 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
 #include <cstddef>
@@ -21,6 +22,9 @@
 #include <unordered_map>
 #include <array>
 #include <cstdint>
+#include <fstream>
+#include <string>
+#include <cstring>
 
 #include "core/widgets.h"
 
@@ -40,11 +44,12 @@ static glm::mat4 CalculateProjectionMatrix();
 static glm::mat4 CalculateViewMatrix();
 
 static void DrawSkySphere(const hrl_scene_t* scene);
-static void DrawOpaqueMeshes(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum);
+static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum);
 static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum);
 static void CreateSpriteGeometry();
 static void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets);
 static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_PostProcess* pp);
+static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view, const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex);
 static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id);
 static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id);
 static void DestroyLightShadowResources(HRL_id light_id);
@@ -150,6 +155,8 @@ struct GL33_Backend {
 	GLuint post_fbo[2];
 	GLuint post_textures[2];
 
+	GL33_Shader* scene_effect_shader = nullptr;
+
 	//Widgets
 	GL33_Shader* ui_shader=nullptr;
 };
@@ -182,6 +189,102 @@ typedef struct {
 	GL33_Shader* bound_shader = nullptr;
 } GL33_State;
 static GL33_State* ctx_;
+
+static const char* kSceneEffectsFragmentShader = R"GLSL(
+#version 330 core
+in vec2 uv;
+out vec4 frag_color;
+uniform sampler2D uScene;
+uniform sampler2D uBrightScene;
+uniform sampler2D uDepth;
+uniform mat4 uInvViewProjection;
+uniform vec3 uCameraPos;
+uniform vec2 uViewportOrigin;
+uniform vec2 uViewportSize;
+uniform int uVolumetricFogEnabled;
+uniform vec3 uFogPosition;
+uniform float uFogRadius;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform int uFogSteps;
+uniform int uGodRaysEnabled;
+uniform vec2 uGodRaysLightUV;
+uniform vec3 uGodRaysColor;
+uniform float uGodRaysDensity;
+uniform float uGodRaysDecay;
+uniform float uGodRaysWeight;
+uniform int uGodRaysSamples;
+
+vec2 GlobalUV(vec2 localUV) { return uViewportOrigin + localUV * uViewportSize; }
+vec3 ReconstructWorld(vec2 localUV, float depth)
+{
+    vec4 clip = vec4(localUV * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 world = uInvViewProjection * clip;
+    if (abs(world.w) < 1e-6) return uCameraPos;
+    return world.xyz / world.w;
+}
+vec4 ApplyLocalizedFog(vec2 globalUV, vec3 worldEnd)
+{
+    vec4 base = texture(uScene, globalUV);
+    if (uVolumetricFogEnabled == 0 || uFogDensity <= 0.0 || uFogRadius <= 0.0) return base;
+    vec3 ray = worldEnd - uCameraPos;
+    float rayLength = length(ray);
+    if (rayLength <= 1e-4) return base;
+    vec3 direction = ray / rayLength;
+    int steps = clamp(uFogSteps, 4, 64);
+    float stepLength = rayLength / float(steps);
+    float transmittance = 1.0;
+    vec3 scattering = vec3(0.0);
+    for (int i = 0; i < 64; ++i)
+    {
+        if (i >= steps) break;
+        float t = (float(i) + 0.5) / float(steps);
+        vec3 samplePos = uCameraPos + direction * (rayLength * t);
+        float normalized = 1.0 - length(samplePos - uFogPosition) / uFogRadius;
+        if (normalized <= 0.0) continue;
+        float localDensity = normalized * normalized * uFogDensity;
+        float alpha = 1.0 - exp(-localDensity * stepLength);
+        scattering += transmittance * alpha * uFogColor;
+        transmittance *= 1.0 - alpha;
+        if (transmittance < 0.01) break;
+    }
+    return vec4(base.rgb * transmittance + scattering, base.a);
+}
+vec4 ApplyGodRays(vec2 globalUV, vec4 color)
+{
+    if (uGodRaysEnabled == 0 || uGodRaysWeight <= 0.0 || uGodRaysDensity <= 0.0) return color;
+    int samples = clamp(uGodRaysSamples, 8, 96);
+    vec2 lightGlobalUV = uViewportOrigin + uGodRaysLightUV * uViewportSize;
+    vec2 delta = (globalUV - lightGlobalUV) * (uGodRaysDensity / float(samples));
+    vec2 sampleUV = globalUV;
+    vec3 rays = vec3(0.0);
+    float illumination = 1.0;
+    for (int i = 0; i < 96; ++i)
+    {
+        if (i >= samples) break;
+        sampleUV -= delta;
+        if (any(lessThan(sampleUV, vec2(0.0))) || any(greaterThan(sampleUV, vec2(1.0)))) break;
+        vec3 sceneSample = texture(uScene, sampleUV).rgb;
+        vec3 brightSample = texture(uBrightScene, sampleUV).rgb;
+        float luma = dot(sceneSample, vec3(0.2126, 0.7152, 0.0722));
+        vec3 source = brightSample + max(luma - 0.55, 0.0) * sceneSample * 0.35;
+        rays += source * illumination;
+        illumination *= uGodRaysDecay;
+    }
+    rays /= float(samples);
+    color.rgb += rays * uGodRaysColor * uGodRaysWeight;
+    return color;
+}
+void main()
+{
+    vec2 globalUV = GlobalUV(uv);
+    vec4 color = texture(uScene, globalUV);
+    float depth = texture(uDepth, globalUV).r;
+    color = ApplyLocalizedFog(globalUV, ReconstructWorld(uv, depth));
+    color = ApplyGodRays(globalUV, color);
+    frag_color = color;
+}
+)GLSL";
 
 static void UploadSkeletalBones(HRL_SkeletalMesh* mesh, GL33_Backend::SkeletalMeshGPU& gpu)
 {
@@ -614,6 +717,15 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 	);
 	bck_->shaders.emplace(HRL_DEFAULT_POST_PROCESS_SHADER, default_post_process_shader);
 
+	bck_->scene_effect_shader = new GL33_Shader();
+	if (bck_->scene_effect_shader->GL33_Create(
+		(const char*)res_post_vert_glsl, res_post_vert_glsl_len,
+		kSceneEffectsFragmentShader, std::strlen(kSceneEffectsFragmentShader)) != 0)
+	{
+		delete bck_->scene_effect_shader;
+		bck_->scene_effect_shader = nullptr;
+	}
+
 	//SPRITE SHADER
 	auto* sprite_shader = new GL33_Shader();
 	sprite_shader->GL33_Create(
@@ -780,6 +892,7 @@ void GL33_Shutdown()
 	}
 
 	delete bck_->ui_shader;
+	delete bck_->scene_effect_shader;
 	delete bck_->sky_shader;
 	delete bck_->shadow_2d_shader;
 	delete bck_->shadow_point_shader;
@@ -830,37 +943,63 @@ void GL33_Shutdown()
 
 void GL33_WindowResizeCallback(int width, int height)
 {
-	//Resize post process textures and brightness textures
-	for (int i = 0; i < 2; i++)
+	if (!bck_)
+		return;
+
+	// These are framebuffer/drawable dimensions in pixels. HRL viewports are
+	// normalized and converted to pixels every frame, so keep the GL viewport
+	// itself synchronized with the new drawable size as well.
+	if (width <= 0 || height <= 0)
+	{
+		glViewport(0, 0, 0, 0);
+		return;
+	}
+	glViewport(0, 0, width, height);
+
+	// Resize post-process ping-pong targets.
+	for (int i = 0; i < 2; ++i)
 	{
 		glBindTexture(GL_TEXTURE_2D, bck_->post_textures[i]);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	}
+
+	// Resize every scene attachment. Attachments 3 and 4 are the DDGI albedo
+	// and world-normal targets and must track the window size too.
 	for (const auto& s : bck_->gpu_scenes)
 	{
-		glBindTexture(GL_TEXTURE_2D, s.second->textures[0]);
+		GL_Scene* scene = s.second;
+		if (!scene)
+			continue;
+
+		glBindTexture(GL_TEXTURE_2D, scene->textures[0]);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
-		glBindTexture(GL_TEXTURE_2D, s.second->textures[1]);
+		glBindTexture(GL_TEXTURE_2D, scene->textures[1]);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
-		//color picking
-		glBindTexture(GL_TEXTURE_2D, s.second->textures[2]);
+	glBindTexture(GL_TEXTURE_2D, scene->textures[2]);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-		// GI G-buffer attachments must follow the scene size as well.
-		glBindTexture(GL_TEXTURE_2D, s.second->textures[3]);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
-		glBindTexture(GL_TEXTURE_2D, s.second->textures[4]);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
-		glBindRenderbuffer(GL_RENDERBUFFER, s.second->depth_rbo);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
-		s.second->width = width;
-		s.second->height = height;
+	glBindTexture(GL_TEXTURE_2D, scene->textures[3]);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glBindTexture(GL_TEXTURE_2D, scene->textures[4]);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+
+		if (scene->depth_texture)
+		{
+			glBindTexture(GL_TEXTURE_2D, scene->depth_texture);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+		}
+
+		scene->width = width;
+		scene->height = height;
+
+		// Recreate multisample resources at the new resolution.
 		if (bck_->antialiasing_samples > 1)
-			CreateMSAAResources(s.second, bck_->antialiasing_samples);
+			CreateMSAAResources(scene, bck_->antialiasing_samples);
 	}
+
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
-
 
 
 void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
@@ -919,8 +1058,19 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		}
 	}
 
+	// DDGI is world-space and camera-independent: update the probe volume once
+	// per scene frame, before any mesh is shaded. The mesh shader consumes the
+	// resulting UBO directly.
+	if (scene->global_illumination_enabled &&
+		scene->global_illumination_method == HRL_GI_DDGI && g_gl33_gi)
+	{
+		g_gl33_gi->UpdateDDGI(scene_id);
+	}
+
 	for (const auto& v : scene->viewports)
 	{
+		if (!v.second || !v.second->camera_)
+			continue;
 		ctx_->viewport = v.second;
 		ctx_->bound_material = nullptr;
 		ctx_->bound_shader = nullptr;
@@ -956,7 +1106,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		glDepthMask(GL_TRUE);
 		glDepthFunc(GL_LESS);
 		glDisable(GL_BLEND);
-		DrawOpaqueMeshes(scene->meshes, scene->debug_view, cameraFrustum);
+		DrawOpaqueMeshes(scene_id, scene->meshes, scene->debug_view, cameraFrustum);
 		DrawSprites(scene->meshes, cameraFrustum);
 
 		// Debug primitives are rendered into the scene framebuffer.
@@ -966,85 +1116,71 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 
 		ResolveSceneMSAA(gpu_scene);
 
-		// Optional GI pass. Disabled by default, so the existing rendering path is
-		// byte-for-byte the same until a scene explicitly enables a supported method.
-		if (scene->global_illumination_enabled &&
-			scene->global_illumination_method == HRL_GI_SSGI && g_gl33_gi)
-		{
-			const float vx = v.second->x_;
-			const float vy = v.second->y_;
-			const float vw = v.second->width_;
-			const float vh = v.second->height_;
-			const int px = (int)std::floor(vx * winW);
-			const int py = (int)std::floor(vy * winH);
-			const int pw = std::max(1, (int)std::floor(vw * winW));
-			const int ph = std::max(1, (int)std::floor(vh * winH));
-			const glm::vec4 viewportRect(vx, vy, vx + vw, vy + vh);
-			const bool giRendered = g_gl33_gi->RenderSSGI(scene_id, v.first, gpu_scene, render_fbo, ctx_->proj_mat, ctx_->view_mat,
-				ctx_->viewport && ctx_->viewport->camera_ ? ctx_->viewport->camera_->far_plane_ : 1000.0f,
-				viewportRect, px, py, pw, ph);
-			if (!giRendered)
-				printf(">>> SSGI RenderSSGI FAILED <<<\n");
-		}
-
 		bool has_post_process = !v.second->post_processes.empty();
+		bool has_scene_effects = scene->volumetric_fog.enabled || scene->god_rays.enabled;
 
-		if (has_post_process)
+		if (has_post_process || has_scene_effects)
 		{
-			// ---- STEP 2 : copie ATTACHMENT0 vers post_fbo[0] pour démarrer le ping-pong ----
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
 			glReadBuffer(GL_COLOR_ATTACHMENT0);
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bck_->post_fbo[0]);
-			glBlitFramebuffer(
-			 0, 0, (int)winW, (int)winH,
-			 0, 0, (int)winW, (int)winH,
-			 GL_COLOR_BUFFER_BIT,
-			 GL_NEAREST
-			);
+			glBlitFramebuffer(0, 0, (int)winW, (int)winH, 0, 0, (int)winW, (int)winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-			// ---- STEP 3 : chaîne de post-process (ping-pong) ----
+			GLuint currentTexture = bck_->post_textures[0];
+			int src = 0;
+			if (has_scene_effects && bck_->scene_effect_shader)
+			{
+				const int vx = (int)(v.second->x_ * winW);
+				const int vy = (int)(v.second->y_ * winH);
+				const int vw = std::max(1, (int)(v.second->width_ * winW));
+				const int vh = std::max(1, (int)(v.second->height_ * winH));
+				ApplySceneEffects(gpu_scene, scene, ctx_->view_mat, ctx_->proj_mat, vx, vy, vw, vh, currentTexture);
+				src = (currentTexture == bck_->post_textures[0]) ? 0 : 1;
+			}
 
-			//to draw square on fullscreen
+			// User post-processes keep the historic full-frame behavior.
 			glViewport(0, 0, (int)winW, (int)winH);
 
-			int src = 0;
-			for (const auto& [priority, pp] : v.second->post_processes)
+			std::vector<HRL_PostProcess*> sortedPostProcesses;
+			sortedPostProcesses.reserve(v.second->post_processes.size());
+			for (const auto& [postId, pp] : v.second->post_processes)
+			{
+				(void)postId;
+				if (pp) sortedPostProcesses.push_back(pp);
+			}
+			std::sort(sortedPostProcesses.begin(), sortedPostProcesses.end(), [](const HRL_PostProcess* a, const HRL_PostProcess* b) {
+				if (a->priority_ != b->priority_) return a->priority_ < b->priority_;
+				return a->id_ < b->id_;
+			});
+			for (HRL_PostProcess* pp : sortedPostProcesses)
 			{
 				int dst = 1 - src;
-
 				glBindFramebuffer(GL_FRAMEBUFFER, bck_->post_fbo[dst]);
 				glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 				DrawPostProcessQuad(bck_->post_textures[src], scene_it->second->textures[1], pp);
-
 				src = dst;
 			}
 
-			// ---- STEP 4 : blit dernier post-process vers l'écran ----
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, bck_->post_fbo[src]);
-			glReadBuffer(GL_COLOR_ATTACHMENT0);
-			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-			glBlitFramebuffer(
-			 0, 0, (int)winW, (int)winH,
-			 0, 0, (int)winW, (int)winH,
-			 GL_COLOR_BUFFER_BIT,
-			 GL_NEAREST
-			);
-		}
-		else
-		{
-			// ---- pas de post-process : blit direct scene → écran ----
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
 			glReadBuffer(GL_COLOR_ATTACHMENT0);
 			if (scene->draw_on_screen)
 			{
 				glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-				glBlitFramebuffer(
-				 0, 0, (int)winW, (int)winH,
-				 0, 0, (int)winW, (int)winH,
-				 GL_COLOR_BUFFER_BIT,
-				 GL_NEAREST
-				);
+				glBlitFramebuffer(0, 0, (int)winW, (int)winH, 0, 0, (int)winW, (int)winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 			}
+			else
+			{
+				glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene_fbo);
+				glDrawBuffer(GL_COLOR_ATTACHMENT0);
+				glBlitFramebuffer(0, 0, (int)winW, (int)winH, 0, 0, (int)winW, (int)winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+			}
+		}
+		else if (scene->draw_on_screen)
+		{
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
+			glReadBuffer(GL_COLOR_ATTACHMENT0);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+			glBlitFramebuffer(0, 0, (int)winW, (int)winH, 0, 0, (int)winW, (int)winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		}
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		DrawWidgets(v.second->widgets);
@@ -1113,6 +1249,15 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, HRL_Mesh* mesh, co
 	s->SetMat4("projection", ctx_->proj_mat);
 	s->SetMat4("view", ctx_->view_mat);
 	s->SetMat4("model", model);
+	if (mat->shader_ == HRL_MESH_3D_SHADER)
+	{
+		const glm::mat3 model3(model);
+		glm::mat3 normalMatrix(1.0f);
+		const float det = glm::determinant(model3);
+		if (std::isfinite(det) && std::abs(det) > 1e-8f)
+			normalMatrix = glm::transpose(glm::inverse(model3));
+		s->SetMat3("normalMatrix", normalMatrix);
+	}
 	s->SetUint("uSpriteID", object_id);
 	s->SetVec4("UVRegion", {mesh->region_[0], mesh->region_[1], mesh->region_[2], mesh->region_[3]});
 	s->SetVec3("CamPos", ctx_->viewport->camera_->position_);
@@ -1267,7 +1412,7 @@ static void DrawSkySphere(const hrl_scene_t* scene)
 	glDepthMask(GL_TRUE);
 }
 
-static void DrawOpaqueMeshes(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum)
+static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum)
 {
 	glEnable(GL_DEPTH_TEST);
 	glDepthMask(GL_TRUE);
@@ -1357,6 +1502,9 @@ static void DrawOpaqueMeshes(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes
 	{
 		if (!BindMaterial(item.material, item.id, item.mesh, item.model))
 			continue;
+
+		if ((item.material->shader_ == HRL_MESH_3D_SHADER || item.material->shader_ == HRL_SKINNED_3D_MESH_SHADER) && g_gl33_gi)
+			g_gl33_gi->ApplyToShader(scene_id, ctx_->shader);
 
 		if ((item.material->shader_ == HRL_MESH_3D_SHADER || item.material->shader_ == HRL_SKINNED_3D_MESH_SHADER) &&
 			debug_view == HRL_DEBUG_VIEW_LOD)
@@ -1499,6 +1647,9 @@ void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets)
 
 	for (const auto& [id, w] : widgets)
 	{
+		(void)id;
+		if (!w)
+			continue;
 		//call Logic before draw, maybe move this to another function to not mix function roles
 		w->Logic();
 
@@ -1551,6 +1702,166 @@ void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets)
 }
 
 
+static uint32_t PNG_CRC32(const unsigned char* data, size_t size)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < size; ++i)
+    {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)-(int32_t)(crc & 1u));
+    }
+    return ~crc;
+}
+
+static uint32_t PNG_Adler32(const std::vector<unsigned char>& data)
+{
+    uint32_t a = 1u, b = 0u;
+    for (unsigned char c : data)
+    {
+        a += c;
+        if (a >= 65521u) a -= 65521u;
+        b += a;
+        if (b >= 65521u) b -= 65521u;
+    }
+    return (b << 16) | a;
+}
+
+static void PNG_AppendU32BE(std::vector<unsigned char>& out, uint32_t value)
+{
+    out.push_back((unsigned char)((value >> 24) & 0xFFu));
+    out.push_back((unsigned char)((value >> 16) & 0xFFu));
+    out.push_back((unsigned char)((value >> 8) & 0xFFu));
+    out.push_back((unsigned char)(value & 0xFFu));
+}
+
+static void PNG_AppendChunk(std::vector<unsigned char>& png, const char type[4], const std::vector<unsigned char>& payload)
+{
+    PNG_AppendU32BE(png, (uint32_t)payload.size());
+    size_t typeOffset = png.size();
+    png.insert(png.end(), type, type + 4);
+    png.insert(png.end(), payload.begin(), payload.end());
+    uint32_t crc = PNG_CRC32(png.data() + typeOffset, 4 + payload.size());
+    PNG_AppendU32BE(png, crc);
+}
+
+static bool WritePNG_RGBA8(const char* path, int width, int height, const std::vector<unsigned char>& rgbaTopDown)
+{
+    if (!path || width <= 0 || height <= 0 || rgbaTopDown.size() != (size_t)width * (size_t)height * 4u)
+        return false;
+
+    std::vector<unsigned char> raw;
+    raw.reserve((size_t)height * ((size_t)width * 4u + 1u));
+    for (int y = 0; y < height; ++y)
+    {
+        raw.push_back(0);
+        const unsigned char* row = rgbaTopDown.data() + (size_t)y * (size_t)width * 4u;
+        raw.insert(raw.end(), row, row + (size_t)width * 4u);
+    }
+
+    std::vector<unsigned char> zlib;
+    zlib.push_back(0x78); zlib.push_back(0x01);
+    size_t offset = 0;
+    while (offset < raw.size())
+    {
+        const size_t remaining = raw.size() - offset;
+        const uint16_t blockLen = (uint16_t)std::min<size_t>(remaining, 65535u);
+        const bool finalBlock = (offset + blockLen == raw.size());
+        zlib.push_back(finalBlock ? 0x01 : 0x00);
+        zlib.push_back((unsigned char)(blockLen & 0xFFu));
+        zlib.push_back((unsigned char)((blockLen >> 8) & 0xFFu));
+        const uint16_t nlen = (uint16_t)~blockLen;
+        zlib.push_back((unsigned char)(nlen & 0xFFu));
+        zlib.push_back((unsigned char)((nlen >> 8) & 0xFFu));
+        zlib.insert(zlib.end(), raw.begin() + (ptrdiff_t)offset, raw.begin() + (ptrdiff_t)(offset + blockLen));
+        offset += blockLen;
+    }
+    PNG_AppendU32BE(zlib, PNG_Adler32(raw));
+
+    std::vector<unsigned char> png = {0x89, 'P','N','G',0x0D,0x0A,0x1A,0x0A};
+    std::vector<unsigned char> ihdr;
+    PNG_AppendU32BE(ihdr, (uint32_t)width);
+    PNG_AppendU32BE(ihdr, (uint32_t)height);
+    ihdr.push_back(8);
+    ihdr.push_back(6);
+    ihdr.push_back(0);
+    ihdr.push_back(0);
+    ihdr.push_back(0);
+    PNG_AppendChunk(png, "IHDR", ihdr);
+    PNG_AppendChunk(png, "IDAT", zlib);
+    PNG_AppendChunk(png, "IEND", {});
+
+    std::ofstream file(path, std::ios::binary);
+    if (!file) return false;
+    file.write((const char*)png.data(), (std::streamsize)png.size());
+    return (bool)file;
+}
+
+static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view,
+    const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex)
+{
+    if (!scene || !hrlScene || !bck_->scene_effect_shader || !scene->depth_texture)
+        return;
+    if (!hrlScene->volumetric_fog.enabled && !hrlScene->god_rays.enabled)
+        return;
+
+    const int src = (srcIndex == bck_->post_textures[0]) ? 0 : 1;
+    const int dst = 1 - src;
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, bck_->post_fbo[src]);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bck_->post_fbo[dst]);
+    glBlitFramebuffer(0, 0, scene->width, scene->height,
+        0, 0, scene->width, scene->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, bck_->post_fbo[dst]);
+    glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
+    bck_->scene_effect_shader->Use();
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, bck_->post_textures[src]);
+    bck_->scene_effect_shader->SetInt("uScene", 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, scene->textures[1]);
+    bck_->scene_effect_shader->SetInt("uBrightScene", 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, scene->depth_texture);
+    bck_->scene_effect_shader->SetInt("uDepth", 2);
+
+    bck_->scene_effect_shader->SetMat4("uInvViewProjection", glm::inverse(projection * view));
+    bck_->scene_effect_shader->SetVec3("uCameraPos", ctx_->viewport->camera_->position_);
+    bck_->scene_effect_shader->SetVec2("uViewportOrigin", glm::vec2((float)viewportX / (float)scene->width, (float)viewportY / (float)scene->height));
+    bck_->scene_effect_shader->SetVec2("uViewportSize", glm::vec2((float)viewportWidth / (float)scene->width, (float)viewportHeight / (float)scene->height));
+
+    const auto& fog = hrlScene->volumetric_fog;
+    bck_->scene_effect_shader->SetInt("uVolumetricFogEnabled", fog.enabled ? 1 : 0);
+    bck_->scene_effect_shader->SetVec3("uFogPosition", fog.position);
+    bck_->scene_effect_shader->SetFloat("uFogRadius", fog.radius);
+    bck_->scene_effect_shader->SetVec3("uFogColor", fog.color);
+    bck_->scene_effect_shader->SetFloat("uFogDensity", fog.density);
+    bck_->scene_effect_shader->SetInt("uFogSteps", (int)fog.steps);
+
+    const auto& rays = hrlScene->god_rays;
+    glm::vec2 lightUV(0.5f);
+    glm::vec4 lightClip = projection * view * glm::vec4(rays.position, 1.0f);
+    if (std::abs(lightClip.w) > 1e-5f)
+        lightUV = glm::vec2(lightClip.x, lightClip.y) / lightClip.w * 0.5f + 0.5f;
+    bck_->scene_effect_shader->SetInt("uGodRaysEnabled", rays.enabled ? 1 : 0);
+    bck_->scene_effect_shader->SetVec2("uGodRaysLightUV", lightUV);
+    bck_->scene_effect_shader->SetVec3("uGodRaysColor", rays.color);
+    bck_->scene_effect_shader->SetFloat("uGodRaysDensity", rays.density);
+    bck_->scene_effect_shader->SetFloat("uGodRaysDecay", rays.decay);
+    bck_->scene_effect_shader->SetFloat("uGodRaysWeight", rays.weight);
+    bck_->scene_effect_shader->SetInt("uGodRaysSamples", (int)rays.samples);
+
+    glBindVertexArray(bck_->vao[BUFFER_QUAD]);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+
+    srcIndex = bck_->post_textures[dst];
+}
+
 static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_PostProcess* pp)
 {
 	auto mat_it = GetPrivateContext()->materials.find(pp->material_);
@@ -1599,6 +1910,63 @@ static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_P
 	glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
 }
 
+
+// SCREENSHOT
+void GL33_TakeScreenshot(HRL_id scene, const char* target_path)
+{
+    if (!bck_ || !target_path || *target_path == '\0')
+        return;
+
+    auto gpuIt = bck_->gpu_scenes.find(scene);
+    if (gpuIt == bck_->gpu_scenes.end() || !gpuIt->second)
+    {
+        SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_TakeScreenshot: invalid scene ID");
+        return;
+    }
+
+    const GL_Scene* gpuScene = gpuIt->second;
+    const auto ctxIt = GetPrivateContext()->scenes.find(scene);
+    const bool sceneOnScreen = (ctxIt != GetPrivateContext()->scenes.end() && ctxIt->second && ctxIt->second->draw_on_screen != 0);
+    const int width = std::max(1, gpuScene->width);
+    const int height = std::max(1, gpuScene->height);
+    std::vector<unsigned char> pixels((size_t)width * (size_t)height * 4u);
+
+    GLint oldReadFbo = 0;
+    GLint oldDrawFbo = 0;
+    GLint oldPack = 4;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &oldReadFbo);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &oldDrawFbo);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &oldPack);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+
+    if (sceneOnScreen)
+    {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glReadBuffer(GL_BACK);
+    }
+    else
+    {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, gpuScene->fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+    }
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)oldReadFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)oldDrawFbo);
+    glPixelStorei(GL_PACK_ALIGNMENT, oldPack);
+
+    const size_t rowBytes = (size_t)width * 4u;
+    for (int y = 0; y < height / 2; ++y)
+    {
+        unsigned char* top = pixels.data() + (size_t)y * rowBytes;
+        unsigned char* bottom = pixels.data() + (size_t)(height - 1 - y) * rowBytes;
+        for (size_t x = 0; x < rowBytes; ++x)
+            std::swap(top[x], bottom[x]);
+    }
+
+    if (!WritePNG_RGBA8(target_path, width, height, pixels))
+        SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "GL33_TakeScreenshot: failed to write PNG");
+}
 
 //EFFECTS
 void GL33_FogPropertyChanged(HRL_id scene, hrl_fog_t* fog_ptr) {}
@@ -2158,6 +2526,10 @@ static void ResolveSceneMSAA(GL_Scene* scene)
 			0, 0, scene->width, scene->height,
 			GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, scene->msaa_fbo);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene->fbo);
+	glBlitFramebuffer(0, 0, scene->width, scene->height, 0, 0, scene->width, scene->height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+
 	GLenum attachments[5] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4};
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene->fbo);
 	glDrawBuffers(5, attachments);
@@ -2228,11 +2600,16 @@ void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, scene->textures[3], 0);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT4, GL_TEXTURE_2D, scene->textures[4], 0);
 
-	//Depth/stencil is deliberately kept private to the OpenGL backend. It is required for real 3D occlusion.
-	glGenRenderbuffers(1, &scene->depth_rbo);
-	glBindRenderbuffer(GL_RENDERBUFFER, scene->depth_rbo);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, scene->width, scene->height);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, scene->depth_rbo);
+	// Sampleable depth texture used by localized volumetric fog and god rays.
+	glGenTextures(1, &scene->depth_texture);
+	glBindTexture(GL_TEXTURE_2D, scene->depth_texture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, scene->width, scene->height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, scene->depth_texture, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
 
 	GLenum attachments[5] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4 };
 	glDrawBuffers(5, attachments);
@@ -2268,6 +2645,8 @@ void GL33_DeleteScene(HRL_id _sceneid)
 	//scene is not rendered at screen
 	DestroyMSAAResources(it->second);
 	glDeleteTextures(5, it->second->textures);
+	if (it->second->depth_texture)
+		glDeleteTextures(1, &it->second->depth_texture);
 	if (it->second->depth_rbo)
 		glDeleteRenderbuffers(1, &it->second->depth_rbo);
 	glDeleteFramebuffers(1, &it->second->fbo);
@@ -2302,9 +2681,9 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, _width, _height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	glBindTexture(GL_TEXTURE_2D, 0);
 
-	glBindRenderbuffer(GL_RENDERBUFFER, it->second->depth_rbo);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, _width, _height);
-	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, it->second->depth_texture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, _width, _height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+	glBindTexture(GL_TEXTURE_2D, 0);
 
 	it->second->width = _width;
 	it->second->height = _height;
@@ -2897,4 +3276,13 @@ void GL33_EnableColorPickingBuffer(HRL_id _scene, int _enable)
 	}
 
 	it->second->using_color_picking = _enable;
+}
+
+
+const GL33_Texture* GL33_FindTexture(HRL_id id)
+{
+    if (!bck_)
+        return nullptr;
+    auto it = bck_->textures.find(id);
+    return it == bck_->textures.end() ? nullptr : it->second;
 }

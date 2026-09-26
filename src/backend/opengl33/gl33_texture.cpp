@@ -10,83 +10,103 @@
 #include <stb/stb_image.h>
 
 #include <string>
+#include <cstring>
+#include <limits>
 
 int GL33_Texture::GL33_Create(const char* _imageContent, const size_t _imageSize)
 {
-  //on crée la texture OpenGL
+  if (!_imageContent || _imageSize == 0 || _imageSize > static_cast<size_t>(std::numeric_limits<int>::max()))
+  {
+    SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "GL33_Texture::GL33_Create: invalid image buffer");
+    return -1;
+  }
+
   glGenTextures(1, &glID_);
   glBindTexture(GL_TEXTURE_2D, glID_);
 
-  //configuration des parametres de la texture
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-  //filtrage trilinéaire
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-  stbi_set_flip_vertically_on_load(true);
-
-  // Convertir std::vector<char>::data() en unsigned char* et sa taille en int
+  int decodedChannels = 0;
   unsigned char* data = stbi_load_from_memory(
-    (stbi_uc const*)_imageContent,        //Pointeur vers les données
-    (int)_imageSize,            //Taille totale du tampon
+    reinterpret_cast<const stbi_uc*>(_imageContent),
+    static_cast<int>(_imageSize),
     &width_,
     &height_,
-    &nr_channels_,
-    STBI_rgb_alpha
-  );
+    &decodedChannels,
+    STBI_rgb_alpha);
+  nr_channels_ = 4;
 
-  if (data)
+  if (!data || width_ <= 0 || height_ <= 0)
   {
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-
-    //on libere la mémoire allouée par stb
+    SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "Texture failed to load");
     stbi_image_free(data);
-
-    return 0;
+    glDeleteTextures(1, &glID_);
+    glID_ = 0;
+    return -1;
   }
-  SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "Texture failed to load");
 
-  //on libere la memoire allouée par opengl, stb et la texture elle meme
-  glDeleteTextures(1, &glID_);
+  cpu_rgba_.resize(size_t(width_) * size_t(height_) * 4u);
+  const size_t rowBytes = size_t(width_) * 4u;
+  for (int y = 0; y < height_; ++y)
+  {
+    // Preserve the previous HRL/stb vertically-flipped convention without
+    // touching stb_image's process-global state.
+    const unsigned char* src = data + size_t(height_ - 1 - y) * rowBytes;
+    std::memcpy(cpu_rgba_.data() + size_t(y) * rowBytes, src, rowBytes);
+  }
 
-  //on libere la mémoire allouée par stb (normalement c'est pas nécéssaire mais on le fait quand meme)
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width_, height_, 0,
+               GL_RGBA, GL_UNSIGNED_BYTE, cpu_rgba_.data());
+  mipmaps_generated_ = false;
+
   stbi_image_free(data);
-
-  return -1;
+  glBindTexture(GL_TEXTURE_2D, 0);
+  return 0;
 }
 
 int GL33_Texture::GL33_CreateFromBitmap(BitmapResult* bmp)
 {
+  if (!bmp || bmp->width <= 0 || bmp->height <= 0 ||
+      bmp->pixels.size() != size_t(bmp->width) * size_t(bmp->height) * 4u)
+  {
+    SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "GL33_Texture::GL33_CreateFromBitmap: invalid bitmap");
+    return -1;
+  }
+
   width_  = bmp->width;
   height_ = bmp->height;
+  nr_channels_ = 4;
 
-  // Créer la texture OpenGL
   glGenTextures(1, &glID_);
   glBindTexture(GL_TEXTURE_2D, glID_);
 
-  //flip vertical du bitmap avant envoi à OpenGL
-  std::vector<unsigned char> flipped(bmp->pixels.size());
-  for (int y = 0; y < bmp->height; y++) {
-    memcpy(
-      flipped.data() + y * bmp->width * 4,
-      bmp->pixels.data() + (bmp->height - 1 - y) * bmp->width * 4,
-      bmp->width * 4
-    );
+  cpu_rgba_.resize(bmp->pixels.size());
+  const size_t rowBytes = size_t(bmp->width) * 4u;
+  for (int y = 0; y < bmp->height; ++y)
+  {
+    std::memcpy(
+      cpu_rgba_.data() + size_t(y) * rowBytes,
+      bmp->pixels.data() + size_t(bmp->height - 1 - y) * rowBytes,
+      rowBytes);
   }
 
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
       bmp->width, bmp->height,
       0, GL_RGBA, GL_UNSIGNED_BYTE,
-      flipped.data()
-  );
+      cpu_rgba_.data());
+  mipmaps_generated_ = false;
 
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
   glBindTexture(GL_TEXTURE_2D, 0);
-
   return 0;
 }
 
@@ -118,8 +138,18 @@ void GL33_Texture::SetMinFilter(HRL_uint filter)
   {
     case HRL_FILTER_NEAREST: { param = GL_NEAREST; break; }
     case HRL_FILTER_LINEAR: { param = GL_LINEAR; break; }
-    case HRL_FILTER_BILINEAR: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR_MIPMAP_NEAREST; break; }
-    case HRL_FILTER_TRILINEAR: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR_MIPMAP_LINEAR; break; }
+    case HRL_FILTER_BILINEAR:
+    {
+      if (!mipmaps_generated_) { glGenerateMipmap(GL_TEXTURE_2D); mipmaps_generated_ = true; }
+      param = GL_LINEAR_MIPMAP_NEAREST;
+      break;
+    }
+    case HRL_FILTER_TRILINEAR:
+    {
+      if (!mipmaps_generated_) { glGenerateMipmap(GL_TEXTURE_2D); mipmaps_generated_ = true; }
+      param = GL_LINEAR_MIPMAP_LINEAR;
+      break;
+    }
 
     //not avalaible with opengl 3.3
     case HRL_FILTER_ANISOTROPIC: { param = GL_LINEAR; break; }
@@ -138,8 +168,8 @@ void GL33_Texture::SetMaxFilter(HRL_uint filter)
   {
     case HRL_FILTER_NEAREST: { param = GL_NEAREST; break; }
     case HRL_FILTER_LINEAR: { param = GL_LINEAR; break; }
-    case HRL_FILTER_BILINEAR: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR; break; }
-    case HRL_FILTER_TRILINEAR: { glGenerateMipmap(GL_TEXTURE_2D); param = GL_LINEAR; break; }
+    case HRL_FILTER_BILINEAR: { param = GL_LINEAR; break; }
+    case HRL_FILTER_TRILINEAR: { param = GL_LINEAR; break; }
 
     //not avalaible with opengl 3.3
     case HRL_FILTER_ANISOTROPIC: { param = GL_LINEAR; break; }

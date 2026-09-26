@@ -193,7 +193,7 @@ typedef enum HRL_EFilterType{
  * Global illumination methods.
  *
  * Backend support in this release:
- *   - OpenGL 3.3: SSGI
+ *   - OpenGL 3.3: DDGI-style world-space irradiance probes
  *   - OpenGL 4.5: not implemented in this repository
  *   - Vulkan: not implemented in this repository
  *   - D3D11: not implemented in this repository
@@ -327,7 +327,9 @@ extern "C" {
 	HRL_API void HRL_EndFrame();
 
 	/**
-	 * @brief Notifies HRL of a window resize. Call from your window resize callback.
+	 * @brief Notifies HRL of a window/framebuffer resize. Call from your framebuffer-size callback.
+	 * The dimensions must be the drawable framebuffer size in pixels (for example,
+	 * GLFW framebuffer size), not the logical window size on HiDPI displays.
 	 * @param _width  New framebuffer width in pixels.
 	 * @param _height New framebuffer height in pixels.
 	 */
@@ -1216,6 +1218,34 @@ extern "C" {
 	 */
 	HRL_API void HRL_SetFogLinearRange(HRL_id scene, float start, float end);
 
+	/** @brief Enables/disables a localized volumetric fog sphere. */
+	HRL_API void HRL_SetVolumetricFogEnabled(HRL_id scene, int enable);
+	/** @brief Sets the center of the localized volumetric fog volume in world-space. */
+	HRL_API void HRL_SetVolumetricFogPosition(HRL_id scene, float x, float y, float z);
+	/** @brief Sets the radius of the localized volumetric fog volume. */
+	HRL_API void HRL_SetVolumetricFogRadius(HRL_id scene, float radius);
+	/** @brief Sets the density of the localized volumetric fog volume. */
+	HRL_API void HRL_SetVolumetricFogDensity(HRL_id scene, float density);
+	/** @brief Sets the color of the localized volumetric fog volume. */
+	HRL_API void HRL_SetVolumetricFogColor(HRL_id scene, float r, float g, float b);
+	/** @brief Sets the ray-march sample count for localized volumetric fog (4..64). */
+	HRL_API void HRL_SetVolumetricFogSteps(HRL_id scene, HRL_uint steps);
+
+	/** @brief Enables/disables screen-space god rays. */
+	HRL_API void HRL_SetGodRaysEnabled(HRL_id scene, int enable);
+	/** @brief Sets the world-space position from which god rays radiate. */
+	HRL_API void HRL_SetGodRaysPosition(HRL_id scene, float x, float y, float z);
+	/** @brief Sets the god-ray color. */
+	HRL_API void HRL_SetGodRaysColor(HRL_id scene, float r, float g, float b);
+	/** @brief Sets radial sampling density for god rays. */
+	HRL_API void HRL_SetGodRaysDensity(HRL_id scene, float density);
+	/** @brief Sets per-sample decay for god rays. */
+	HRL_API void HRL_SetGodRaysDecay(HRL_id scene, float decay);
+	/** @brief Sets the contribution weight for god rays. */
+	HRL_API void HRL_SetGodRaysWeight(HRL_id scene, float weight);
+	/** @brief Sets the radial sample count for god rays (8..96). */
+	HRL_API void HRL_SetGodRaysSamples(HRL_id scene, HRL_uint samples);
+
 
 	/* ============================================================================
 	 *  MATRICES
@@ -1330,7 +1360,8 @@ extern "C" {
 
 	/**
 	 * @brief Captures the rendered output of a scene and saves it as a PNG file.
-	 * The capture is performed at the end of the current frame.
+	 * The request is queued and consumed at the end of the current frame.
+	 * On OpenGL 3.3 the capture includes the final on-screen post-process result.
 	 * @param _target_path Absolute path where the PNG image will be written.
 	 */
 	HRL_API void HRL_TakeScreenshot(HRL_id _sceneid, const char* _target_path);

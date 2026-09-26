@@ -3,7 +3,6 @@
 
 #include "../hrl.h"
 
-#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -149,7 +148,9 @@ typedef struct {
 
 //POST PROCESS
 typedef struct {
-  HRL_id material_;
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id material_ = HRL_INVALID_ID;
+  int priority_ = 0;
 }HRL_PostProcess;
 
 //MATERIAL
@@ -177,6 +178,8 @@ typedef struct {
   float value_;
   float near_plane_;
   float far_plane_;
+
+  HRL_id scene_ = HRL_INVALID_ID;
 }HRL_Camera;
 
 //VIEWPORT
@@ -187,9 +190,10 @@ typedef struct {
   float y_;
   float width_;
   float height_;
+  HRL_id scene_ = HRL_INVALID_ID;
 
-  //ordered by priority
-  std::map<int, HRL_PostProcess*> post_processes;
+  //Indexed by stable post-process ID. Priority is stored inside HRL_PostProcess.
+  std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
 
   std::unordered_map<HRL_id, HRL_Widget*> widgets;
 }HRL_Viewport;
@@ -241,6 +245,28 @@ typedef struct {
   float range_end = 100.f;
 }hrl_fog_t;
 
+// Localized volumetric fog rendered in a post-process ray-march.
+typedef struct {
+  bool enabled = false;
+  glm::vec3 position = glm::vec3(0.0f);
+  float radius = 10.0f;
+  glm::vec3 color = glm::vec3(0.65f, 0.72f, 0.80f);
+  float density = 0.5f;
+  HRL_uint steps = 16;
+}hrl_volumetric_fog_t;
+
+// Screen-space radial light scattering / god rays. The position is the
+// world-space location of the light source used for the radial origin.
+typedef struct {
+  bool enabled = false;
+  glm::vec3 position = glm::vec3(0.0f, 5.0f, 0.0f);
+  glm::vec3 color = glm::vec3(1.0f);
+  float density = 0.8f;
+  float decay = 0.95f;
+  float weight = 0.2f;
+  HRL_uint samples = 48;
+}hrl_god_rays_t;
+
 
 //Widget
 typedef struct {
@@ -280,13 +306,20 @@ typedef struct {
 
   //Effects
   hrl_fog_t fog;
+  hrl_volumetric_fog_t volumetric_fog;
+  hrl_god_rays_t god_rays;
 
   // Global illumination. Opt-in only; default keeps the existing renderer untouched.
   bool global_illumination_enabled = false;
-  HRL_EGlobalIlluminationMethod global_illumination_method = HRL_GI_SSGI;
+  HRL_EGlobalIlluminationMethod global_illumination_method = HRL_GI_DDGI;
 
   // Shadow maps are static until geometry or a shadow-relevant light changes.
   bool shadows_dirty = true;
+
+  // Explicit DDGI invalidation revisions. This avoids hashing/scanning the full
+  // scene every frame just to detect static changes.
+  uint64_t gi_geometry_revision = 1;
+  uint64_t gi_lighting_revision = 1;
 }hrl_scene_t;
 
 
@@ -313,6 +346,10 @@ typedef struct {
   //global ressources
   std::unordered_map<HRL_id, HRL_Material*> materials;
   std::unordered_map<HRL_id, HRL_Font*> fonts;
+
+  // Screenshot requests are consumed after the corresponding scene finishes
+  // rendering in HRL_EndFrame().
+  std::unordered_map<HRL_id, std::string> pending_screenshots;
 
   //debug
   //sorted by scenes

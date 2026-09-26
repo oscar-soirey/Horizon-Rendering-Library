@@ -9,6 +9,7 @@ layout (location = 4) in vec3 aBitangent;
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
+uniform mat3 normalMatrix;
 uniform vec4 UVRegion;
 uniform uint uSpriteID;
 
@@ -22,12 +23,20 @@ flat out uint sprite_id;
 void main()
 {
     vec4 worldPos = model * vec4(aPosition, 1.0);
-    mat3 normalMatrix = transpose(inverse(mat3(model)));
-
     fragPos = worldPos.xyz;
-    worldNormal = normalize(normalMatrix * aNormal);
-    worldTangent = normalize(normalMatrix * aTangent);
-    worldBitangent = normalize(normalMatrix * aBitangent);
+    vec3 N = normalMatrix * aNormal;
+    N = normalize(N);
+    vec3 T = normalMatrix * aTangent;
+    if (dot(T, T) < 1e-8)
+        T = abs(N.y) < 0.999 ? cross(N, vec3(0.0, 1.0, 0.0)) : cross(N, vec3(1.0, 0.0, 0.0));
+    T = normalize(T - N * dot(N, T));
+    vec3 B = cross(N, T);
+    if (dot(B, B) < 1e-8)
+        B = abs(N.x) < 0.999 ? cross(N, vec3(1.0, 0.0, 0.0)) : cross(N, vec3(0.0, 0.0, 1.0));
+    B = normalize(B);
+    worldNormal = N;
+    worldTangent = T;
+    worldBitangent = B;
     uv = mix(UVRegion.xy, UVRegion.zw, aTexCoord);
     sprite_id = uSpriteID;
 

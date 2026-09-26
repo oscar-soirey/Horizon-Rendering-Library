@@ -212,14 +212,6 @@ int main()
 
 
   std::cout << HRL_GetGlobalIlluminationSupportedMethods() << std::endl;
-  HRL_SetGlobalIlluminationEnabled(scene, HRL_TRUE);
-  HRL_SetGlobalIlluminationMethod(scene, HRL_GI_SSGI);
-
-  printf("Albedo G-buffer: %u\n",
-    HRL_GL_GetSceneAlbedoBufferGL_ID(scene));
-
-  printf("Normal G-buffer: %u\n",
-    HRL_GL_GetSceneNormalBufferGL_ID(scene));
 
   // ---------------------------------------------------------------------------
   // Sky sphere image + environment mapping
@@ -348,7 +340,7 @@ int main()
         HRL_MaterialSetFloat(skeletalMaterial, "EnvironmentStrength", 0.25f);
         HRL_SetMeshMaterial(skeletalModel, skeletalMaterial);
         HRL_SetMeshLocation(skeletalModel, -3.f, 0.f, 0.f);
-        HRL_SetMeshScale(skeletalModel, 1.f, 1.f, 1.f);
+        HRL_SetMeshScale(skeletalModel, 2.f, 2.f, 2.f);
 
         printf("Skeletal mesh: %u bones, %u animations\n", HRL_GetSkeletalBoneCount(skeletalModel), HRL_GetSkeletalAnimationCount(skeletalModel));
         printf("Skeletal model camera distance: %.3f\n", HRL_GetMeshCameraDistance(skeletalModel));
@@ -379,7 +371,6 @@ int main()
   {
     printf("Aucun skeletal.fbx trouve : le test skeletal est desactive.\n");
   }
-
 
   HRL_SetMeshMaterial(model, modelMaterial);
   HRL_SetMeshLocation(model, 3.f, 0.f, 0.f);
@@ -432,6 +423,15 @@ int main()
   HRL_SetLightShadowResolution(light, 1024);
   HRL_SetLightShadowBias(light, 0.0015f);
 
+
+  HRL_SetVolumetricFogEnabled(scene, HRL_TRUE);
+  HRL_SetVolumetricFogPosition(scene, 0.0f, 5.0f, 10.0f);
+  HRL_SetVolumetricFogRadius(scene, 15.0f);
+  HRL_SetVolumetricFogDensity(scene, 0.5f);
+  HRL_SetVolumetricFogColor(scene, 0.65f, 0.72f, 0.80f);
+  HRL_SetVolumetricFogSteps(scene, 32);
+
+
   while (!glfwWindowShouldClose(win))
   {
     CalculateDeltaTime();
@@ -478,6 +478,7 @@ int main()
 
     if (glfwGetKey(win, GLFW_KEY_F8) == GLFW_PRESS)
     {
+      HRL_TakeScreenshot(scene, "screenshot.png");
       float proj[16];
       HRL_GetProjectionMatrix(proj);
       for (int col = 0; col < 4; col++)
@@ -497,7 +498,7 @@ int main()
 
     if (glfwGetKey(win, GLFW_KEY_F10) == GLFW_PRESS)
     {
-      HRL_SetGlobalIlluminationMethod(scene, HRL_GI_SSGI);
+      HRL_SetGlobalIlluminationMethod(scene, HRL_GI_DDGI);
       HRL_SetGlobalIlluminationEnabled(scene, HRL_TRUE);
 
       printf(

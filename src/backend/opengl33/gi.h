@@ -2,30 +2,27 @@
 #define HRL_GL33_GI_H
 
 #include "../../hrl.h"
+#include "../../core/object_types.h"
 #include "gl33_definitions.h"
+#include "gl33_shader.h"
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
-#include <unordered_map>
 #include <cstdint>
+#include <unordered_map>
+#include <vector>
 
 /**
- * OpenGL 3.3 screen-space global illumination.
+ * OpenGL 3.3 world-space diffuse global illumination.
  *
- * The GI path deliberately keeps the frame graph small and explicit:
+ * This is an irradiance-probe volume inspired by DDGI. The probes are updated
+ * on the CPU from the scene's static triangle geometry, accelerated by a BVH,
+ * and the resulting volume is consumed directly by the forward mesh shader.
  *
- *   scene color (resolved) -> sceneColorCopy
- *                         -> raw screen-space radiance gather
- *                         -> bilateral denoise (horizontal + vertical)
- *                         -> composite back into scene.fbo attachment 0
- *
- * Depth is copied from the active render target into a single-sample depth
- * texture because the scene depth is otherwise stored in a renderbuffer.
- *
- * There is no temporal accumulation in this implementation. The first goal is
- * a deterministic, visible and debuggable GI signal; temporal reprojection can
- * be added later once the base transport is validated.
+ * Keeping the final GI contribution inside the normal material shader avoids
+ * any dependency on screen-space depth, resolve targets, or post-processing
+ * framebuffers. The probe volume is uploaded through a small std140 UBO.
  */
 class GL_33_GI final {
 public:
@@ -43,91 +40,138 @@ public:
 
     void ReleaseScene(HRL_id sceneId);
 
-    bool RenderSSGI(
-        HRL_id sceneId,
-        HRL_id viewportId,
-        const GL_Scene* scene,
-        GLuint depthSourceFbo,
-        const glm::mat4& projection,
-        const glm::mat4& view,
-        float farPlane,
-        const glm::vec4& viewportRect,
-        int viewportX,
-        int viewportY,
-        int viewportWidth,
-        int viewportHeight);
+    // Updates the world-space probe volume. This is deliberately separate from
+    // the camera/view rendering path: once a static volume is converged there
+    // is no per-frame CPU ray tracing cost until geometry or lights change.
+    bool UpdateDDGI(HRL_id sceneId);
 
-private:
-    struct ViewportResources {
-        GLuint depthFbo = 0;
-        GLuint depthTexture = 0;
+    // Applies the current scene's DDGI UBO + uniforms to a built-in mesh shader.
+    // The caller must have the shader program bound (or this function may bind
+    // it when needed).
+    void ApplyToShader(HRL_id sceneId, GL33_Shader* shader);
 
-        // Immutable copy of the resolved scene color used by the GI passes.
-        GLuint sceneColorFbo = 0;
-        GLuint sceneColorTexture = 0;
-
-        GLuint rawFbo = 0;
-        GLuint rawTexture = 0;
-
-        GLuint denoiseFbo = 0;
-        GLuint denoiseTexture = 0;
-
-        GLuint denoisePingFbo = 0;
-        GLuint denoisePingTexture = 0;
-
-        int width = 0;
-        int height = 0;
-        uint64_t frameIndex = 0;
+public:
+    struct Triangle {
+        glm::vec3 p0{};
+        glm::vec3 p1{};
+        glm::vec3 p2{};
+        glm::vec3 normal{0.f, 1.f, 0.f};
+        glm::vec3 centroid{0.f};
+        glm::vec2 uv0{0.f};
+        glm::vec2 uv1{0.f};
+        glm::vec2 uv2{0.f};
+        HRL_id material = HRL_INVALID_ID;
     };
 
-    bool EnsureProgram();
-    bool EnsureSceneResources(HRL_id sceneId, HRL_id viewportId, int width, int height);
-    void DestroySceneResources(ViewportResources& resources);
-    bool CopyDepth(ViewportResources& resources, GLuint sourceFbo, int width, int height);
-    bool CopySceneColor(ViewportResources& resources, const GL_Scene* scene, int width, int height);
+    struct ProbeVolume {
+        glm::vec3 origin{0.f};
+        glm::vec3 extent{1.f};
+        glm::vec3 spacing{1.f};
+        int nx = 0;
+        int ny = 0;
+        int nz = 0;
 
-    GLuint CreateProgram(const char* vertexSource, const char* fragmentSource, const char* label);
+        // Six directional diffuse radiance lobes per probe (+/- X/Y/Z).
+        std::vector<glm::vec3> radiance[6];
+        std::vector<uint8_t> valid;
+        std::vector<uint8_t> historyValid;
+        std::vector<uint32_t> updateOrder;
+        size_t updateCursor = 0;
+
+        uint64_t geometryRevision = 0;
+        uint64_t lightingRevision = 0;
+        bool initialized = false;
+        bool dirty = true;
+        bool converged = false;
+    };
+
+private:
+    struct Hit {
+        float t = 0.f;
+        glm::vec3 position{0.f};
+        glm::vec3 normal{0.f, 1.f, 0.f};
+        glm::vec2 uv{0.f};
+        HRL_id material = HRL_INVALID_ID;
+        int triangle = -1;
+    };
+
+    struct BVHNode {
+        glm::vec3 bmin{0.f};
+        glm::vec3 bmax{0.f};
+        uint32_t left = UINT32_MAX;
+        uint32_t right = UINT32_MAX;
+        uint32_t first = 0;
+        uint32_t count = 0;
+        bool IsLeaf() const { return left == UINT32_MAX; }
+    };
+
+    struct GeometryCache {
+        std::vector<Triangle> triangles;
+        std::vector<uint32_t> indices;
+        std::vector<BVHNode> nodes;
+        glm::vec3 boundsMin{0.f};
+        glm::vec3 boundsMax{0.f};
+        uint64_t revision = 0;
+        bool valid = false;
+    };
+
+    struct SceneResources {
+        ProbeVolume probes;
+        GeometryCache geometry;
+        // Three std140 blocks, two directional radiance lobes per block.
+        // Each block stays at or below the 16 KiB minimum guaranteed by OpenGL 3.3.
+        GLuint probeUbo[3] = {0, 0, 0};
+        uint64_t frameIndex = 0;
+        uint64_t uploadSerial = 0;
+    };
+
+    static constexpr int kMaxProbeCount = 384;
+    static constexpr int kDirectionalLobes = 6;
+    // Two vec4 radiance values per probe per UBO. Three UBOs cover the six directions.
+    static constexpr int kProbeLobesPerBlock = 2;
+    static constexpr int kProbeVec4CountPerBlock = kMaxProbeCount * kProbeLobesPerBlock;
+
+    bool EnsureGeometryCache(HRL_id sceneId, GeometryCache& geometry);
+    void BuildBVH(GeometryCache& geometry);
+    uint32_t BuildBVHNode(GeometryCache& geometry, uint32_t first, uint32_t count);
+
+    bool BuildOrUpdateProbeScene(ProbeVolume& probes, const GeometryCache& geometry);
+    bool UpdateProbeBatch(HRL_id sceneId, SceneResources& resources, int budget);
+    void UploadProbeVolume(SceneResources& resources);
+
+    bool TraceNearest(
+        const GeometryCache& geometry,
+        const glm::vec3& origin,
+        const glm::vec3& direction,
+        float maxDistance,
+        Hit& hit,
+        int ignoredTriangle = -1) const;
+
+    glm::vec3 SampleCpuIrradiance(
+        const ProbeVolume& probes,
+        const glm::vec3& position,
+        const glm::vec3& normal) const;
+
+    glm::vec3 EvaluateHitRadiance(
+        HRL_id sceneId,
+        const SceneResources& resources,
+        const Hit& hit) const;
+
+    glm::vec3 SampleSky(const hrl_scene_t* scene, const glm::vec3& direction) const;
+    glm::vec3 GetMaterialTint(HRL_id materialId) const;
+    glm::vec3 SampleMaterialAlbedo(HRL_id materialId, const glm::vec2& uv, const glm::vec3& fallback) const;
+    float SampleMaterialScalar(HRL_id materialId, const char* useValueName, const char* valueName, const char* textureName, const glm::vec2& uv, float fallback) const;
+    glm::mat4 CalculateModelMatrix(const HRL_Mesh* mesh) const;
 
     GLuint fullscreenVao_ = 0;
+    std::unordered_map<HRL_id, SceneResources> scenes_;
 
-    GLuint rawProgram_ = 0;
-    GLuint denoiseProgram_ = 0;
-    GLuint compositeProgram_ = 0;
-
-    // Raw gather.
-    GLint rawLocSceneColor_ = -1;
-    GLint rawLocNormal_ = -1;
-    GLint rawLocDepth_ = -1;
-    GLint rawLocInvProjection_ = -1;
-    GLint rawLocView_ = -1;
-    GLint rawLocViewportRect_ = -1;
-    GLint rawLocViewportSize_ = -1;
-    GLint rawLocRadiusPixels_ = -1;
-    GLint rawLocGIIntensity_ = -1;
-    GLint rawLocMaxRadiance_ = -1;
-    GLint rawLocFrameIndex_ = -1;
-
-    // Bilateral denoise.
-    GLint denoiseLocInputGI_ = -1;
-    GLint denoiseLocDepth_ = -1;
-    GLint denoiseLocNormal_ = -1;
-    GLint denoiseLocInvProjection_ = -1;
-    GLint denoiseLocView_ = -1;
-    GLint denoiseLocViewportRect_ = -1;
-    GLint denoiseLocViewportSize_ = -1;
-    GLint denoiseLocDirection_ = -1;
-    GLint denoiseLocSigma_ = -1;
-    GLint denoiseLocDepthSigma_ = -1;
-    GLint denoiseLocNormalPower_ = -1;
-
-    // Composite.
-    GLint compositeLocSceneColor_ = -1;
-    GLint compositeLocGI_ = -1;
-    GLint compositeLocAlbedo_ = -1;
-    GLint compositeLocStrength_ = -1;
-    GLint compositeLocViewportRect_ = -1;
-
-    std::unordered_map<HRL_id, std::unordered_map<HRL_id, ViewportResources>> scenes_;
+    // Last shader state we pushed, to avoid repeatedly writing the same GI
+    // uniforms for every triangle/mesh using the built-in shader.
+    GLuint lastShaderProgram_ = 0;
+    HRL_id lastSceneId_ = HRL_INVALID_ID;
+    uint64_t lastUploadSerial_ = 0;
+    bool lastEnabled_ = false;
 };
 
 #endif
