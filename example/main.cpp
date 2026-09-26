@@ -246,6 +246,7 @@ int main()
     );
   }
 
+
   // ---------------------------------------------------------------------------
   // FBX -> HRL_Vertex3D -> HRL_Mesh
   // ---------------------------------------------------------------------------
@@ -424,12 +425,10 @@ int main()
   HRL_SetLightShadowBias(light, 0.0015f);
 
 
-  HRL_SetVolumetricFogEnabled(scene, HRL_TRUE);
-  HRL_SetVolumetricFogPosition(scene, 0.0f, 5.0f, 10.0f);
-  HRL_SetVolumetricFogRadius(scene, 15.0f);
-  HRL_SetVolumetricFogDensity(scene, 0.5f);
-  HRL_SetVolumetricFogColor(scene, 0.65f, 0.72f, 0.80f);
-  HRL_SetVolumetricFogSteps(scene, 32);
+  HRL_SetGlobalVolumetricFogEnabled(scene, HRL_TRUE);
+  HRL_SetGlobalVolumetricFogDensity(scene, 0.01f);
+  HRL_SetGlobalVolumetricFogColor(scene, 0.6f, 0.7f, 0.8f);
+  HRL_SetGlobalVolumetricFogSteps(scene, 32);
 
 
   while (!glfwWindowShouldClose(win))

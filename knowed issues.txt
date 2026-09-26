@@ -1,4 +1,0 @@
-Knowed issues : 
-
-Lights are shared between scenes
-Debug shapes are not working with opengl33

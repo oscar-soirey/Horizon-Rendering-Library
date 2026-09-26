@@ -35,4 +35,14 @@ BitmapResult GenerateBitmap(
 		float bg_r, float bg_g, float bg_b, float bg_a
 );
 
+// Internal UI text path: generates a single-channel signed distance field stored in RGBA.
+BitmapResult GenerateSDFBitmap(
+		const char* text, stbtt_fontinfo* font,
+		const std::vector<unsigned char>& ttf_buffer,
+		float font_size, float wrap_width
+);
+
+// Internal helper used by widgets so the public HRL text API remains unchanged.
+HRL_id HRL_InternalCreateSDFTextTexture(const char* text, HRL_id font_id, float font_size);
+
 #endif

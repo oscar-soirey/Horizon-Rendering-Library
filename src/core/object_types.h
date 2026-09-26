@@ -245,15 +245,27 @@ typedef struct {
   float range_end = 100.f;
 }hrl_fog_t;
 
-// Localized volumetric fog rendered in a post-process ray-march.
-typedef struct {
+// Localized volumetric fog is a regular scene object with its own stable HRL ID.
+struct HRL_VolumetricFog final {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id scene_ = HRL_INVALID_ID;
+
   bool enabled = false;
   glm::vec3 position = glm::vec3(0.0f);
   float radius = 10.0f;
   glm::vec3 color = glm::vec3(0.65f, 0.72f, 0.80f);
   float density = 0.5f;
   HRL_uint steps = 16;
-}hrl_volumetric_fog_t;
+};
+
+// Scene-wide volumetric fog. This is intentionally not an object because it
+// has no position/radius and affects the entire scene uniformly.
+typedef struct {
+  bool enabled = false;
+  glm::vec3 color = glm::vec3(0.65f, 0.72f, 0.80f);
+  float density = 0.05f;
+  HRL_uint steps = 16;
+}hrl_global_volumetric_fog_t;
 
 // Screen-space radial light scattering / god rays. The position is the
 // world-space location of the light source used for the radial origin.
@@ -285,6 +297,7 @@ typedef struct {
   //objects
   std::unordered_map<HRL_id, HRL_Mesh*> meshes;
   std::unordered_map<HRL_id, HRL_Light*> lights;
+  std::unordered_map<HRL_id, HRL_VolumetricFog*> volumetric_fogs;
 
   //Per-scene diagnostic rendering state.
   HRL_EDebugView debug_view = HRL_DEBUG_VIEW_NONE;
@@ -306,7 +319,7 @@ typedef struct {
 
   //Effects
   hrl_fog_t fog;
-  hrl_volumetric_fog_t volumetric_fog;
+  hrl_global_volumetric_fog_t global_volumetric_fog;
   hrl_god_rays_t god_rays;
 
   // Global illumination. Opt-in only; default keeps the existing renderer untouched.
@@ -338,6 +351,7 @@ typedef struct {
   //ressources copié des scenes (pour favoriser l'acces)
   std::unordered_map<HRL_id, HRL_Mesh*> meshes;
   std::unordered_map<HRL_id, HRL_Light*> lights;
+  std::unordered_map<HRL_id, HRL_VolumetricFog*> volumetric_fogs;
   std::unordered_map<HRL_id, HRL_Viewport*> viewports;
   std::unordered_map<HRL_id, HRL_Camera*> cameras;
   std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
@@ -357,9 +371,13 @@ typedef struct {
   float debug_line_thickness = 1.f;
 
 
-  //HUD
-  float mouseX;
-  float mouseY;
+  //HUD / widget input
+  float mouseX = 0.0f;
+  float mouseY = 0.0f;
+  bool mouseLeftDown = false;
+  bool mouseLeftPressed = false;
+  bool mouseLeftReleased = false;
+  HRL_id mouseCaptureWidget = HRL_INVALID_ID;
 }HRL_Context;
 
 

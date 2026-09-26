@@ -77,6 +77,8 @@ typedef struct HRL_Vertex3D {
 #define HRL_SKELETAL_MAX_INFLUENCES 4
 /** Maximum number of bones supported by the OpenGL 3.3 skeletal renderer. */
 #define HRL_MAX_SKELETAL_BONES 128
+/** Maximum number of localized volumetric fog objects rendered per scene. */
+#define HRL_MAX_VOLUMETRIC_FOGS 64
 
 /** Vertex format used by skeletal meshes. The first five attributes share the
  * HRL_Vertex3D layout, followed by four bone indices and four normalized weights. */
@@ -275,6 +277,19 @@ typedef enum HRL_EWidgetType{
 	HRL_WIDGET_CHECKBOX,
 	HRL_WIDGET_PROGRESSBAR
 }HRL_EWidgetType;
+
+typedef enum HRL_ESliderOrientation{
+	HRL_SLIDER_HORIZONTAL = 0,
+	HRL_SLIDER_VERTICAL
+}HRL_ESliderOrientation;
+
+/* Mouse callback constants. The callback receives window-relative pixel coordinates
+ * through HRL_MouseMovedCallback and button transitions through HRL_MouseButtonCallback. */
+#define HRL_MOUSE_BUTTON_LEFT 0
+#define HRL_MOUSE_BUTTON_RIGHT 1
+#define HRL_MOUSE_BUTTON_MIDDLE 2
+#define HRL_MOUSE_RELEASE 0
+#define HRL_MOUSE_PRESS 1
 
 
 /** Default Shaders (HRL reserve theses ID) */
@@ -1218,18 +1233,45 @@ extern "C" {
 	 */
 	HRL_API void HRL_SetFogLinearRange(HRL_id scene, float start, float end);
 
-	/** @brief Enables/disables a localized volumetric fog sphere. */
-	HRL_API void HRL_SetVolumetricFogEnabled(HRL_id scene, int enable);
+	/* VOLUMETRIC FOG */
+	/**
+	 * @brief Creates a localized volumetric fog volume attached to a scene.
+	 * @return The new volumetric fog ID, or HRL_INVALID_ID on failure.
+	 *
+	 * Localized volumetric fog is an HRL object, so a scene can contain several
+	 * independent volumes. The OpenGL 3.3 backend supports up to
+	 * HRL_MAX_VOLUMETRIC_FOGS active volumes per scene.
+	 */
+	HRL_API HRL_id HRL_CreateVolumetricFog(HRL_id scene);
+
+	/** @brief Deletes a localized volumetric fog object. */
+	HRL_API void HRL_DeleteVolumetricFog(HRL_id fog);
+
+	/** @brief Returns HRL_TRUE if the ID refers to a live volumetric fog object. */
+	HRL_API int HRL_IsValidVolumetricFog(HRL_id fog);
+
+	/** @brief Enables/disables a localized volumetric fog volume. */
+	HRL_API void HRL_SetVolumetricFogEnabled(HRL_id fog, int enable);
 	/** @brief Sets the center of the localized volumetric fog volume in world-space. */
-	HRL_API void HRL_SetVolumetricFogPosition(HRL_id scene, float x, float y, float z);
+	HRL_API void HRL_SetVolumetricFogPosition(HRL_id fog, float x, float y, float z);
 	/** @brief Sets the radius of the localized volumetric fog volume. */
-	HRL_API void HRL_SetVolumetricFogRadius(HRL_id scene, float radius);
+	HRL_API void HRL_SetVolumetricFogRadius(HRL_id fog, float radius);
 	/** @brief Sets the density of the localized volumetric fog volume. */
-	HRL_API void HRL_SetVolumetricFogDensity(HRL_id scene, float density);
+	HRL_API void HRL_SetVolumetricFogDensity(HRL_id fog, float density);
 	/** @brief Sets the color of the localized volumetric fog volume. */
-	HRL_API void HRL_SetVolumetricFogColor(HRL_id scene, float r, float g, float b);
+	HRL_API void HRL_SetVolumetricFogColor(HRL_id fog, float r, float g, float b);
 	/** @brief Sets the ray-march sample count for localized volumetric fog (4..64). */
-	HRL_API void HRL_SetVolumetricFogSteps(HRL_id scene, HRL_uint steps);
+	HRL_API void HRL_SetVolumetricFogSteps(HRL_id fog, HRL_uint steps);
+
+	/* GLOBAL VOLUMETRIC FOG */
+	/** @brief Enables/disables volumetric fog that fills the whole scene. */
+	HRL_API void HRL_SetGlobalVolumetricFogEnabled(HRL_id scene, int enable);
+	/** @brief Sets the density of the scene-wide volumetric fog. */
+	HRL_API void HRL_SetGlobalVolumetricFogDensity(HRL_id scene, float density);
+	/** @brief Sets the color of the scene-wide volumetric fog. */
+	HRL_API void HRL_SetGlobalVolumetricFogColor(HRL_id scene, float r, float g, float b);
+	/** @brief Sets the ray-march sample count for the scene-wide volumetric fog (4..64). */
+	HRL_API void HRL_SetGlobalVolumetricFogSteps(HRL_id scene, HRL_uint steps);
 
 	/** @brief Enables/disables screen-space god rays. */
 	HRL_API void HRL_SetGodRaysEnabled(HRL_id scene, int enable);
@@ -1404,81 +1446,74 @@ extern "C" {
 	 *  UI
 	 * ============================================================================ */
 
-	/* Work in progress road to 0.6 release */
-
-	/**
-	 * 
-	 * @param x Coordinates in pixels relative to the screen
-	 */
+	/** Mouse input is window-relative in pixels. Call these from the application
+	 * input callbacks before HRL_EndFrame(). */
 	HRL_API void HRL_MouseMovedCallback(float x, float y);
+	HRL_API void HRL_MouseButtonCallback(int button, int pressed);
 
+	/** Widget positions are normalized to their owning viewport. Widget sizes use the
+	 * existing normalized API as the initial size, then keep the resulting pixel size
+	 * across window resizes so aspect-ratio changes do not stretch controls. */
 	HRL_API HRL_id HRL_CreateWidget(HRL_id viewport, HRL_EWidgetType type);
-
 	HRL_API void HRL_DeleteWidget(HRL_id widget);
+	HRL_API int HRL_IsValidWidget(HRL_id widget);
 
-	/**
-	 * @param widget
-	 * @param x Normalized position in viewport [0;1]
-	 */
 	HRL_API void HRL_SetWidgetPosition(HRL_id widget, float x, float y);
-
-	/**
-	 * @param widget
-	 * @param width Normalized in [0;1]
-	 */
 	HRL_API void HRL_SetWidgetSize(HRL_id widget, float width, float height);
-
 	HRL_API void HRL_SetWidgetAlpha(HRL_id widget, float a);
-
-
+	HRL_API void HRL_SetWidgetAnchor(HRL_id widget, float ax, float ay);
+	HRL_API void HRL_SetWidgetVisible(HRL_id widget, int visible);
+	HRL_API void HRL_SetWidgetEnabled(HRL_id widget, int enabled);
+	HRL_API void HRL_SetWidgetZIndex(HRL_id widget, int z_index);
 	HRL_API int HRL_IsWidgetHovered(HRL_id widget);
 
-	/**
-	 *
-	 * @param widget
-	 * @param ax [0;1], [0.5, 0.5] is centered
-	 * @param ay
-	 */
-	HRL_API void HRL_SetWidgetAnchor(HRL_id widget, float ax, float ay);
-
-
-	/** BUTTON CONTROL FUNCTIONS **/
+	/* BUTTON */
 	HRL_API void HRL_SetButtonClickable(HRL_id widget, int clickable);
-
 	HRL_API void HRL_SetButtonText(HRL_id widget, const char* text);
+	HRL_API void HRL_SetButtonTextSize(HRL_id widget, float size);
 	HRL_API void HRL_SetButtonTextTintColor(HRL_id widget, HRL_EWidgetState state, float r, float g, float b, float a);
 	HRL_API void HRL_SetButtonTextFont(HRL_id widget, HRL_id font);
-	/**
-	 *
-	 * @param widget
-	 * @param state HRL_BUTTON_IDLE, HRL_BUTTON_HOVERED, HRL_BUTTON_PRESSED
-	 * @param texture The id of the texture to be set on background, pass 0 to set the image to white
-	 */
 	HRL_API void HRL_SetButtonBackgroundTexture(HRL_id widget, HRL_EWidgetState state, HRL_id texture);
-
 	HRL_API void HRL_SetButtonBackgroundTintColor(HRL_id widget, HRL_EWidgetState state, float r, float g, float b, float a);
-
-	/**
-	 * clicked : HRL_FALSE or HRL_TRUE = first click this frame, same for released
-	 */
 	typedef void(*HRL_CButtonPressed)(HRL_id button, int clicked, int released, void* user_data);
-	/**
-	 * Called every frame the button is pressed
-	 * @param widget
-	 * @param callback
-	 * @param user_data
-	 */
 	HRL_API void HRL_SetButtonPressedCallback(HRL_id widget, HRL_CButtonPressed callback, void* user_data);
 
-
-
-	/** TEXT SPECIFIC CONTROL **/
+	/* LABEL */
 	HRL_API void HRL_SetLabelText(HRL_id widget, const char* text);
+	HRL_API void HRL_SetLabelTextSize(HRL_id widget, float size);
 	HRL_API void HRL_SetLabelFont(HRL_id widget, HRL_id font);
-
 	HRL_API void HRL_SetLabelTintColor(HRL_id widget, float r, float g, float b, float a);
 
+	/* IMAGE */
+	HRL_API void HRL_SetImageTexture(HRL_id widget, HRL_id texture);
+	HRL_API void HRL_SetImageTintColor(HRL_id widget, float r, float g, float b, float a);
 
+	/* SLIDER */
+	typedef void(*HRL_CSliderChanged)(HRL_id slider, float value, void* user_data);
+	HRL_API void HRL_SetSliderRange(HRL_id widget, float minimum, float maximum);
+	HRL_API void HRL_SetSliderValue(HRL_id widget, float value);
+	HRL_API float HRL_GetSliderValue(HRL_id widget);
+	HRL_API void HRL_SetSliderOrientation(HRL_id widget, HRL_ESliderOrientation orientation);
+	HRL_API void HRL_SetSliderClickable(HRL_id widget, int clickable);
+	HRL_API void HRL_SetSliderBackgroundColor(HRL_id widget, float r, float g, float b, float a);
+	HRL_API void HRL_SetSliderFillColor(HRL_id widget, float r, float g, float b, float a);
+	HRL_API void HRL_SetSliderHandleColor(HRL_id widget, float r, float g, float b, float a);
+	HRL_API void HRL_SetSliderChangedCallback(HRL_id widget, HRL_CSliderChanged callback, void* user_data);
+
+	/* CHECKBOX */
+	typedef void(*HRL_CCheckboxChanged)(HRL_id checkbox, int checked, void* user_data);
+	HRL_API void HRL_SetCheckboxChecked(HRL_id widget, int checked);
+	HRL_API int HRL_IsCheckboxChecked(HRL_id widget);
+	HRL_API void HRL_SetCheckboxClickable(HRL_id widget, int clickable);
+	HRL_API void HRL_SetCheckboxBackgroundColor(HRL_id widget, float r, float g, float b, float a);
+	HRL_API void HRL_SetCheckboxCheckedColor(HRL_id widget, float r, float g, float b, float a);
+	HRL_API void HRL_SetCheckboxChangedCallback(HRL_id widget, HRL_CCheckboxChanged callback, void* user_data);
+
+	/* PROGRESS BAR */
+	HRL_API void HRL_SetProgressBarValue(HRL_id widget, float value);
+	HRL_API float HRL_GetProgressBarValue(HRL_id widget);
+	HRL_API void HRL_SetProgressBarBackgroundColor(HRL_id widget, float r, float g, float b, float a);
+	HRL_API void HRL_SetProgressBarFillColor(HRL_id widget, float r, float g, float b, float a);
 
 
 #ifdef __cplusplus

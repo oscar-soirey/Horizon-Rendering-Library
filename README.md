@@ -1,6 +1,6 @@
 # Horizon Rendering Library
 
-> **Version** `0.4` — A lightweight, explicit rendering abstraction layer.
+> **Version** `0.5` — A lightweight, explicit rendering abstraction layer.
 
 HRL is a C/C++ rendering library designed to sit on top of multiple graphics backends (OpenGL, Vulkan, D3D11/12, Metal, and more) behind a unified, stable API. It is built around a simple principle: **nothing exists until you create it, and everything you create must be explicitly destroyed.**
 

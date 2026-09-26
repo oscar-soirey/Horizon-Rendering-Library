@@ -1,3 +1,9 @@
+- Widget sizing is now resize-safe: SetWidgetSize keeps the size captured at layout time in pixels, while positions/anchors remain normalized and responsive.
+- Finalized the widget system without removing the existing widget API: Button, Label, Image, Slider, Checkbox and ProgressBar are all creatable.
+- Added viewport-normalized anchors, visibility/enabled state, alpha and deterministic z-ordering.
+- Added mouse press/release input routing with topmost-widget capture for overlapping controls.
+- Implemented button hover/pressed states and callbacks, text sizing, labels, images, interactive sliders, checkboxes and progress bars.
+- Preserved the legacy button background texture convention where texture ID 0 selects the default white texture.
 ### Window/framebuffer resize synchronization
 - HRL/OpenGL now updates the default framebuffer viewport immediately on resize.
 - All five scene color attachments are resized, including DDGI albedo/normal targets.
@@ -267,3 +273,15 @@ Le chemin skeletal existant et les corrections de shadows ne sont pas modifiés 
 - Probe updates are one-shot for static lighting/geometry and stop once the volume converges.
 - Reduced probe update budget to 8 probes x 12 rays and removed secondary CPU shadow rays from probe capture.
 - Added explicit GI shader binding and per-scene probe UBO state.
+
+## Responsive widgets example
+- Added `example/main.widgets.cpp` showing framebuffer resize handling with `HRL_WindowResizeCallback`.
+- Demonstrates responsive widget anchors for top-left, top-right, bottom-left, bottom-right and center layouts.
+- Mouse coordinates are converted from GLFW window coordinates to framebuffer coordinates for HiDPI displays.
+
+
+### UI text SDF
+- Widget labels and button captions now use signed distance field (SDF) text internally.
+- Kept the public text/widget API unchanged.
+- Added UTF-8 decoding, kerning-aware layout, and derivative-based SDF smoothing.
+- The OpenGL UI shader distinguishes SDF text from normal textured widgets.

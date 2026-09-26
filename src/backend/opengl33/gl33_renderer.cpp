@@ -47,8 +47,26 @@ static void DrawSkySphere(const hrl_scene_t* scene);
 static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum);
 static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum);
 static void CreateSpriteGeometry();
-static void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets);
+static void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport);
 static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_PostProcess* pp);
+static bool HasActiveVolumetricFog(const hrl_scene_t* scene)
+{
+    if (!scene)
+        return false;
+
+    const auto& globalFog = scene->global_volumetric_fog;
+    if (globalFog.enabled && globalFog.density > 0.0f)
+        return true;
+
+    for (const auto& [fogId, fog] : scene->volumetric_fogs)
+    {
+        (void)fogId;
+        if (fog && fog->enabled && fog->density > 0.0f && fog->radius > 0.0f)
+            return true;
+    }
+    return false;
+}
+
 static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view, const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex);
 static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id);
 static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id);
@@ -201,12 +219,20 @@ uniform mat4 uInvViewProjection;
 uniform vec3 uCameraPos;
 uniform vec2 uViewportOrigin;
 uniform vec2 uViewportSize;
-uniform int uVolumetricFogEnabled;
-uniform vec3 uFogPosition;
-uniform float uFogRadius;
-uniform vec3 uFogColor;
-uniform float uFogDensity;
-uniform int uFogSteps;
+
+#define HRL_MAX_VOLUMETRIC_FOGS 64
+uniform int uVolumetricFogCount;
+uniform vec3 uFogPositions[HRL_MAX_VOLUMETRIC_FOGS];
+uniform float uFogRadii[HRL_MAX_VOLUMETRIC_FOGS];
+uniform vec3 uFogColors[HRL_MAX_VOLUMETRIC_FOGS];
+uniform float uFogDensities[HRL_MAX_VOLUMETRIC_FOGS];
+uniform int uVolumetricFogSteps;
+
+uniform int uGlobalVolumetricFogEnabled;
+uniform vec3 uGlobalFogColor;
+uniform float uGlobalFogDensity;
+uniform int uGlobalFogSteps;
+
 uniform int uGodRaysEnabled;
 uniform vec2 uGodRaysLightUV;
 uniform vec3 uGodRaysColor;
@@ -223,33 +249,72 @@ vec3 ReconstructWorld(vec2 localUV, float depth)
     if (abs(world.w) < 1e-6) return uCameraPos;
     return world.xyz / world.w;
 }
-vec4 ApplyLocalizedFog(vec2 globalUV, vec3 worldEnd)
+
+vec4 ApplyVolumetricFog(vec2 globalUV, vec3 worldEnd)
 {
     vec4 base = texture(uScene, globalUV);
-    if (uVolumetricFogEnabled == 0 || uFogDensity <= 0.0 || uFogRadius <= 0.0) return base;
+
+    bool hasGlobalFog = uGlobalVolumetricFogEnabled != 0 && uGlobalFogDensity > 0.0;
+    bool hasLocalFog = uVolumetricFogCount > 0;
+    if (!hasGlobalFog && !hasLocalFog)
+        return base;
+
     vec3 ray = worldEnd - uCameraPos;
     float rayLength = length(ray);
-    if (rayLength <= 1e-4) return base;
+    if (rayLength <= 1e-4)
+        return base;
+
     vec3 direction = ray / rayLength;
-    int steps = clamp(uFogSteps, 4, 64);
+    int steps = clamp(max(uGlobalFogSteps, uVolumetricFogSteps), 4, 64);
     float stepLength = rayLength / float(steps);
     float transmittance = 1.0;
     vec3 scattering = vec3(0.0);
+
     for (int i = 0; i < 64; ++i)
     {
         if (i >= steps) break;
+
         float t = (float(i) + 0.5) / float(steps);
         vec3 samplePos = uCameraPos + direction * (rayLength * t);
-        float normalized = 1.0 - length(samplePos - uFogPosition) / uFogRadius;
-        if (normalized <= 0.0) continue;
-        float localDensity = normalized * normalized * uFogDensity;
-        float alpha = 1.0 - exp(-localDensity * stepLength);
-        scattering += transmittance * alpha * uFogColor;
+
+        float totalDensity = 0.0;
+        vec3 weightedColor = vec3(0.0);
+
+        if (hasGlobalFog)
+        {
+            totalDensity += uGlobalFogDensity;
+            weightedColor += uGlobalFogDensity * uGlobalFogColor;
+        }
+
+        for (int fogIndex = 0; fogIndex < HRL_MAX_VOLUMETRIC_FOGS; ++fogIndex)
+        {
+            if (fogIndex >= uVolumetricFogCount) break;
+
+            float radius = uFogRadii[fogIndex];
+            float density = uFogDensities[fogIndex];
+            if (radius <= 0.0 || density <= 0.0) continue;
+
+            float normalized = 1.0 - length(samplePos - uFogPositions[fogIndex]) / radius;
+            if (normalized <= 0.0) continue;
+
+            float localDensity = normalized * normalized * density;
+            totalDensity += localDensity;
+            weightedColor += localDensity * uFogColors[fogIndex];
+        }
+
+        if (totalDensity <= 0.0)
+            continue;
+
+        float alpha = 1.0 - exp(-totalDensity * stepLength);
+        vec3 fogColor = weightedColor / totalDensity;
+        scattering += transmittance * alpha * fogColor;
         transmittance *= 1.0 - alpha;
         if (transmittance < 0.01) break;
     }
+
     return vec4(base.rgb * transmittance + scattering, base.a);
 }
+
 vec4 ApplyGodRays(vec2 globalUV, vec4 color)
 {
     if (uGodRaysEnabled == 0 || uGodRaysWeight <= 0.0 || uGodRaysDensity <= 0.0) return color;
@@ -275,12 +340,13 @@ vec4 ApplyGodRays(vec2 globalUV, vec4 color)
     color.rgb += rays * uGodRaysColor * uGodRaysWeight;
     return color;
 }
+
 void main()
 {
     vec2 globalUV = GlobalUV(uv);
     vec4 color = texture(uScene, globalUV);
     float depth = texture(uDepth, globalUV).r;
-    color = ApplyLocalizedFog(globalUV, ReconstructWorld(uv, depth));
+    color = ApplyVolumetricFog(globalUV, ReconstructWorld(uv, depth));
     color = ApplyGodRays(globalUV, color);
     frag_color = color;
 }
@@ -823,12 +889,40 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 	}
 
 	//UI SHADER
+	// The fragment shader is kept local here as well as in shaders/opengl/ui.frag.glsl
+	// so an out-of-date generated resource bundle cannot silently disable SDF text.
+	static const char* kUISDFFragmentShader = R"GLSL(#version 330 core
+
+in vec2 uv;
+
+uniform vec4 uTintColor;
+uniform sampler2D uTexture;
+uniform bool uSDFText;
+
+out vec4 FragColor;
+
+void main()
+{
+    vec4 texel = texture(uTexture, uv);
+    if (uSDFText)
+    {
+        float distance = texel.r;
+        float smoothing = max(fwidth(distance), 0.001);
+        float alpha = smoothstep(0.5 - smoothing, 0.5 + smoothing, distance);
+        FragColor = vec4(uTintColor.rgb, uTintColor.a * alpha);
+    }
+    else
+    {
+        FragColor = texel * uTintColor;
+    }
+}
+)GLSL";
 	bck_->ui_shader = new GL33_Shader();
 	bck_->ui_shader->GL33_Create(
 		(const char*)res_ui_vert_glsl,
 		res_ui_vert_glsl_len,
-		(const char*)res_ui_frag_glsl,
-		res_ui_frag_glsl_len
+		kUISDFFragmentShader,
+		std::strlen(kUISDFFragmentShader)
 	);
 
 
@@ -1117,7 +1211,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		ResolveSceneMSAA(gpu_scene);
 
 		bool has_post_process = !v.second->post_processes.empty();
-		bool has_scene_effects = scene->volumetric_fog.enabled || scene->god_rays.enabled;
+		bool has_scene_effects = HasActiveVolumetricFog(scene) || scene->god_rays.enabled;
 
 		if (has_post_process || has_scene_effects)
 		{
@@ -1183,7 +1277,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			glBlitFramebuffer(0, 0, (int)winW, (int)winH, 0, 0, (int)winW, (int)winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		}
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		DrawWidgets(v.second->widgets);
+		DrawWidgets(v.second->widgets, v.second);
 	}
 }
 
@@ -1635,70 +1729,124 @@ static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, con
 	glDisable(GL_BLEND);
 }
 
-void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets)
+void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport)
 {
+	if (!viewport || widgets.empty())
+		return;
+
 	bck_->ui_shader->Use();
-	float aspect = (float)GetWindowWidth() / (float)GetWindowHeight();
-	glm::mat4 ui_proj = glm::ortho(0.f, aspect, 1.f, 0.f, -1.f, 1.f);
+	const float winW = static_cast<float>(GetWindowWidth());
+	const float winH = static_cast<float>(GetWindowHeight());
+	const int viewportX = static_cast<int>(viewport->x_ * winW);
+	const int viewportY = static_cast<int>(viewport->y_ * winH);
+	const int viewportW = std::max(1, static_cast<int>(viewport->width_ * winW));
+	const int viewportH = std::max(1, static_cast<int>(viewport->height_ * winH));
+
+	// Widget positions/sizes are normalized to the owning viewport.
+	const glm::mat4 ui_proj = glm::ortho(0.f, 1.f, 1.f, 0.f, -1.f, 1.f);
+	glViewport(viewportX, viewportY, viewportW, viewportH);
 
 	glDisable(GL_DEPTH_TEST);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-	for (const auto& [id, w] : widgets)
+	std::vector<HRL_Widget*> sortedWidgets;
+	sortedWidgets.reserve(widgets.size());
+	for (const auto& [id, widget] : widgets)
 	{
 		(void)id;
-		if (!w)
-			continue;
-		//call Logic before draw, maybe move this to another function to not mix function roles
+		if (widget)
+			sortedWidgets.push_back(widget);
+	}
+	std::sort(sortedWidgets.begin(), sortedWidgets.end(), [](const HRL_Widget* a, const HRL_Widget* b) {
+		if (a->GetZIndex() != b->GetZIndex())
+			return a->GetZIndex() < b->GetZIndex();
+		return a->GetId() < b->GetId();
+	});
+
+	HRL_Context* privateContext = GetPrivateContext();
+	const float mouseX = privateContext->mouseX;
+	const float mouseY = privateContext->mouseY;
+	const float vpX = static_cast<float>(viewportX);
+	const float vpY = static_cast<float>(viewportY);
+	const float vpW = static_cast<float>(viewportW);
+	const float vpH = static_cast<float>(viewportH);
+
+	// First update hover state for every widget without dispatching the mouse button.
+	for (HRL_Widget* w : sortedWidgets)
+	{
+		w->UpdateInput(mouseX, mouseY, false, false, false, vpX, vpY, vpW, vpH);
+	}
+
+	// A press is captured by the highest-z interactive widget under the cursor.
+	if (privateContext->mouseLeftPressed && privateContext->mouseCaptureWidget == HRL_INVALID_ID)
+	{
+		for (auto it = sortedWidgets.rbegin(); it != sortedWidgets.rend(); ++it)
+		{
+			HRL_Widget* w = *it;
+			if (w->IsPointerInteractive() && w->IsVisible() && w->IsEnabled() && w->IsHovered())
+			{
+				privateContext->mouseCaptureWidget = w->GetId();
+				break;
+			}
+		}
+	}
+
+	for (HRL_Widget* w : sortedWidgets)
+	{
+		const bool isCapture = (w->GetId() == privateContext->mouseCaptureWidget);
+		w->UpdateInput(
+			mouseX, mouseY,
+			isCapture ? privateContext->mouseLeftDown : false,
+			isCapture ? privateContext->mouseLeftPressed : false,
+			isCapture ? privateContext->mouseLeftReleased : false,
+			vpX, vpY, vpW, vpH);
 		w->Logic();
 
-		//p = position, s = scale. x and y for axles
 		std::vector<HRL_Widget::WidgetDrawInfos> geometries;
 		w->GetDrawInfos(geometries);
-
 		for (const auto& g : geometries)
 		{
+			if (g.sx <= 0.0f || g.sy <= 0.0f || g.a <= 0.0f)
+				continue;
+
 			auto texture_it = bck_->textures.find(g.texture);
 			if (texture_it == bck_->textures.end())
 			{
-				//SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "GL33: DrawWidgets, tried to draw a widget geometry with invlid texture ID");
-				//continue;
-
-				auto it_fallback = bck_->textures.find(bck_->fallback_textures[ALBEDO_INT]);
-				if (it_fallback == bck_->textures.end())
-				{
+				auto fallback_it = bck_->textures.find(bck_->fallback_textures[ALBEDO_INT]);
+				if (fallback_it == bck_->textures.end())
 					continue;
-				}
-				glActiveTexture(GL_TEXTURE0);
-				glBindTexture(GL_TEXTURE_2D, it_fallback->second->GetGL_ID());
-				bck_->ui_shader->SetInt("uTexture", 0);
-			}
-			else
-			{
-				glActiveTexture(GL_TEXTURE0);
-				glBindTexture(GL_TEXTURE_2D, texture_it->second->GetGL_ID());
-				bck_->ui_shader->SetInt("uTexture", 0);
+				texture_it = fallback_it;
 			}
 
-			float vertices[16] = {
-				// x            y             u     v
-				g.px,          g.py,          0.0f, 1.0f,  // 0 bottom-left
-				g.px + g.sx,   g.py,          1.0f, 1.0f,  // 1 bottom-right
-				g.px + g.sx,   g.py + g.sy,   1.0f, 0.0f,  // 2 top-right
-				g.px,          g.py + g.sy,   0.0f, 0.0f,  // 3 top-left
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, texture_it->second->GetGL_ID());
+			bck_->ui_shader->SetInt("uTexture", 0);
+
+			const float vertices[16] = {
+				g.px,        g.py,        0.0f, 1.0f,
+				g.px+g.sx,   g.py,        1.0f, 1.0f,
+				g.px+g.sx,   g.py+g.sy,   1.0f, 0.0f,
+				g.px,        g.py+g.sy,   0.0f, 0.0f,
 			};
 
 			bck_->ui_shader->SetMat4("projection", ui_proj);
-
-			bck_->ui_shader->SetVec4("uTintColor", {g.r, g.g, g.b,g.a});
+			bck_->ui_shader->SetVec4("uTintColor", {g.r, g.g, g.b, g.a});
+			bck_->ui_shader->SetInt("uSDFText", g.sdf ? 1 : 0);
 
 			glBindVertexArray(bck_->vao[BUFFER_UI]);
 			glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_UI]);
-			glBufferSubData(GL_ARRAY_BUFFER, 0, 16*sizeof(float), vertices);
+			glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
 			glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
 		}
 	}
+
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
+	glViewport(0, 0, static_cast<GLsizei>(winW), static_cast<GLsizei>(winH));
+
+	if (privateContext->mouseLeftReleased)
+		privateContext->mouseCaptureWidget = HRL_INVALID_ID;
 }
 
 
@@ -1802,7 +1950,8 @@ static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, cons
 {
     if (!scene || !hrlScene || !bck_->scene_effect_shader || !scene->depth_texture)
         return;
-    if (!hrlScene->volumetric_fog.enabled && !hrlScene->god_rays.enabled)
+    const bool hasVolumetricFog = HasActiveVolumetricFog(hrlScene);
+    if (!hasVolumetricFog && !hrlScene->god_rays.enabled)
         return;
 
     const int src = (srcIndex == bck_->post_textures[0]) ? 0 : 1;
@@ -1833,13 +1982,31 @@ static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, cons
     bck_->scene_effect_shader->SetVec2("uViewportOrigin", glm::vec2((float)viewportX / (float)scene->width, (float)viewportY / (float)scene->height));
     bck_->scene_effect_shader->SetVec2("uViewportSize", glm::vec2((float)viewportWidth / (float)scene->width, (float)viewportHeight / (float)scene->height));
 
-    const auto& fog = hrlScene->volumetric_fog;
-    bck_->scene_effect_shader->SetInt("uVolumetricFogEnabled", fog.enabled ? 1 : 0);
-    bck_->scene_effect_shader->SetVec3("uFogPosition", fog.position);
-    bck_->scene_effect_shader->SetFloat("uFogRadius", fog.radius);
-    bck_->scene_effect_shader->SetVec3("uFogColor", fog.color);
-    bck_->scene_effect_shader->SetFloat("uFogDensity", fog.density);
-    bck_->scene_effect_shader->SetInt("uFogSteps", (int)fog.steps);
+    const auto& globalFog = hrlScene->global_volumetric_fog;
+    bck_->scene_effect_shader->SetInt("uGlobalVolumetricFogEnabled", globalFog.enabled ? 1 : 0);
+    bck_->scene_effect_shader->SetVec3("uGlobalFogColor", globalFog.color);
+    bck_->scene_effect_shader->SetFloat("uGlobalFogDensity", globalFog.density);
+    bck_->scene_effect_shader->SetInt("uGlobalFogSteps", (int)globalFog.steps);
+
+    int fogCount = 0;
+    HRL_uint volumetricFogSteps = 4;
+    for (const auto& [fogId, fog] : hrlScene->volumetric_fogs)
+    {
+        (void)fogId;
+        if (!fog || !fog->enabled || fog->density <= 0.0f || fog->radius <= 0.0f)
+            continue;
+        if (fogCount >= HRL_MAX_VOLUMETRIC_FOGS)
+            break;
+
+        bck_->scene_effect_shader->SetVec3("uFogPositions[" + std::to_string(fogCount) + "]", fog->position);
+        bck_->scene_effect_shader->SetFloat("uFogRadii[" + std::to_string(fogCount) + "]", fog->radius);
+        bck_->scene_effect_shader->SetVec3("uFogColors[" + std::to_string(fogCount) + "]", fog->color);
+        bck_->scene_effect_shader->SetFloat("uFogDensities[" + std::to_string(fogCount) + "]", fog->density);
+        volumetricFogSteps = std::max(volumetricFogSteps, fog->steps);
+        ++fogCount;
+    }
+    bck_->scene_effect_shader->SetInt("uVolumetricFogCount", fogCount);
+    bck_->scene_effect_shader->SetInt("uVolumetricFogSteps", (int)volumetricFogSteps);
 
     const auto& rays = hrlScene->god_rays;
     glm::vec2 lightUV(0.5f);
