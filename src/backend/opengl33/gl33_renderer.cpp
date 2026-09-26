@@ -289,10 +289,21 @@ uniform vec2 uScreenSize;
 uniform float uStrength;
 uniform float uScale;
 uniform float uOpacity;
+uniform int ss_displacement_enabled;
 
 void main()
 {
     vec2 screenSize = max(uScreenSize, vec2(1.0));
+    if (ss_displacement_enabled == 0)
+    {
+        vec4 baseScene = texture(uScene, gl_FragCoord.xy / screenSize);
+        FragColor = baseScene;
+        BrightColor = vec4(0.0);
+        GIAlbedoBuffer = vec4(0.0);
+        GINormalBuffer = vec4(0.0);
+        ColorPickingBuffer = vec4(0.0);
+        return;
+    }
     vec2 baseUV = gl_FragCoord.xy / screenSize;
     vec2 mapUV = uv * max(abs(uScale), 0.0001);
     vec2 displacement = texture(uDisplacementMap, mapUV).rg * 2.0 - 1.0;
@@ -1336,7 +1347,10 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		glDepthMask(GL_TRUE);
 		glDepthFunc(GL_LESS);
 		glDisable(GL_BLEND);
-		DrawOpaqueMeshes(scene_id, scene->meshes, scene->debug_view, cameraFrustum, true);
+		// Render the full opaque scene normally first. Screen-space displacement
+		// is a second pass that re-samples this already-rendered image, so the
+		// displaced mesh must be present in the source image.
+		DrawOpaqueMeshes(scene_id, scene->meshes, scene->debug_view, cameraFrustum, false);
 		DrawSprites(scene->meshes, cameraFrustum);
 		DrawVFX(scene);
 
@@ -1356,10 +1370,23 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			}
 		}
 
+		bool displacementRendered = false;
 		if (hasScreenSpaceDisplacement && scene->debug_view == HRL_DEBUG_VIEW_NONE &&
 			CaptureSceneColorForDisplacement(gpu_scene, bck_->post_textures[0]))
 		{
+			// ResolveSceneMSAA() leaves the regular scene FBO bound. Re-bind the
+			// active render target here so the displacement pass works both with
+			// and without MSAA. It samples from post_textures[0], never from the
+			// framebuffer it is currently writing to, so there is no feedback loop.
+			glBindFramebuffer(GL_FRAMEBUFFER, render_fbo);
+			glViewport(
+				(GLsizei)(v.second->x_ * winW),
+				(GLsizei)(v.second->y_ * winH),
+				(GLsizei)(v.second->width_ * winW),
+				(GLsizei)(v.second->height_ * winH)
+			);
 			DrawScreenSpaceDisplacementMeshes(scene_id, scene, cameraFrustum);
+			displacementRendered = true;
 		}
 
 		// Debug primitives stay crisp and are rendered over the distortion.
@@ -1367,8 +1394,12 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		if (debugIt != GetPrivateContext()->debug_renderers.end())
 			GL33_DrawDebug(debugIt->second, GetPrivateContext()->debug_line_thickness);
 
-		// Include the displacement pass in the final MSAA resolve.
-		ResolveSceneMSAA(gpu_scene);
+		// If displacement was rendered into the MSAA target, resolve it now so the
+		// post-process/fog stages see the final displaced scene. With no displacement
+		// pass, the first resolve is already the final scene resolve; doing another
+		// one here would overwrite debug primitives rendered after that resolve.
+		if (displacementRendered)
+			ResolveSceneMSAA(gpu_scene);
 
 		bool has_post_process = !v.second->post_processes.empty();
 		bool has_scene_effects = HasActiveVolumetricFog(scene) || scene->god_rays.enabled;
@@ -1574,6 +1605,12 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* me
 
 	if (materialChanged)
 	{
+		// SS displacement is an explicit opt-in material feature. Reset the
+		// built-in shader uniform for every material so a previous material's
+		// enabled state can never leak into a material that did not set it.
+		if (mat->shader_ == HRL_MESH_3D_SHADER || mat->shader_ == HRL_SKINNED_3D_MESH_SHADER)
+			s->SetInt("ss_displacement_enabled", 0);
+
 		for (const auto& [name, value] : mat->intParams_) s->SetInt(name, value);
 		for (int i = 0; i < 6; ++i)
 		{
@@ -1672,6 +1709,12 @@ static bool MaterialUsesScreenSpaceDisplacement(const HRL_Material* material)
     if (!material || !bck_) return false;
     if (material->shader_ != HRL_MESH_3D_SHADER && material->shader_ != HRL_SKINNED_3D_MESH_SHADER)
         return false;
+    // The feature is opt-in. Merely assigning a displacement texture must not
+    // change the rendering path; the material must explicitly enable it.
+    auto enabledParam = material->intParams_.find(HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED);
+    if (enabledParam == material->intParams_.end() || enabledParam->second == 0)
+        return false;
+
     auto texParam = material->textureParams_.find(HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING);
     if (texParam == material->textureParams_.end() || texParam->second == HRL_INVALID_ID)
         return false;
@@ -1802,6 +1845,10 @@ static void DrawScreenSpaceDisplacementMeshes(HRL_id scene_id, const hrl_scene_t
         shader->SetFloat("uStrength", strength);
         shader->SetFloat("uScale", scale);
         shader->SetFloat("uOpacity", opacity);
+        int displacementEnabled = 0;
+        if (auto it = item.material->intParams_.find(HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED); it != item.material->intParams_.end())
+            displacementEnabled = it->second != 0 ? 1 : 0;
+        shader->SetInt("ss_displacement_enabled", displacementEnabled);
 
         auto texParam = item.material->textureParams_.find(HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING);
         if (texParam == item.material->textureParams_.end())
@@ -3551,7 +3598,10 @@ static void ResolveSceneMSAA(GL_Scene* scene)
 	GLenum attachments[5] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4};
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene->fbo);
 	glDrawBuffers(5, attachments);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	// Keep the resolved scene FBO bound. Subsequent scene passes (including
+	// screen-space displacement) must continue rendering into the HRL scene
+	// target instead of accidentally falling back to the default window FBO.
+	glBindFramebuffer(GL_FRAMEBUFFER, scene->fbo);
 }
 
 
@@ -3936,6 +3986,22 @@ HRL_id GL33_CreateShader(const char *_vertContent, size_t _vertSize, const char 
 	}
 	return HRL_INVALID_ID;
 }
+HRL_id GL33_CreateShaderWithId(HRL_id id, const char *_vertContent, size_t _vertSize, const char *_fragContent, size_t _fragSize)
+{
+    if (id == HRL_INVALID_ID || bck_->shaders.find(id) != bck_->shaders.end())
+    {
+        SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_CreateShaderWithId: ID already exists or is invalid");
+        return HRL_INVALID_ID;
+    }
+    auto* s = new GL33_Shader();
+    if (s->GL33_Create(_vertContent, _vertSize, _fragContent, _fragSize) != 0)
+    {
+        delete s;
+        return HRL_INVALID_ID;
+    }
+    bck_->shaders.emplace(id, s);
+    return id;
+}
 void GL33_DeleteShader(HRL_id _id)
 {
 	auto it = bck_->shaders.find(_id);
@@ -3982,6 +4048,22 @@ HRL_id GL33_CreateTextureFromBitmap(BitmapResult bmp)
     return id;
   }
   return HRL_INVALID_ID;
+}
+HRL_id GL33_CreateTextureFromBitmapWithId(HRL_id id, BitmapResult bmp)
+{
+    if (id == HRL_INVALID_ID || bck_->textures.find(id) != bck_->textures.end())
+    {
+        SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "GL33_CreateTextureFromBitmapWithId: ID already exists or is invalid");
+        return HRL_INVALID_ID;
+    }
+    auto* t = new GL33_Texture();
+    if (t->GL33_CreateFromBitmap(&bmp) != 0)
+    {
+        delete t;
+        return HRL_INVALID_ID;
+    }
+    bck_->textures.emplace(id, t);
+    return id;
 }
 void GL33_DeleteTexture(HRL_id _id)
 {

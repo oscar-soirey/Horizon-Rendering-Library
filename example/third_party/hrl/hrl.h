@@ -867,6 +867,16 @@ extern "C" {
 	 */
 	HRL_API HRL_id HRL_CreateTexture(const char* _data, size_t _bufferSize);
 
+	/** Starts an asynchronous texture load/decoding job. GPU upload is completed automatically on the HRL context thread. */
+	HRL_API HRL_id HRL_CreateTextureAsync(const char* _data, size_t _bufferSize);
+
+
+	/** Returns HRL_TRUE when an asynchronous texture is fully uploaded and usable. */
+	HRL_API int HRL_IsTextureReady(HRL_id _textureid);
+
+	/** Blocks until an asynchronous texture is fully uploaded. */
+	HRL_API void HRL_WaitForTexture(HRL_id _textureid);
+
 	/**
 	 * @brief Destroys a texture and frees its GPU memory.
 	 * @param _textureid ID of the texture to delete.
@@ -1076,6 +1086,19 @@ extern "C" {
 	 */
 	HRL_API HRL_id HRL_CreateShader(const char* _vertData, size_t _vertSize, const char* _fragData, size_t _fragSize);
 
+	/** Starts asynchronous shader source loading. Compilation/linking is performed automatically on the HRL context thread. */
+	HRL_API HRL_id HRL_CreateShaderAsync(const char* _vertData, size_t _vertSize, const char* _fragData, size_t _fragSize);
+
+
+	/** Returns HRL_TRUE when an asynchronous shader is compiled and linked. */
+	HRL_API int HRL_IsShaderReady(HRL_id _shaderid);
+
+	/** Blocks until an asynchronous shader is compiled and linked. */
+	HRL_API void HRL_WaitForShader(HRL_id _shaderid);
+
+	/** Waits for all queued asynchronous resources and uploads their completed GPU objects. */
+	HRL_API void HRL_WaitForAllAsyncResources();
+
 	/**
 	 * @brief Destroys a shader program and frees its GPU resources.
 	 * @param _shaderid ID of the shader to delete.
@@ -1128,6 +1151,11 @@ extern "C" {
 	/** Predefined texture semantic for built-in materials. */
 #ifndef HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING
 #define HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING "SS_DISPLACEMENT_MAPPING"
+#endif
+
+#ifndef HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED
+/** Opt-in switch for screen-space displacement. Defaults to disabled. */
+#define HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED "ss_displacement_enabled"
 #endif
 
 #ifndef HRL_MATERIAL_PARAM_SS_DISPLACEMENT_STRENGTH

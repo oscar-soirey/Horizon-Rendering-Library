@@ -45,6 +45,7 @@ void GL33_UpdateLights(const std::vector<HRL_Light*>& lights);
 //Texture//
 HRL_id GL33_CreateTexture(const char* _imageContent, size_t _imageSize);
 HRL_id GL33_CreateTextureFromBitmap(BitmapResult bitmapResult);
+HRL_id GL33_CreateTextureFromBitmapWithId(HRL_id id, BitmapResult bitmapResult);
 void GL33_DeleteTexture(HRL_id _id);
 void GL33_GetTextureSize(HRL_id id, int* width, int* height);
 void GL33_SetTextureMinFilter(HRL_id id, HRL_EFilterType _filter);
@@ -58,6 +59,7 @@ void GL33_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height);
 
 //Shader//
 HRL_id GL33_CreateShader(const char* _vertContent, size_t _vertSize, const char* _fragContent, size_t _fragSize);
+HRL_id GL33_CreateShaderWithId(HRL_id id, const char* _vertContent, size_t _vertSize, const char* _fragContent, size_t _fragSize);
 void GL33_DeleteShader(HRL_id _id);
 
 //Post Process//

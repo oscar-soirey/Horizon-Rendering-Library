@@ -26,6 +26,10 @@
 #include <tuple>
 #include <cstring>
 #include <chrono>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
 
 // Internal FBX decoding dependency. Add ufbx to the build; HRL only consumes
 // its public header here and converts the decoded data to HRL_Vertex3D.
@@ -40,10 +44,159 @@
 //pour le texte
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <stb/stb_truetype.h>
+#include <stb/stb_image.h>
 
 
 static HRL_Context ctx_;
-namespace { static void ProcessGizmoInput(); }
+
+namespace
+{
+struct AsyncResourceResult
+{
+    enum class Type { Texture, Shader };
+    Type type = Type::Texture;
+    HRL_id id = HRL_INVALID_ID;
+    BitmapResult bitmap{};
+    std::string vert;
+    std::string frag;
+    std::string error;
+    bool success = false;
+};
+
+struct AsyncResourceTask
+{
+    AsyncResourceResult::Type type = AsyncResourceResult::Type::Texture;
+    HRL_id id = HRL_INVALID_ID;
+    std::vector<unsigned char> bytes;
+    std::string vert;
+    std::string frag;
+};
+
+class AsyncResourceLoader
+{
+public:
+    void Start()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!workers_.empty()) return;
+        stop_ = false;
+        unsigned int hw = std::thread::hardware_concurrency();
+        unsigned int count = hw > 1 ? hw - 1 : 1;
+        count = std::max(1u, std::min(count, 4u));
+        workers_.reserve(count);
+        for (unsigned int i = 0; i < count; ++i)
+            workers_.emplace_back([this]{ WorkerLoop(); });
+    }
+
+    void Stop()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        condition_.notify_all();
+        for (auto& worker : workers_)
+            if (worker.joinable()) worker.join();
+        workers_.clear();
+    }
+
+    void Enqueue(AsyncResourceTask task)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            queue_.push(std::move(task));
+        }
+        condition_.notify_one();
+    }
+
+    bool TryPopResult(AsyncResourceResult& out)
+    {
+        std::lock_guard<std::mutex> lock(result_mutex_);
+        if (results_.empty()) return false;
+        out = std::move(results_.front());
+        results_.pop();
+        return true;
+    }
+
+    bool HasPendingWork() const
+    {
+        bool pending = false;
+        { std::lock_guard<std::mutex> lock(mutex_); pending = !queue_.empty() || active_workers_ != 0; }
+        if (pending) return true;
+        { std::lock_guard<std::mutex> lock(result_mutex_); return !results_.empty(); }
+    }
+
+private:
+    static bool DecodeTexture(const std::vector<unsigned char>& bytes, BitmapResult& bmp, std::string& error)
+    {
+        if (bytes.empty() || bytes.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+        { error = "Async texture load: invalid image buffer"; return false; }
+        int w = 0, h = 0, channels = 0;
+        stbi_uc* data = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &channels, STBI_rgb_alpha);
+        if (!data || w <= 0 || h <= 0)
+        { error = "Async texture load: image decode failed"; stbi_image_free(data); return false; }
+        bmp.width = w;
+        bmp.height = h;
+        bmp.pixels.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
+        std::memcpy(bmp.pixels.data(), data, bmp.pixels.size());
+        stbi_image_free(data);
+        return true;
+    }
+
+    void WorkerLoop()
+    {
+        for (;;)
+        {
+            AsyncResourceTask task;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait(lock, [this]{ return stop_ || !queue_.empty(); });
+                if (stop_ && queue_.empty()) return;
+                task = std::move(queue_.front());
+                queue_.pop();
+                ++active_workers_;
+            }
+
+            AsyncResourceResult result;
+            result.type = task.type;
+            result.id = task.id;
+            if (task.type == AsyncResourceResult::Type::Texture)
+            {
+                result.success = DecodeTexture(task.bytes, result.bitmap, result.error);
+            }
+            else
+            {
+                result.vert = std::move(task.vert);
+                result.frag = std::move(task.frag);
+                result.success = !result.vert.empty() && !result.frag.empty();
+                if (!result.success) result.error = "Async shader load: empty vertex or fragment source";
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(result_mutex_);
+                results_.push(std::move(result));
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                --active_workers_;
+            }
+        }
+    }
+
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    std::queue<AsyncResourceTask> queue_;
+    std::vector<std::thread> workers_;
+    unsigned int active_workers_ = 0;
+    bool stop_ = false;
+    mutable std::mutex result_mutex_;
+    std::queue<AsyncResourceResult> results_;
+};
+
+AsyncResourceLoader g_AsyncResourceLoader;
+enum class AsyncResourceState : int { Pending = 0, Ready = 1, Failed = 2, Cancelled = 3 };
+static void ProcessGizmoInput();
+}
 
 //vtable utilisée pour appeller les fonctions, ne doit jamais etre modifiée apres Init()
 static HRL_vtable g_Backend;
@@ -517,6 +670,7 @@ static void SimulateVFXSystem(HRL_VFXSystem* system, float dt)
 
 void HRL_Init(HRL_E_APIs _api)
 {
+	g_AsyncResourceLoader.Start();
 	if (_api != HRL_OPENGL_33)
 	{
 		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
@@ -577,6 +731,8 @@ void HRL_InitContext(HRL_uint _width, HRL_uint _height, void* _loader)
 
 void HRL_Shutdown()
 {
+	HRL_WaitForAllAsyncResources();
+	g_AsyncResourceLoader.Stop();
 	// Destroy flat resources that are referenced by scene viewports first.
 	{
 		std::vector<HRL_id> ids;
@@ -673,12 +829,43 @@ void HRL_Shutdown()
 		delete font;
 	}
 	ctx_.fonts.clear();
+	ctx_.async_resource_states.clear();
 
 	g_Backend.RHI_Shutdown();
 }
 
+void ProcessAsyncResourceUploads()
+{
+  AsyncResourceResult result;
+  while (g_AsyncResourceLoader.TryPopResult(result))
+  {
+    auto it = ctx_.async_resource_states.find(result.id);
+    if (it == ctx_.async_resource_states.end()) continue;
+    if (!result.success)
+    {
+      it->second = static_cast<int>(AsyncResourceState::Failed);
+      SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, result.error.empty() ? "Async resource preparation failed" : result.error);
+      continue;
+    }
+    if (result.type == AsyncResourceResult::Type::Texture)
+    {
+      const HRL_id created = g_Backend.RHI_CreateTextureFromBitmapWithId ? g_Backend.RHI_CreateTextureFromBitmapWithId(result.id, std::move(result.bitmap)) : HRL_INVALID_ID;
+      it->second = created == result.id ? static_cast<int>(AsyncResourceState::Ready) : static_cast<int>(AsyncResourceState::Failed);
+      if (created != result.id) SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "Async texture GPU upload failed");
+    }
+    else
+    {
+      const HRL_id created = g_Backend.RHI_CreateShaderWithId ? g_Backend.RHI_CreateShaderWithId(result.id, result.vert.data(), result.vert.size(), result.frag.data(), result.frag.size()) : HRL_INVALID_ID;
+      it->second = created == result.id ? static_cast<int>(AsyncResourceState::Ready) : static_cast<int>(AsyncResourceState::Failed);
+      if (created != result.id) SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "Async shader compilation/upload failed");
+    }
+  }
+}
+
 void HRL_BeginFrame()
 {
+	// Completed CPU-side loads are uploaded to the active OpenGL context here.
+	ProcessAsyncResourceUploads();
 	const auto now = std::chrono::steady_clock::now();
 	const double seconds = std::chrono::duration<double>(now.time_since_epoch()).count();
 	if (ctx_.vfx_has_frame_time)
@@ -1600,9 +1787,39 @@ HRL_id HRL_CreateTexture(const char* _fileContent, size_t _bufferSize)
 	//gestion des erreurs auto par le backend
 	return g_Backend.RHI_CreateTexture(_fileContent, _bufferSize);
 }
+
+
+HRL_id HRL_CreateTextureAsync(const char* data, size_t size)
+{
+  if (!data || size == 0) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateTextureAsync: invalid data buffer"); return HRL_INVALID_ID; }
+  const HRL_id id = GenerateHRL_ID();
+  ctx_.async_resource_states[id] = static_cast<int>(AsyncResourceState::Pending);
+  AsyncResourceTask task; task.type = AsyncResourceResult::Type::Texture; task.id = id;
+  task.bytes.assign(reinterpret_cast<const unsigned char*>(data), reinterpret_cast<const unsigned char*>(data) + size);
+  g_AsyncResourceLoader.Enqueue(std::move(task));
+  return id;
+}
+
+
+int HRL_IsTextureReady(HRL_id id)
+{
+  auto it = ctx_.async_resource_states.find(id);
+  if (it == ctx_.async_resource_states.end()) return g_Backend.RHI_IsValidTexture ? g_Backend.RHI_IsValidTexture(id) : HRL_FALSE;
+  return it->second == static_cast<int>(AsyncResourceState::Ready) && g_Backend.RHI_IsValidTexture(id);
+}
+
+void HRL_WaitForTexture(HRL_id id)
+{
+  for (;;) { ProcessAsyncResourceUploads(); auto it = ctx_.async_resource_states.find(id); if (it == ctx_.async_resource_states.end()) return; if (it->second != static_cast<int>(AsyncResourceState::Pending)) return; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+}
 void HRL_DeleteTexture(HRL_id _textureid)
 {
-	g_Backend.RHI_DeleteTexture(_textureid);
+  auto asyncIt = ctx_.async_resource_states.find(_textureid);
+  if (asyncIt != ctx_.async_resource_states.end()) {
+    if (asyncIt->second == static_cast<int>(AsyncResourceState::Pending)) { asyncIt->second = static_cast<int>(AsyncResourceState::Cancelled); ctx_.async_resource_states.erase(asyncIt); return; }
+    ctx_.async_resource_states.erase(asyncIt);
+  }
+  g_Backend.RHI_DeleteTexture(_textureid);
 	MarkAllScenesGILightingDirty();
 }
 
@@ -2002,9 +2219,49 @@ HRL_id HRL_CreateShader(const char *_vertContent, size_t _vertSize, const char *
 	return g_Backend.RHI_CreateShader(_vertContent, _vertSize, _fragContent, _fragSize);
 }
 
+
+HRL_id HRL_CreateShaderAsync(const char* vertData, size_t vertSize, const char* fragData, size_t fragSize)
+{
+  if (!vertData || !fragData || vertSize == 0 || fragSize == 0) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateShaderAsync: invalid shader source buffer"); return HRL_INVALID_ID; }
+  const HRL_id id = GenerateHRL_ID();
+  ctx_.async_resource_states[id] = static_cast<int>(AsyncResourceState::Pending);
+  AsyncResourceTask task; task.type = AsyncResourceResult::Type::Shader; task.id = id; task.vert.assign(vertData, vertSize); task.frag.assign(fragData, fragSize);
+  g_AsyncResourceLoader.Enqueue(std::move(task));
+  return id;
+}
+
+
+int HRL_IsShaderReady(HRL_id id)
+{
+  auto it = ctx_.async_resource_states.find(id);
+  if (it == ctx_.async_resource_states.end()) return g_Backend.RHI_IsValidShader ? g_Backend.RHI_IsValidShader(id) : HRL_FALSE;
+  return it->second == static_cast<int>(AsyncResourceState::Ready) && g_Backend.RHI_IsValidShader(id);
+}
+
+void HRL_WaitForShader(HRL_id id)
+{
+  for (;;) { ProcessAsyncResourceUploads(); auto it = ctx_.async_resource_states.find(id); if (it == ctx_.async_resource_states.end()) return; if (it->second != static_cast<int>(AsyncResourceState::Pending)) return; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+}
+
+void HRL_WaitForAllAsyncResources()
+{
+  for (;;) {
+    ProcessAsyncResourceUploads();
+    bool pending = false;
+    for (const auto& [id, state] : ctx_.async_resource_states) { (void)id; if (state == static_cast<int>(AsyncResourceState::Pending)) { pending = true; break; } }
+    if (!pending && !g_AsyncResourceLoader.HasPendingWork()) return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
 void HRL_DeleteShader(HRL_id _shaderid)
 {
-	g_Backend.RHI_DeleteShader(_shaderid);
+  auto asyncIt = ctx_.async_resource_states.find(_shaderid);
+  if (asyncIt != ctx_.async_resource_states.end()) {
+    if (asyncIt->second == static_cast<int>(AsyncResourceState::Pending)) { asyncIt->second = static_cast<int>(AsyncResourceState::Cancelled); ctx_.async_resource_states.erase(asyncIt); return; }
+    ctx_.async_resource_states.erase(asyncIt);
+  }
+  g_Backend.RHI_DeleteShader(_shaderid);
 }
 
 

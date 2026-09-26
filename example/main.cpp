@@ -9,6 +9,9 @@
 
 #include <iostream>
 #include <string>
+#include <future>
+#include <iterator>
+#include <cstdio>
 
 #include "src/example.h"
 
@@ -18,6 +21,39 @@
 typedef struct {
   float x, y, z;
 } vec3;
+// ---------------------------------------------------------------------------
+// Parallel application-side resource reads. HRL always receives data + size.
+// ---------------------------------------------------------------------------
+static std::string ReadBinaryFile(const char* path)
+{
+  std::ifstream file(path, std::ios::binary);
+  if (!file) return {};
+  return std::string((std::istreambuf_iterator<char>(file)),
+                     std::istreambuf_iterator<char>());
+}
+
+static std::future<std::string> ReadBinaryFileAsync(const char* path)
+{
+  return std::async(std::launch::async, [path]() {
+    return ReadBinaryFile(path);
+  });
+}
+
+static HRL_id QueueTextureFromFuture(std::future<std::string>& future, const char* label)
+{
+  std::string data = future.get();
+  if (data.empty())
+  {
+    std::printf("Impossible de lire %s\n", label);
+    return HRL_INVALID_ID;
+  }
+
+  HRL_id id = HRL_CreateTextureAsync(data.data(), data.size());
+  if (id == HRL_INVALID_ID)
+    std::printf("Impossible de lancer le chargement async de %s\n", label);
+  return id;
+}
+
 
 
 // frame time
@@ -299,6 +335,38 @@ int main()
       720,
       (void*)glfwGetProcAddress
   );
+  // ---------------------------------------------------------------------------
+  // Launch all resource reads in parallel.
+  // ---------------------------------------------------------------------------
+  auto skyDataFuture = ReadBinaryFileAsync("skydome.jpg");
+  auto modelDataFuture = ReadBinaryFileAsync("model.fbx");
+
+  auto skeletalDataFuture = std::async(
+      std::launch::async,
+      []() {
+        std::string data = ReadBinaryFile("skeletal.fbx");
+        if (data.empty())
+          data = ReadBinaryFile("../skeletal.fbx");
+        return data;
+      }
+  );
+
+  auto floorAlbedoFuture = ReadBinaryFileAsync("floor/Tiles086_1K-JPG_Color.jpg");
+  auto floorNormalFuture = ReadBinaryFileAsync("floor/Tiles086_1K-JPG_NormalGL.jpg");
+  auto floorRoughnessFuture = ReadBinaryFileAsync("floor/Tiles086_1K-JPG_Roughness.jpg");
+  auto floorDisplacementFuture = ReadBinaryFileAsync("floor/Tiles086_1K-JPG_Displacement.jpg");
+
+  // Queue every texture for HRL's async CPU decode / GPU upload.
+  HRL_id skyTexture = QueueTextureFromFuture(skyDataFuture, "skydome.jpg");
+  HRL_id floorAlbedoTexture = QueueTextureFromFuture(
+      floorAlbedoFuture, "floor/Tiles086_1K-JPG_Color.jpg");
+  HRL_id floorNormalTexture = QueueTextureFromFuture(
+      floorNormalFuture, "floor/Tiles086_1K-JPG_NormalGL.jpg");
+  HRL_id floorRoughnessTexture = QueueTextureFromFuture(
+      floorRoughnessFuture, "floor/Tiles086_1K-JPG_Roughness.jpg");
+  HRL_id floorDisplacementTexture = QueueTextureFromFuture(
+      floorDisplacementFuture, "floor/Tiles086_1K-JPG_Displacement.jpg");
+
 
   HRL_SetDebugLineThickness(3.f);
   HRL_SetAntialiasingMode(HRL_ANTIALIASING_4X);
@@ -347,96 +415,18 @@ int main()
   // sky_equirectangular.png est une texture equirectangulaire 2:1.
   // ---------------------------------------------------------------------------
 
-  size_t skySize = 0;
+  // skyTexture was queued asynchronously above.
 
-  std::string skyData =
-      example::OpenFile(
-          "skydome.jpg",
-          &skySize
-      );
 
-  if (skySize == 0)
-    skyData =
-        example::OpenFile(
-            "skydome.jpg",
-            &skySize
-        );
-
-  HRL_id skyTexture = HRL_INVALID_ID;
-
-  if (skySize > 0)
-    skyTexture =
-        HRL_CreateTexture(
-            skyData.data(),
-            skySize
-        );
-
-  if (skyTexture != HRL_INVALID_ID)
-  {
-    HRL_SetTextureMinFilter(
-        skyTexture,
-        HRL_FILTER_TRILINEAR
-    );
-
-    HRL_SetTextureMagFilter(
-        skyTexture,
-        HRL_FILTER_LINEAR
-    );
-
-    HRL_SetSkySphereEnabled(
-        scene,
-        HRL_TRUE
-    );
-
-    HRL_SetSkySphereTexture(
-        scene,
-        skyTexture
-    );
-
-    HRL_SetEnvironmentMap(
-        scene,
-        skyTexture
-    );
-
-    HRL_SetEnvironmentMappingEnabled(
-        scene,
-        HRL_TRUE
-    );
-  }
-  else
-  {
-    // Si l'image n'est pas disponible, garder le ciel procédural.
-    HRL_SetSkySphereEnabled(
-        scene,
-        HRL_TRUE
-    );
-
-    HRL_SetSkySphereColors(
-        scene,
-        0.06f,
-        0.18f,
-        0.55f,
-        0.55f,
-        0.72f,
-        0.95f,
-        0.08f,
-        0.10f,
-        0.16f
-    );
-  }
-
+  // Les bytes FBX sont lus en parallèle, mais HRL ne possède pas encore d'API
+  // async pour parser/créer les meshes FBX : cette partie reste synchrone.
 
   // ---------------------------------------------------------------------------
   // FBX -> HRL_Vertex3D -> HRL_Mesh
   // ---------------------------------------------------------------------------
 
-  size_t modelSize = 0;
-
-  std::string modelData =
-      example::OpenFile(
-          "model.fbx",
-          &modelSize
-      );
+  std::string modelData = modelDataFuture.get();
+  size_t modelSize = modelData.size();
 
   if (modelSize == 0)
   {
@@ -570,20 +560,8 @@ int main()
 
   HRL_id skeletalModel = HRL_INVALID_ID;
 
-  size_t skeletalSize = 0;
-
-  std::string skeletalData =
-      example::OpenFile(
-          "skeletal.fbx",
-          &skeletalSize
-      );
-
-  if (skeletalSize == 0)
-    skeletalData =
-        example::OpenFile(
-            "../skeletal.fbx",
-            &skeletalSize
-        );
+  std::string skeletalData = skeletalDataFuture.get();
+  size_t skeletalSize = skeletalData.size();
 
 
   HRL_FBXResources* resources =
@@ -843,18 +821,44 @@ int main()
     // ALBEDO
     // ------------------------------------------------------------
 
-    size_t albedoSize;
-    std::string albedoData =
-        example::OpenFile(
-            "floor/Tiles086_8K-PNG_Color.png",
-            &albedoSize
-        );
+    HRL_id albedoTexture = floorAlbedoTexture;
 
-    HRL_id albedoTexture =
-        HRL_CreateTexture(
-            albedoData.c_str(),
-            albedoSize
-        );
+    // Wait for all queued texture decodes and GPU uploads before first use.
+    HRL_WaitForAllAsyncResources();
+
+    if (!HRL_IsTextureReady(floorAlbedoTexture) ||
+        !HRL_IsTextureReady(floorNormalTexture) ||
+        !HRL_IsTextureReady(floorRoughnessTexture) ||
+        !HRL_IsTextureReady(floorDisplacementTexture))
+    {
+      std::printf("Une ou plusieurs textures du sol n'ont pas pu être chargées.\n");
+      HRL_Shutdown();
+      glfwDestroyWindow(win);
+      glfwTerminate();
+      return 1;
+    }
+
+    // Configure the sky after its asynchronous upload. Preserve the original
+    // procedural-sky fallback when the image is unavailable.
+    if (skyTexture != HRL_INVALID_ID && HRL_IsTextureReady(skyTexture))
+    {
+      HRL_SetTextureMinFilter(skyTexture, HRL_FILTER_TRILINEAR);
+      HRL_SetTextureMagFilter(skyTexture, HRL_FILTER_LINEAR);
+      HRL_SetSkySphereEnabled(scene, HRL_TRUE);
+      HRL_SetSkySphereTexture(scene, skyTexture);
+      HRL_SetEnvironmentMap(scene, skyTexture);
+      HRL_SetEnvironmentMappingEnabled(scene, HRL_TRUE);
+    }
+    else
+    {
+      HRL_SetSkySphereEnabled(scene, HRL_TRUE);
+      HRL_SetSkySphereColors(
+          scene,
+          0.06f, 0.18f, 0.55f,
+          0.55f, 0.72f, 0.95f,
+          0.08f, 0.10f, 0.16f
+      );
+    }
 
     HRL_MaterialSetTexture(
         floorMaterial,
@@ -866,18 +870,7 @@ int main()
     // NORMAL
     // ------------------------------------------------------------
 
-    size_t normalSize;
-    std::string normalData =
-        example::OpenFile(
-            "floor/Tiles086_8K-PNG_NormalGL.png",
-            &normalSize
-        );
-
-    HRL_id normalTexture =
-        HRL_CreateTexture(
-            normalData.c_str(),
-            normalSize
-        );
+    HRL_id normalTexture = floorNormalTexture;
 
     HRL_MaterialSetTexture(
         floorMaterial,
@@ -889,18 +882,7 @@ int main()
     // ROUGHNESS
     // ------------------------------------------------------------
 
-    size_t roughnessSize;
-    std::string roughnessData =
-        example::OpenFile(
-            "floor/Tiles086_8K-PNG_Roughness.png",
-            &roughnessSize
-        );
-
-    HRL_id roughnessTexture =
-        HRL_CreateTexture(
-            roughnessData.c_str(),
-            roughnessSize
-        );
+    HRL_id roughnessTexture = floorRoughnessTexture;
 
     HRL_MaterialSetTexture(
         floorMaterial,
@@ -912,18 +894,7 @@ int main()
     // SCREEN SPACE DISPLACEMENT
     // ------------------------------------------------------------
 
-    size_t displacementSize;
-    std::string displacementData =
-        example::OpenFile(
-            "floor/Tiles086_8K-PNG_Displacement.png",
-            &displacementSize
-        );
-
-    HRL_id displacementTexture =
-        HRL_CreateTexture(
-            displacementData.c_str(),
-            displacementSize
-        );
+    HRL_id displacementTexture = floorDisplacementTexture;
 
     HRL_MaterialSetTexture(
         floorMaterial,
@@ -931,11 +902,17 @@ int main()
         displacementTexture
     );
 
+    HRL_MaterialSetBool(
+        floorMaterial,
+        HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED,
+        HRL_TRUE
+        );
+
     HRL_MaterialSetFloat(
-    floorMaterial,
-    HRL_MATERIAL_PARAM_SS_DISPLACEMENT_STRENGTH,
-    12.0f
-);
+        floorMaterial,
+        HRL_MATERIAL_PARAM_SS_DISPLACEMENT_STRENGTH,
+        12.0f
+    );
 
     HRL_MaterialSetFloat(
         floorMaterial,

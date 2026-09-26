@@ -58,6 +58,7 @@ uniform float RoughnessValue;
 uniform float MetallicValue;
 uniform float SpecularValue;
 uniform float OpacityValue;
+uniform int ss_displacement_enabled;
 uniform int RoughnessUseValue;
 uniform int MetallicUseValue;
 uniform int SpecularUseValue;

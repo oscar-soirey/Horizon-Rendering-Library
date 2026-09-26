@@ -1,3 +1,4 @@
+- SS displacement is now opt-in through `ss_displacement_enabled`; the default is disabled even when a displacement texture is assigned.
 - Added per-light shadow strength control via HRL_SetLightShadowStrength() (0 = no darkening, 1 = full shadow).
 - Added viewport gizmos independent from HRL scene objects. Gizmos have their own HRL ids, world/local space, translate/rotate/scale modes, per-axis visibility/colors, hover state, screen/world sizing, mouse interaction, transform getters and change callback support.
 - Widget sizing is now resize-safe: SetWidgetSize keeps the size captured at layout time in pixels, while positions/anchors remain normalized and responsive.
@@ -325,3 +326,10 @@ The built-in OpenGL post-process shader keeps all existing parameters and now al
 All are set through the existing `HRL_MaterialSet*` API on the post-process material. `uTime` is supplied internally by the OpenGL backend for animated default-shader effects.
 
 - Implemented Screen Space Displacement Mapping for built-in static and skinned 3D materials.
+
+## SS Displacement Mapping pipeline fix
+- SS displacement meshes are now rendered normally into the scene first, so the screen-space pass has the actual mesh color as its source image.
+- The displacement pass is executed back into the active HRL scene framebuffer after the first MSAA resolve.
+- `ResolveSceneMSAA()` now leaves `scene->fbo` bound instead of the default framebuffer.
+- A second MSAA resolve is only performed when the displacement pass actually rendered, preventing debug primitives from being overwritten.
+- Existing public material API is unchanged.

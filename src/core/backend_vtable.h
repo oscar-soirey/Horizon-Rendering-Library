@@ -48,6 +48,7 @@ typedef struct {
 	//Textures//
 	HRL_id(*RHI_CreateTexture)(const char* imageContent, const size_t imageSize);
 	HRL_id(*RHI_CreateTextureFromBitmap)(BitmapResult bitmapResult);
+	HRL_id(*RHI_CreateTextureFromBitmapWithId)(HRL_id id, BitmapResult bitmapResult);
 	void(*RHI_DeleteTexture)(HRL_id id);
 	void(*RHI_GetTextureSize)(HRL_id id, int *width, int *height);
 	void(*RHI_SetTextureMinFilter)(HRL_id textureid, HRL_EFilterType filter);
@@ -64,6 +65,7 @@ typedef struct {
 
 	//Shaders//
 	HRL_id(*RHI_CreateShader)(const char* vertContent, size_t vertSize, const char* fragContent, size_t fragSize);
+	HRL_id(*RHI_CreateShaderWithId)(HRL_id id, const char* vertContent, size_t vertSize, const char* fragContent, size_t fragSize);
 	void(*RHI_DeleteShader)(HRL_id id);
 
 	//Matrices//

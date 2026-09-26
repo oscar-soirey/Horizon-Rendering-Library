@@ -541,6 +541,9 @@ typedef struct {
   std::unordered_map<HRL_id, HRL_Material*> materials;
   std::unordered_map<HRL_id, HRL_Font*> fonts;
 
+  // 0=pending, 1=ready, 2=failed, 3=cancelled.
+  std::unordered_map<HRL_id, int> async_resource_states;
+
   // Screenshot requests are consumed after the corresponding scene finishes
   // rendering in HRL_EndFrame().
   std::unordered_map<HRL_id, std::string> pending_screenshots;

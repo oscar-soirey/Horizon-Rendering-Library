@@ -1,0 +1,179 @@
+//default post process fragment shader
+
+#version 330 core
+
+in vec2 uv;
+out vec4 frag_color;
+
+// Common
+uniform sampler2D uScene;
+uniform sampler2D uBrightScene;
+uniform vec2 uScreenSize;
+uniform float uTime;
+
+// Color controls
+uniform float brightness = 1.0;
+uniform float contrast = 1.0;
+uniform float saturation = 1.0;
+uniform float gamma = 1.0;
+uniform float exposure = 0.0;
+uniform float hueShift = 0.0;          // degrees
+uniform vec3 tintColor = vec3(1.0);
+uniform bool invertColor = false;
+
+// Bloom
+uniform float bloomStrength = 1.0;
+
+// Screen-space effects
+uniform float sharpenStrength = 0.0;   // 0 = disabled, 1 = full strength
+uniform float chromaticAberration = 0.0; // pixels
+uniform float filmGrainStrength = 0.0; // 0..1
+uniform float filmGrainScale = 1.0;
+
+// Vignette
+uniform float vignetteStrength = 0.0;  // 0..1
+uniform float vignetteRadius = 0.75;   // normalized radius
+uniform float vignetteSoftness = 0.25;
+uniform vec3 vignetteColor = vec3(0.0);
+
+// Fade / color overlay
+uniform float fadeAmount = 0.0;        // 0..1
+uniform vec3 fadeColor = vec3(0.0);
+
+// sigma faible -> blur serre
+float weights[5] = float[](0.2270270, 0.1945946, 0.1216216, 0.0540540, 0.0162162);
+
+vec4 ApplyGaussianBlur(sampler2D tex)
+{
+    vec2 texOffset = vec2(1.0 / textureSize(tex, 0));
+    vec3 result = vec3(0.0);
+    float totalWeight = 0.0;
+
+    // kernel 17x17
+    for (int x = -4; x <= 4; x++)
+    {
+        for (int y = -4; y <= 4; y++)
+        {
+            float w = weights[abs(x)] * weights[abs(y)];
+            result += texture(tex, uv + vec2(texOffset.x * x, texOffset.y * y)).rgb * w;
+            totalWeight += w;
+        }
+    }
+
+    return vec4(result / totalWeight, 1.0);
+}
+
+vec3 SampleChromaticScene()
+{
+    if (chromaticAberration <= 0.0001)
+        return texture(uScene, uv).rgb;
+
+    vec2 centered = uv - vec2(0.5);
+    float lenCenter = length(centered);
+    vec2 direction = lenCenter > 0.0001 ? centered / lenCenter : vec2(0.0);
+    vec2 offset = direction * (chromaticAberration / max(uScreenSize, vec2(1.0)));
+
+    float r = texture(uScene, clamp(uv + offset, 0.0, 1.0)).r;
+    float g = texture(uScene, uv).g;
+    float b = texture(uScene, clamp(uv - offset, 0.0, 1.0)).b;
+    return vec3(r, g, b);
+}
+
+vec3 ApplySharpen(vec3 color)
+{
+    if (sharpenStrength <= 0.0001)
+        return color;
+
+    vec2 texel = 1.0 / max(uScreenSize, vec2(1.0));
+    vec3 left  = texture(uScene, clamp(uv + vec2(-texel.x, 0.0), 0.0, 1.0)).rgb;
+    vec3 right = texture(uScene, clamp(uv + vec2( texel.x, 0.0), 0.0, 1.0)).rgb;
+    vec3 up    = texture(uScene, clamp(uv + vec2(0.0,  texel.y), 0.0, 1.0)).rgb;
+    vec3 down  = texture(uScene, clamp(uv + vec2(0.0, -texel.y), 0.0, 1.0)).rgb;
+
+    vec3 blur = (left + right + up + down) * 0.25;
+    return max(vec3(0.0), color + (color - blur) * sharpenStrength);
+}
+
+vec3 ApplyHueShift(vec3 color, float degrees)
+{
+    if (abs(degrees) <= 0.0001)
+        return color;
+
+    float angle = radians(degrees);
+    float c = cos(angle);
+    float s = sin(angle);
+
+    // Rodrigues rotation around the luminance axis.
+    const vec3 axis = normalize(vec3(1.0, 1.0, 1.0));
+    return color * c + cross(axis, color) * s + axis * dot(axis, color) * (1.0 - c);
+}
+
+float Hash12(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+void main()
+{
+    // Scene sample, optionally with radial chromatic aberration.
+    vec3 color = SampleChromaticScene();
+
+    // Exposure is expressed in stops: +1 doubles the light, -1 halves it.
+    color *= exp2(exposure);
+
+    // Brightness.
+    color *= brightness;
+
+    // Contrast.
+    color = (color - 0.5) * contrast + 0.5;
+
+    // Saturation.
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(luma), color, saturation);
+
+    // Hue rotation.
+    color = ApplyHueShift(color, hueShift);
+
+    // Gamma.
+    color = pow(max(color, vec3(0.0)), vec3(1.0 / max(gamma, 0.0001)));
+
+    // Tint.
+    color *= tintColor;
+
+    // Optional sharpening of the scene image.
+    color = ApplySharpen(color);
+
+    // Color inversion.
+    color = mix(color, 1.0 - color, float(invertColor));
+
+    // Bloom.
+    vec3 bloom = ApplyGaussianBlur(uBrightScene).rgb * bloomStrength;
+    color += bloom;
+
+    // Vignette.
+    if (vignetteStrength > 0.0001)
+    {
+        vec2 centered = uv - vec2(0.5);
+        float dist = length(centered);
+        float radius = max(vignetteRadius, 0.0001);
+        float softness = max(vignetteSoftness, 0.0001);
+        float mask = smoothstep(radius, radius + softness, dist);
+        color = mix(color, vignetteColor, mask * vignetteStrength);
+    }
+
+    // Animated film grain.
+    if (filmGrainStrength > 0.0001)
+    {
+        vec2 grainUV = uv * max(filmGrainScale, 0.0001) * uScreenSize;
+        float noise = Hash12(grainUV + vec2(uTime * 17.13, uTime * 9.71));
+        float grain = (noise - 0.5) * filmGrainStrength;
+        color += grain;
+    }
+
+    // Final color fade.
+    color = mix(color, fadeColor, clamp(fadeAmount, 0.0, 1.0));
+
+    frag_color = vec4(max(color, vec3(0.0)), 1.0);
+}
