@@ -11,9 +11,23 @@ include_directories(third_party)
 
 find_package(Python REQUIRED)
 
-#find VulkanSDK
-set(VULKAN_SDK "S:/Programs/VulkanSDK")
-find_package(Vulkan REQUIRED)
+option(COMPILE_VULKAN "Compile Vulkan backend" OFF)
+
+if(COMPILE_VULKAN)
+
+	#find VulkanSDK
+	set(VULKAN_SDK "S:/Programs/VulkanSDK")
+	find_package(Vulkan REQUIRED)
+
+    set(VULKAN_SOURCES
+        src/backend/vulkan/vulkan_backend.cpp
+        src/backend/vulkan/vulkan_shader.cpp
+        src/backend/vulkan/vulkan_texture.cpp
+    )
+
+endif()
+
+
 
 
 #creer le fichier generated dans le fichier cmake
@@ -31,7 +45,7 @@ function(embed_binary INPUT_FILE OUTPUT_NAME)
         COMMENT "Embeding ${INPUT_FILE}"
     )
 
-    #on marque ces fichier .cpp comme generés
+    #on marque ces fichier .cpp comme générés
     set_source_files_properties(${OUTPUT_CPP}
             PROPERTIES GENERATED TRUE
     )
@@ -93,6 +107,9 @@ endfunction()
 
 generate_ressources_file_header()
 
+#target for resource generation
+add_custom_target(embed_resources DEPENDS ${EMBEDDED_SOURCES})
+
 if(false)
 add_library(hrl STATIC
         #third-party
@@ -114,10 +131,7 @@ add_library(hrl STATIC
         src/backend/opengl33/gl33_texture.cpp
         src/backend/opengl33/gi.cpp
 
-	#vulkan
-	src/backend/vulkan/vulkan_backend.cpp
-        src/backend/vulkan/vulkan_shader.cpp
-        src/backend/vulkan/vulkan_texture.cpp
+	${VULKAN_SOURCES}
 )
 endif()
 
@@ -142,11 +156,10 @@ add_library(hrldll SHARED
         src/backend/opengl33/gl33_texture.cpp
 	src/backend/opengl33/gi.cpp
 
-	#vulkan
-	src/backend/vulkan/vulkan_backend.cpp
-        src/backend/vulkan/vulkan_shader.cpp
-        src/backend/vulkan/vulkan_texture.cpp
+	${VULKAN_SOURCES}
 )
+
+add_dependencies(hrldll embed_resources)
 
 #compile dll declspec export
 #target_compile_definitions(hrl PRIVATE HRL_NO_DLL)
@@ -158,6 +171,8 @@ find_package(OpenGL REQUIRED)
 #target_link_libraries(hrl PRIVATE OpenGL::GL)
 target_link_libraries(hrldll PRIVATE OpenGL::GL)
 
+if(COMPILE_VULKAN)
+
 #include Vulkan
 #target_include_directories(hrl PRIVATE "${VULKAN_SDK}/Include")
 target_include_directories(hrldll PRIVATE "${VULKAN_SDK}/Include")
@@ -165,3 +180,5 @@ target_include_directories(hrldll PRIVATE "${VULKAN_SDK}/Include")
 #link Vulkan
 #target_link_libraries(hrl PRIVATE Vulkan::Vulkan)
 target_link_libraries(hrldll PRIVATE Vulkan::Vulkan)
+
+endif()

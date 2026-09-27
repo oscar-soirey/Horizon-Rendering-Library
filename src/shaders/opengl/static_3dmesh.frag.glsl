@@ -263,20 +263,61 @@ vec4 applyFog(vec4 litColor, float dist)
     return mix(FogColor, litColor, computeFogFactor(dist));
 }
 
+const float PI = 3.14159265359;
+
+vec3 FresnelSchlick(float cosTheta, vec3 F0)
+{
+    float f = pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+    return F0 + (1.0 - F0) * f;
+}
+
+float DistributionGGX(float NdotH, float roughness)
+{
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * denom * denom, 1e-6);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness)
+{
+    // UE4/Disney-style remapping keeps the Smith term stable across the
+    // complete roughness range and avoids the old hard specular spikes.
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    return NdotV / max(NdotV * (1.0 - k) + k, 1e-6);
+}
+
+float GeometrySmith(float NdotV, float NdotL, float roughness)
+{
+    return GeometrySchlickGGX(NdotV, roughness) *
+           GeometrySchlickGGX(NdotL, roughness);
+}
+
 vec3 evalBRDF(vec3 lightDir,
               vec3 normalWorld, vec3 viewDir,
-              vec3 F0, float shininess, float specMap,
+              vec3 baseColor, float roughness, float specMap,
               float metallic, vec3 lightColor)
 {
     float NdotL = max(dot(normalWorld, lightDir), 0.0);
-    vec3 kD = (1.0 - metallic) * NdotL * lightColor;
+    float NdotV = max(dot(normalWorld, viewDir), 0.0);
+    if (NdotL <= 0.0 || NdotV <= 0.0)
+        return vec3(0.0);
 
     vec3 halfDir = normalize(lightDir + viewDir);
     float NdotH = max(dot(normalWorld, halfDir), 0.0);
-    float spec = pow(NdotH, shininess) * specMap;
-    vec3 kS = spec * F0 * lightColor;
+    float HdotV = max(dot(halfDir, viewDir), 0.0);
 
-    return kD + kS;
+    vec3 F0 = mix(vec3(0.04), baseColor, metallic);
+    vec3 F = FresnelSchlick(HdotV, F0) * clamp(specMap, 0.0, 1.0);
+    float D = DistributionGGX(NdotH, roughness);
+    float G = GeometrySmith(NdotV, NdotL, roughness);
+
+    vec3 specular = (D * G) * F / max(4.0 * NdotV * NdotL, 1e-5);
+    vec3 kD = (1.0 - F) * (1.0 - metallic);
+    vec3 diffuse = kD * baseColor / PI;
+
+    return (diffuse + specular) * lightColor * NdotL;
 }
 
 float ShadowCompare2D_0(vec3 coord)
@@ -425,7 +466,11 @@ void main()
     GIAlbedoBuffer = vec4(0.0);
     GINormalBuffer = vec4(0.0);
 
-    vec3 albedo = texture(T_Albedo, uv).rgb;
+    // Color textures are authored in sRGB space. The lighting pipeline works
+    // in linear radiometric space, so decode the base color before evaluating
+    // the BRDF. Non-color maps (normal/roughness/metal/AO) stay untouched.
+    vec3 albedoSRGB = texture(T_Albedo, uv).rgb;
+    vec3 albedo = pow(max(albedoSRGB, vec3(0.0)), vec3(2.2));
     float metallic = MetallicUseValue != 0 ? MetallicValue : texture(T_Metallic, uv).r;
     float roughnessSample = texture(T_Roughness, uv).r;
     if (RoughnessInvert != 0)
@@ -452,8 +497,7 @@ void main()
     }
     vec3 normalWorld = normalize(T * normalTex.x + B * normalTex.y + N * normalTex.z);
 
-    vec3 F0 = mix(vec3(0.04), albedo, metallic);
-    float shininess = pow(2.0, (1.0 - roughness) * 11.0);
+    vec3 baseColor = albedo * max(TintColor, vec3(0.0));
 
     vec3 viewDir = normalize(CamPos - fragPos);
     vec3 lighting = vec3(0.0);
@@ -470,7 +514,11 @@ void main()
 
         if (light.type == HRL_SkyLight)
         {
-            lighting += (1.0 - metallic) * lightColor;
+            // Sky lights are low-frequency ambient irradiance. Keep them
+            // diffuse-only here; specular environment reflection is handled
+            // separately below so metallic surfaces do not receive diffuse
+            // energy twice.
+            lighting += baseColor * (1.0 - metallic) * lightColor;
             continue;
         }
 
@@ -481,13 +529,13 @@ void main()
             lightDir = (dist > 0.0001) ? toLight / dist : vec3(0.0, 0.0, 1.0);
             float attenuation = 1.0 / (1.0 + light.attenuation * dist * dist);
             shadow = ComputeShadow(light, fragPos, normalWorld, lightDir);
-            lighting += evalBRDF(lightDir, normalWorld, viewDir, F0, shininess, specMap, metallic, lightColor) * attenuation * shadow;
+            lighting += evalBRDF(lightDir, normalWorld, viewDir, baseColor, roughness, specMap, metallic, lightColor) * attenuation * shadow;
         }
         else if (light.type == HRL_DirectionalLight)
         {
             lightDir = normalize(-light.rotation);
             shadow = ComputeShadow(light, fragPos, normalWorld, lightDir);
-            lighting += evalBRDF(lightDir, normalWorld, viewDir, F0, shininess, specMap, metallic, lightColor) * shadow;
+            lighting += evalBRDF(lightDir, normalWorld, viewDir, baseColor, roughness, specMap, metallic, lightColor) * shadow;
         }
         else if (light.type == HRL_SpotLight)
         {
@@ -500,12 +548,12 @@ void main()
                 continue;
             float attenuation = 1.0 / (1.0 + light.attenuation * dist * dist);
             shadow = ComputeShadow(light, fragPos, normalWorld, lightDir);
-            lighting += evalBRDF(lightDir, normalWorld, viewDir, F0, shininess, specMap, metallic, lightColor) * attenuation * spotFactor * shadow;
+            lighting += evalBRDF(lightDir, normalWorld, viewDir, baseColor, roughness, specMap, metallic, lightColor) * attenuation * spotFactor * shadow;
         }
     }
 
     float ao = clamp(texture(T_AO, uv).r, 0.0, 1.0);
-    vec3 litResult = lighting * albedo * TintColor * ao;
+    vec3 litResult = lighting * ao;
 
     // Diffuse world-space GI is evaluated directly in the material shader.
     // This keeps GI independent of the camera and avoids any framebuffer copy or
@@ -513,15 +561,20 @@ void main()
     // outgoing diffuse radiance, so the surface albedo is applied exactly once.
     if (DDGIEnabled != 0)
     {
-        vec3 diffuseAlbedo = albedo * TintColor * (1.0 - metallic);
+        vec3 diffuseAlbedo = baseColor * (1.0 - metallic);
         litResult += SampleDDGI(fragPos, normalWorld) * diffuseAlbedo * DDGIStrength * ao;
     }
     if (EnvironmentEnabled != 0 && EnvironmentStrength > 0.0)
     {
         vec3 reflectionDir = reflect(-viewDir, normalWorld);
-        vec3 environmentColor = texture(EnvironmentMap, EquirectangularUV(reflectionDir)).rgb;
-        float reflectionAmount = clamp(EnvironmentStrength * mix(0.08, 1.0, metallic), 0.0, 1.0);
-        litResult = mix(litResult, litResult + environmentColor, reflectionAmount);
+        vec3 environmentColorSRGB = texture(EnvironmentMap, EquirectangularUV(reflectionDir)).rgb;
+        vec3 environmentColor = pow(max(environmentColorSRGB, vec3(0.0)), vec3(2.2));
+        vec3 F0Env = mix(vec3(0.04), baseColor, metallic);
+        float NdotV = max(dot(normalWorld, viewDir), 0.0);
+        vec3 envFresnel = FresnelSchlick(NdotV, F0Env);
+        float roughReflection = 1.0 - roughness * roughness;
+        vec3 environmentSpecular = environmentColor * envFresnel * roughReflection * EnvironmentStrength;
+        litResult += environmentSpecular;
     }
 
     float alphaSample = texture(T_Alpha, uv).r;

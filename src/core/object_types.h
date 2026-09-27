@@ -72,6 +72,31 @@ struct HRL_Mesh {
   float region_[4] = {0.f, 0.f, 1.f, 1.f};
 };
 
+// Heightmap-driven landscape. The renderer samples the red channel of the
+// referenced OpenGL texture and generates a regular grid lazily on the GPU.
+struct HRL_Landscape final {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id scene_ = HRL_INVALID_ID;
+  HRL_id heightmap_ = HRL_INVALID_ID;
+  HRL_id material_ = HRL_INVALID_ID;
+
+  glm::vec3 position_{0.f};
+  glm::vec3 rotation_{0.f};
+  glm::vec3 scale_{1.f};
+
+  // Width/depth in local world units. The grid is centered around the origin.
+  glm::vec2 size_{100.f, 100.f};
+  float height_scale_ = 20.f;
+
+  // Number of cells. The generated vertex count is (x+1)*(z+1).
+  HRL_uint resolution_x_ = 256;
+  HRL_uint resolution_z_ = 256;
+  glm::vec2 uv_scale_{1.f, 1.f};
+
+  // Incremented whenever the CPU height samples or topology have to be rebuilt.
+  uint64_t revision_ = 1;
+};
+
 struct HRL_SkeletalBoneInternal {
   HRL_SkeletalBone public_;
   std::string name_storage_;
@@ -257,6 +282,20 @@ struct HRL_VolumetricFog final {
   glm::vec3 color = glm::vec3(0.65f, 0.72f, 0.80f);
   float density = 0.5f;
   HRL_uint steps = 16;
+};
+
+struct HRL_Decal final {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id scene_ = HRL_INVALID_ID;
+  bool enabled = true;
+  glm::vec3 position = glm::vec3(0.0f);
+  glm::vec3 rotation = glm::vec3(0.0f);
+  glm::vec3 size = glm::vec3(2.0f, 1.0f, 2.0f);
+  HRL_id texture = HRL_INVALID_ID;
+  glm::vec3 color = glm::vec3(1.0f);
+  float opacity = 1.0f;
+  float normal_fade_min = 0.15f;
+  float normal_fade_max = 0.65f;
 };
 
 // Scene-wide volumetric fog. This is intentionally not an object because it
@@ -470,13 +509,20 @@ typedef struct {
 
   //objects
   std::unordered_map<HRL_id, HRL_Mesh*> meshes;
+  std::unordered_map<HRL_id, HRL_Landscape*> landscapes;
   std::unordered_map<HRL_id, HRL_Light*> lights;
   std::unordered_map<HRL_id, HRL_VolumetricFog*> volumetric_fogs;
+  std::unordered_map<HRL_id, HRL_Decal*> decals;
   std::unordered_map<HRL_id, HRL_Gizmo*> gizmos;
   std::unordered_map<HRL_id, HRL_VFXSystem*> vfx_systems;
 
   //Per-scene diagnostic rendering state.
   HRL_EDebugView debug_view = HRL_DEBUG_VIEW_NONE;
+
+  // SDF mesh-info debug overlay settings.
+  HRL_id debug_mesh_info_font = HRL_INVALID_ID;
+  float debug_mesh_info_text_size = 14.0f;
+  glm::vec4 debug_mesh_info_text_color = glm::vec4(1.0f, 0.95f, 0.25f, 1.0f);
 
   // Procedural sky sphere. Disabled by default to preserve existing scenes.
   bool sky_sphere_enabled = false;
@@ -503,6 +549,32 @@ typedef struct {
   float ambient_occlusion_radius = 1.0f;
   float ambient_occlusion_bias = 0.03f;
   float ambient_occlusion_power = 1.4f;
+
+  // Screen-space reflections. Disabled by default.
+  bool screen_space_reflections_enabled = false;
+  float screen_space_reflections_strength = 0.65f;
+  float screen_space_reflections_max_distance = 80.0f;
+  float screen_space_reflections_thickness = 0.25f;
+  float screen_space_reflections_fade_start = 0.55f;
+  float screen_space_reflections_fade_end = 1.0f;
+  HRL_uint screen_space_reflections_steps = 48;
+
+  // Volumetric cloud layer. OpenGL-only renderer feature; disabled by default.
+  bool volumetric_cloud_enabled = false;
+  float volumetric_cloud_coverage = 0.58f;
+  float volumetric_cloud_density = 1.15f;
+  float volumetric_cloud_height_min = 80.0f;
+  float volumetric_cloud_height_max = 180.0f;
+  float volumetric_cloud_scale = 0.0040f;
+  float volumetric_cloud_detail = 0.65f;
+  glm::vec2 volumetric_cloud_wind = glm::vec2(0.35f, 0.18f);
+  float volumetric_cloud_wind_speed = 8.0f;
+  glm::vec3 volumetric_cloud_color = glm::vec3(0.93f, 0.95f, 1.0f);
+  glm::vec3 volumetric_cloud_light_color = glm::vec3(1.0f, 0.96f, 0.90f);
+  float volumetric_cloud_light_absorption = 1.25f;
+  float volumetric_cloud_light_intensity = 1.15f;
+  HRL_uint volumetric_cloud_steps = 32;
+  float volumetric_cloud_max_distance = 4000.0f;
 
   // Global illumination. Opt-in only; default keeps the existing renderer untouched.
   bool global_illumination_enabled = false;
@@ -532,8 +604,10 @@ typedef struct {
 
   //ressources copié des scenes (pour favoriser l'acces)
   std::unordered_map<HRL_id, HRL_Mesh*> meshes;
+  std::unordered_map<HRL_id, HRL_Landscape*> landscapes;
   std::unordered_map<HRL_id, HRL_Light*> lights;
   std::unordered_map<HRL_id, HRL_VolumetricFog*> volumetric_fogs;
+  std::unordered_map<HRL_id, HRL_Decal*> decals;
   std::unordered_map<HRL_id, HRL_Gizmo*> gizmos;
   std::unordered_map<HRL_id, HRL_VFXSystem*> vfx_systems;
   std::unordered_map<HRL_id, HRL_VFXEmitter*> vfx_emitters;

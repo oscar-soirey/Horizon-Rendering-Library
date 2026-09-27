@@ -15,7 +15,7 @@ uniform float uTime;
 uniform float brightness = 1.0;
 uniform float contrast = 1.0;
 uniform float saturation = 1.0;
-uniform float gamma = 1.0;
+uniform float gamma = 2.2;
 uniform float exposure = 0.0;
 uniform float hueShift = 0.0;          // degrees
 uniform vec3 tintColor = vec3(1.0);
@@ -120,11 +120,26 @@ void main()
     // Scene sample, optionally with radial chromatic aberration.
     vec3 color = SampleChromaticScene();
 
-    // Exposure is expressed in stops: +1 doubles the light, -1 halves it.
+    // Exposure is expressed in stops: +1 doubles the linear HDR light, -1 halves it.
     color *= exp2(exposure);
 
-    // Brightness.
+    // Brightness in linear HDR space.
     color *= brightness;
+
+    // Bloom must be combined before tone mapping so bright HDR highlights are
+    // compressed together with the main image.
+    vec3 bloom = ApplyGaussianBlur(uBrightScene).rgb * bloomStrength;
+    color += bloom;
+
+    // ACES-fitted tone mapping. This is the key step that keeps strong HDR
+    // lights from hard-clipping large regions of the image to white.
+    vec3 x = max(color, vec3(0.0));
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    color = clamp((x * (a * x + b)) / max(x * (c * x + d) + e, vec3(1e-5)), 0.0, 1.0);
 
     // Contrast.
     color = (color - 0.5) * contrast + 0.5;
@@ -136,7 +151,7 @@ void main()
     // Hue rotation.
     color = ApplyHueShift(color, hueShift);
 
-    // Gamma.
+    // Display transfer. gamma=2.2 by default; callers can override it.
     color = pow(max(color, vec3(0.0)), vec3(1.0 / max(gamma, 0.0001)));
 
     // Tint.
@@ -147,10 +162,6 @@ void main()
 
     // Color inversion.
     color = mix(color, 1.0 - color, float(invertColor));
-
-    // Bloom.
-    vec3 bloom = ApplyGaussianBlur(uBrightScene).rgb * bloomStrength;
-    color += bloom;
 
     // Vignette.
     if (vignetteStrength > 0.0001)

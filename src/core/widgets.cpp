@@ -27,6 +27,17 @@ void HRL_Widget::SetPosition(float x, float y)
 	position_ = {x, y};
 }
 
+void HRL_Widget::SetWorldPosition(float x, float y, float z)
+{
+	world_position_ = {x, y, z};
+	world_position_enabled_ = true;
+}
+
+void HRL_Widget::SetWorldPositionEnabled(bool enabled)
+{
+	world_position_enabled_ = enabled;
+}
+
 void HRL_Widget::SetScale(float x, float y)
 {
 	scale_ = {std::max(0.0f, x), std::max(0.0f, y)};
@@ -71,6 +82,9 @@ void HRL_Widget::SetViewport(HRL_id viewport)
 
 bool HRL_Widget::ContainsMouse() const
 {
+	if (world_position_enabled_)
+		return false;
+
 	const float width = GetWidthPixels();
 	const float height = GetHeightPixels();
 	const float left = viewport_x_ + position_.x * viewport_width_ - width * anchor_.x;

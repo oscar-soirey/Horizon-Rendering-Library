@@ -16,6 +16,11 @@ public:
 	virtual bool IsPointerInteractive() const { return false; }
 
 	void SetPosition(float x, float y);
+	void SetWorldPosition(float x, float y, float z);
+	void SetWorldPositionEnabled(bool enabled);
+	bool IsWorldPositionEnabled() const { return world_position_enabled_; }
+	const glm::vec3& GetWorldPosition() const { return world_position_; }
+	const glm::vec2& GetPosition() const { return position_; }
 	void SetScale(float x, float y);
 	void SetAlpha(float a);
 	void SetAnchor(float ax, float ay);
@@ -70,6 +75,8 @@ protected:
 	glm::vec2 position_{0.0f};
 	glm::vec2 scale_{0.1f, 0.05f};
 	glm::vec2 anchor_{0.0f};
+	glm::vec3 world_position_{0.0f};
+	bool world_position_enabled_ = false;
 	glm::vec2 fixed_size_pixels_{0.0f};
 	bool fixed_size_initialized_ = false;
 

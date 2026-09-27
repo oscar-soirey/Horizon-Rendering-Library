@@ -26,6 +26,8 @@
 #include <string>
 #include <cstring>
 #include <chrono>
+#include <sstream>
+#include <iomanip>
 
 #include "core/widgets.h"
 
@@ -60,7 +62,9 @@ static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, con
 static void CreateSpriteGeometry();
 static void InitVFXRenderer();
 static void DrawVFX(const hrl_scene_t* scene);
-static void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport);
+
+void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport);
+static void DrawMeshDebugInfoTexts(const hrl_scene_t* scene, const HRL_Viewport* viewport);
 static void DrawGizmos(const hrl_scene_t* scene, const HRL_Viewport* viewport, HRL_id viewport_id);
 static void GL33_DrawGizmoOverlay(const DebugRenderer& renderer, float line_thickness);
 static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_PostProcess* pp);
@@ -83,6 +87,10 @@ static bool HasActiveVolumetricFog(const hrl_scene_t* scene)
 }
 
 static void ApplyAmbientOcclusion(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view, const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex);
+static void ApplyScreenSpaceReflections(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view, const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex);
+static void ApplyDecals(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view, const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex);
+static void ApplyVolumetricCloudsPass(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view, const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex);
+
 static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view, const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex);
 static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id);
 static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id);
@@ -93,6 +101,8 @@ static void ResolveSceneMSAA(GL_Scene* scene);
 static glm::vec3 GetLightDirection(const HRL_Light* light);
 static bool EnsureShadowResource(HRL_Light* light);
 static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution, GL33_Shader* shader, bool pointLight, const glm::vec3& lightPosition, float farPlane, int face);
+static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum);
+static void DrawLandscapeShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution, bool pointLight, const glm::vec3& lightPosition, float farPlane, int face);
 
 
 
@@ -150,6 +160,15 @@ struct GL33_Backend {
 	};
 	std::unordered_map<HRL_id, SkeletalMeshGPU> skeletal_meshes;
 
+	struct LandscapeGPU {
+		MeshLOD_GPU geometry;
+		uint64_t revision = 0;
+		HRL_id heightmap = HRL_INVALID_ID;
+		glm::vec3 bounds_center{0.f};
+		float bounds_radius = 0.f;
+	};
+	std::unordered_map<HRL_id, LandscapeGPU> landscapes;
+
 	// Shared procedural sky sphere geometry. Scene-specific state stays in hrl_scene_t.
 	GLuint sky_vao = 0;
 	GLuint sky_vbo = 0;
@@ -202,10 +221,24 @@ struct GL33_Backend {
 	GLuint post_textures[2];
 
 	GL33_Shader* scene_effect_shader = nullptr;
+	GL33_Shader* volumetric_cloud_shader = nullptr;
 	GL33_Shader* ambient_occlusion_shader = nullptr;
+	GL33_Shader* ssr_shader = nullptr;
+	GL33_Shader* decal_shader = nullptr;
 
 	//Widgets
 	GL33_Shader* ui_shader=nullptr;
+
+	// Cached SDF text textures used by the mesh-info debug overlay.
+	struct DebugMeshInfoTextGPU {
+		HRL_id texture = HRL_INVALID_ID;
+		HRL_id font = HRL_INVALID_ID;
+		float size = 0.0f;
+		std::string text;
+		int width = 0;
+		int height = 0;
+	};
+	std::unordered_map<HRL_id, DebugMeshInfoTextGPU> debug_mesh_info_textures;
 };
 static GL33_Backend* bck_;
 static GL_33_GI* g_gl33_gi = nullptr;
@@ -236,6 +269,86 @@ typedef struct {
 	GL33_Shader* bound_shader = nullptr;
 } GL33_State;
 static GL33_State* ctx_;
+
+static void ApplyVolumetricCloudsPass(GL_Scene* scene, const hrl_scene_t* hrlScene,
+    const glm::mat4& view, const glm::mat4& projection,
+    int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex)
+{
+    if (!scene || !hrlScene || !hrlScene->volumetric_cloud_enabled || !bck_->volumetric_cloud_shader || !scene->depth_texture)
+        return;
+
+    const int src = (srcIndex == bck_->post_textures[0]) ? 0 : 1;
+    const int dst = 1 - src;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, bck_->post_fbo[dst]);
+    glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+
+    bck_->volumetric_cloud_shader->Use();
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, bck_->post_textures[src]);
+    bck_->volumetric_cloud_shader->SetInt("uScene", 0);
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, scene->depth_texture);
+    bck_->volumetric_cloud_shader->SetInt("uDepth", 1);
+
+    bck_->volumetric_cloud_shader->SetMat4("uInvViewProjection", glm::inverse(projection * view));
+    bck_->volumetric_cloud_shader->SetVec3("uCameraPos", ctx_->viewport->camera_->position_);
+    bck_->volumetric_cloud_shader->SetVec2("uViewportOrigin", glm::vec2(
+        (float)viewportX / std::max(1, scene->width),
+        (float)viewportY / std::max(1, scene->height)));
+    bck_->volumetric_cloud_shader->SetVec2("uViewportSize", glm::vec2(
+        (float)viewportWidth / std::max(1, scene->width),
+        (float)viewportHeight / std::max(1, scene->height)));
+    bck_->volumetric_cloud_shader->SetVec2("uScreenSize", glm::vec2((float)scene->width, (float)scene->height));
+
+    bck_->volumetric_cloud_shader->SetInt("uEnabled", 1);
+    bck_->volumetric_cloud_shader->SetFloat("uCoverage", hrlScene->volumetric_cloud_coverage);
+    bck_->volumetric_cloud_shader->SetFloat("uDensity", hrlScene->volumetric_cloud_density);
+    bck_->volumetric_cloud_shader->SetFloat("uHeightMin", hrlScene->volumetric_cloud_height_min);
+    bck_->volumetric_cloud_shader->SetFloat("uHeightMax", hrlScene->volumetric_cloud_height_max);
+    bck_->volumetric_cloud_shader->SetFloat("uScale", hrlScene->volumetric_cloud_scale);
+    bck_->volumetric_cloud_shader->SetFloat("uDetail", hrlScene->volumetric_cloud_detail);
+    bck_->volumetric_cloud_shader->SetVec2("uWind", hrlScene->volumetric_cloud_wind);
+    bck_->volumetric_cloud_shader->SetFloat("uWindSpeed", hrlScene->volumetric_cloud_wind_speed);
+    bck_->volumetric_cloud_shader->SetVec3("uCloudColor", hrlScene->volumetric_cloud_color);
+    bck_->volumetric_cloud_shader->SetVec3("uLightColor", hrlScene->volumetric_cloud_light_color);
+    bck_->volumetric_cloud_shader->SetFloat("uLightAbsorption", hrlScene->volumetric_cloud_light_absorption);
+    bck_->volumetric_cloud_shader->SetFloat("uLightIntensity", hrlScene->volumetric_cloud_light_intensity);
+    bck_->volumetric_cloud_shader->SetInt("uSteps", (int)hrlScene->volumetric_cloud_steps);
+    bck_->volumetric_cloud_shader->SetFloat("uMaxDistance", hrlScene->volumetric_cloud_max_distance);
+
+    glm::vec3 sunDirection = glm::normalize(glm::vec3(0.35f, -0.85f, 0.2f));
+    glm::vec3 lightColor = hrlScene->volumetric_cloud_light_color;
+    float lightIntensity = hrlScene->volumetric_cloud_light_intensity;
+    for (const auto& [lightId, light] : hrlScene->lights)
+    {
+        (void)lightId;
+        if (!light || light->type_ != HRL_DIRECTIONAL_LIGHT || light->intensity_ <= 0.0f)
+            continue;
+        sunDirection = GetLightDirection(light);
+        lightColor = light->color_;
+        lightIntensity *= std::max(0.0f, light->intensity_);
+        break;
+    }
+    bck_->volumetric_cloud_shader->SetVec3("uSunDirection", sunDirection);
+    bck_->volumetric_cloud_shader->SetVec3("uLightColor", lightColor);
+    bck_->volumetric_cloud_shader->SetFloat("uLightIntensity", lightIntensity);
+
+    static const auto cloudStartTime = std::chrono::steady_clock::now();
+    const float time = static_cast<float>(std::chrono::duration<double>(std::chrono::steady_clock::now() - cloudStartTime).count());
+    bck_->volumetric_cloud_shader->SetFloat("uTime", time);
+
+    glBindVertexArray(bck_->vao[BUFFER_QUAD]);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+    glBindVertexArray(0);
+
+    srcIndex = bck_->post_textures[dst];
+}
+
 
 static const char* kVFXVertexShader = R"GLSL(
 #version 330 core
@@ -397,6 +510,237 @@ void main()
 }
 )GLSL";
 
+static const char* kVolumetricCloudFragmentShader = R"GLSL(
+#version 330 core
+in vec2 uv;
+out vec4 frag_color;
+
+uniform sampler2D uScene;
+uniform sampler2D uDepth;
+uniform mat4 uInvViewProjection;
+uniform vec3 uCameraPos;
+uniform vec2 uViewportOrigin;
+uniform vec2 uViewportSize;
+uniform vec2 uScreenSize;
+
+uniform int uEnabled;
+uniform float uCoverage;
+uniform float uDensity;
+uniform float uHeightMin;
+uniform float uHeightMax;
+uniform float uScale;
+uniform float uDetail;
+uniform vec2 uWind;
+uniform float uWindSpeed;
+uniform vec3 uCloudColor;
+uniform vec3 uLightColor;
+uniform float uLightAbsorption;
+uniform float uLightIntensity;
+uniform int uSteps;
+uniform float uTime;
+uniform float uMaxDistance;
+uniform vec3 uSunDirection;
+
+vec2 ToGlobalUV(vec2 localUV)
+{
+    return uViewportOrigin + localUV * uViewportSize;
+}
+
+vec3 Unproject(vec2 globalUV, float depth)
+{
+    vec2 localUV = (globalUV - uViewportOrigin) / max(uViewportSize, vec2(1e-6));
+    vec4 clip = vec4(localUV * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 world = uInvViewProjection * clip;
+    return abs(world.w) < 1e-6 ? uCameraPos : world.xyz / world.w;
+}
+
+float Hash(vec3 p)
+{
+    p = fract(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float Noise3D(vec3 p)
+{
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f*f*(3.0-2.0*f);
+    float n000 = Hash(i + vec3(0,0,0));
+    float n100 = Hash(i + vec3(1,0,0));
+    float n010 = Hash(i + vec3(0,1,0));
+    float n110 = Hash(i + vec3(1,1,0));
+    float n001 = Hash(i + vec3(0,0,1));
+    float n101 = Hash(i + vec3(1,0,1));
+    float n011 = Hash(i + vec3(0,1,1));
+    float n111 = Hash(i + vec3(1,1,1));
+    float nx00 = mix(n000,n100,f.x);
+    float nx10 = mix(n010,n110,f.x);
+    float nx01 = mix(n001,n101,f.x);
+    float nx11 = mix(n011,n111,f.x);
+    return mix(mix(nx00,nx10,f.y),mix(nx01,nx11,f.y),f.z);
+}
+
+float FBM3(vec3 p)
+{
+    float value = 0.0;
+    float amp = 0.5;
+    float freq = 1.0;
+    for (int i=0; i<3; ++i)
+    {
+        value += Noise3D(p * freq) * amp;
+        freq *= 2.03;
+        amp *= 0.5;
+        p += vec3(19.1, 7.7, 31.3);
+    }
+    return value;
+}
+
+float FBM2(vec3 p)
+{
+    float value = 0.0;
+    float amp = 0.6;
+    float freq = 1.0;
+    for (int i=0; i<2; ++i)
+    {
+        value += Noise3D(p * freq) * amp;
+        freq *= 2.03;
+        amp *= 0.5;
+        p += vec3(19.1, 7.7, 31.3);
+    }
+    return value;
+}
+
+float CloudDensity(vec3 p)
+{
+    float range = max(uHeightMax - uHeightMin, 0.001);
+    float h = clamp((p.y - uHeightMin) / range, 0.0, 1.0);
+    if (h <= 0.0 || h >= 1.0) return 0.0;
+
+    float vertical = smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(0.78, 1.0, h));
+    vec3 wind = vec3(uWind.x, 0.0, uWind.y) * (uWindSpeed * uTime);
+    vec3 q = p * max(uScale, 1e-5) + wind;
+
+    float base = FBM3(q);
+    float detail = Noise3D(q * 3.1 + vec3(17.0, 5.0, 29.0));
+    float shape = mix(base, base * 0.82 + detail * 0.30, clamp(uDetail, 0.0, 1.0));
+
+    // Coverage is deliberately centered around the useful visible range so
+    // the documented default (0.58) produces obvious clouds.
+    float threshold = mix(0.36, 0.72, clamp(uCoverage, 0.0, 1.0));
+    float d = smoothstep(threshold - 0.08, threshold + 0.12, shape);
+    return d * vertical * max(uDensity, 0.0);
+}
+
+bool IntersectLayer(vec3 ro, vec3 rd, out float t0, out float t1)
+{
+    float minH = min(uHeightMin, uHeightMax);
+    float maxH = max(uHeightMin, uHeightMax);
+    if (abs(rd.y) < 1e-5)
+        return (ro.y > minH && ro.y < maxH);
+
+    float a = (minH - ro.y) / rd.y;
+    float b = (maxH - ro.y) / rd.y;
+    t0 = max(min(a,b), 0.0);
+    t1 = max(a,b);
+    return t1 > t0 + 1e-4;
+}
+
+float LightVisibility(vec3 p, vec3 lightDir, float sampleStep)
+{
+    float opticalDepth = 0.0;
+    float stepLen = max(sampleStep * 2.0, (uHeightMax-uHeightMin)*0.025);
+    vec3 q = p;
+    for (int i=0; i<3; ++i)
+    {
+        q += lightDir * stepLen;
+        opticalDepth += CloudDensity(q) * stepLen;
+        if (opticalDepth > 3.0) break;
+    }
+    return exp(-opticalDepth * max(uLightAbsorption, 0.0));
+}
+
+void main()
+{
+    vec2 globalUV = ToGlobalUV(uv);
+    vec4 base = texture(uScene, globalUV);
+    if (uEnabled == 0 || uDensity <= 0.0 || uHeightMax <= uHeightMin)
+    {
+        frag_color = base;
+        return;
+    }
+
+    vec3 nearWorld = Unproject(globalUV, 0.0);
+    vec3 farWorld  = Unproject(globalUV, 1.0);
+    vec3 rayDir = normalize(farWorld - nearWorld);
+    vec3 rayOrigin = nearWorld;
+    float raySpan = length(farWorld - nearWorld);
+    if (raySpan <= 1e-4)
+    {
+        frag_color = base;
+        return;
+    }
+
+    float tSurface = raySpan;
+    float depth = texture(uDepth, globalUV).r;
+    if (depth < 0.99999)
+    {
+        vec3 surfaceWorld = Unproject(globalUV, depth);
+        tSurface = clamp(dot(surfaceWorld - rayOrigin, rayDir), 0.0, raySpan);
+    }
+    tSurface = min(tSurface, max(uMaxDistance, 1.0));
+
+    float tEnter, tExit;
+    if (!IntersectLayer(rayOrigin, rayDir, tEnter, tExit))
+    {
+        frag_color = base;
+        return;
+    }
+    tExit = min(tExit, tSurface);
+    if (tExit <= tEnter + 1e-4)
+    {
+        frag_color = base;
+        return;
+    }
+
+    float cloudDistance = tExit - tEnter;
+    int requestedSteps = clamp(uSteps, 12, 96);
+    float stepFactor = clamp(cloudDistance / 220.0, 0.0, 1.0);
+    int steps = clamp(int(mix(12.0, float(requestedSteps), stepFactor)), 12, requestedSteps);
+    float stepLen = cloudDistance / float(steps);
+    float jitter = Hash(vec3(globalUV * uScreenSize, uTime)) - 0.5;
+    float t = tEnter + stepLen * (0.5 + jitter * 0.65);
+
+    vec3 lightDir = normalize(-uSunDirection);
+    vec3 accum = vec3(0.0);
+    float trans = 1.0;
+
+    for (int i=0; i<96; ++i)
+    {
+        if (i >= steps || trans < 0.02) break;
+        vec3 p = rayOrigin + rayDir * t;
+        float density = CloudDensity(p);
+        if (density > 0.001)
+        {
+            float lightT = (density > 0.015 && uLightIntensity > 0.001)
+                ? LightVisibility(p, lightDir, stepLen)
+                : 1.0;
+            float phase = 0.55 + 0.45 * max(dot(-rayDir, lightDir), 0.0);
+            float height = clamp((p.y-uHeightMin)/max(uHeightMax-uHeightMin,1e-4),0.0,1.0);
+            float silver = 0.75 + 0.25 * pow(max(height, 1e-3), 0.2);
+            float alpha = 1.0 - exp(-density * stepLen);
+            vec3 lit = uCloudColor * uLightColor;
+            lit *= 0.35 + lightT * phase * silver * max(uLightIntensity,0.0);
+            accum += trans * alpha * lit;
+            trans *= 1.0 - alpha;
+        }
+        t += stepLen;
+    }
+
+    frag_color = vec4(base.rgb * trans + accum, base.a);
+}
+)GLSL";
+
 static const char* kSceneEffectsFragmentShader = R"GLSL(
 #version 330 core
 in vec2 uv;
@@ -408,6 +752,7 @@ uniform mat4 uInvViewProjection;
 uniform vec3 uCameraPos;
 uniform vec2 uViewportOrigin;
 uniform vec2 uViewportSize;
+uniform vec2 uScreenSize;
 
 #define HRL_MAX_VOLUMETRIC_FOGS 64
 uniform int uVolumetricFogCount;
@@ -429,6 +774,26 @@ uniform float uGodRaysDensity;
 uniform float uGodRaysDecay;
 uniform float uGodRaysWeight;
 uniform int uGodRaysSamples;
+
+// Volumetric cloud layer. The implementation is fully procedural so it does not
+// require a 3D texture and remains compatible with OpenGL 3.3.
+uniform int uVolumetricCloudEnabled;
+uniform float uCloudCoverage;
+uniform float uCloudDensity;
+uniform float uCloudHeightMin;
+uniform float uCloudHeightMax;
+uniform float uCloudScale;
+uniform float uCloudDetail;
+uniform vec2 uCloudWind;
+uniform float uCloudWindSpeed;
+uniform vec3 uCloudColor;
+uniform vec3 uCloudLightColor;
+uniform float uCloudLightAbsorption;
+uniform float uCloudLightIntensity;
+uniform int uCloudSteps;
+uniform float uCloudTime;
+uniform float uCloudMaxDistance;
+uniform vec3 uCloudSunDirection;
 
 vec2 GlobalUV(vec2 localUV) { return uViewportOrigin + localUV * uViewportSize; }
 vec3 ReconstructWorld(vec2 localUV, float depth)
@@ -504,30 +869,211 @@ vec4 ApplyVolumetricFog(vec2 globalUV, vec3 worldEnd)
     return vec4(base.rgb * transmittance + scattering, base.a);
 }
 
-vec4 ApplyGodRays(vec2 globalUV, vec4 color)
+float CloudHash(vec3 p)
 {
-    if (uGodRaysEnabled == 0 || uGodRaysWeight <= 0.0 || uGodRaysDensity <= 0.0) return color;
-    int samples = clamp(uGodRaysSamples, 8, 96);
-    vec2 lightGlobalUV = uViewportOrigin + uGodRaysLightUV * uViewportSize;
-    vec2 delta = (globalUV - lightGlobalUV) * (uGodRaysDensity / float(samples));
-    vec2 sampleUV = globalUV;
-    vec3 rays = vec3(0.0);
-    float illumination = 1.0;
+    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float CloudNoise(vec3 p)
+{
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    float n000 = CloudHash(i + vec3(0,0,0));
+    float n100 = CloudHash(i + vec3(1,0,0));
+    float n010 = CloudHash(i + vec3(0,1,0));
+    float n110 = CloudHash(i + vec3(1,1,0));
+    float n001 = CloudHash(i + vec3(0,0,1));
+    float n101 = CloudHash(i + vec3(1,0,1));
+    float n011 = CloudHash(i + vec3(0,1,1));
+    float n111 = CloudHash(i + vec3(1,1,1));
+
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+    float nxy0 = mix(nx00, nx10, f.y);
+    float nxy1 = mix(nx01, nx11, f.y);
+    return mix(nxy0, nxy1, f.z);
+}
+
+float CloudFBM3(vec3 p)
+{
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    for (int i = 0; i < 3; ++i)
+    {
+        value += CloudNoise(p * frequency) * amplitude;
+        frequency *= 2.03;
+        amplitude *= 0.5;
+        p += vec3(19.1, 7.7, 31.3);
+    }
+    return value;
+}
+
+float CloudFBM2(vec3 p)
+{
+    float value = 0.0;
+    float amplitude = 0.65;
+    float frequency = 1.0;
+    for (int i = 0; i < 2; ++i)
+    {
+        value += CloudNoise(p * frequency) * amplitude;
+        frequency *= 2.03;
+        amplitude *= 0.5;
+        p += vec3(19.1, 7.7, 31.3);
+    }
+    return value / 0.975;
+}
+
+float CloudHeightShape(vec3 p)
+{
+    float range = max(uCloudHeightMax - uCloudHeightMin, 0.001);
+    float h = clamp((p.y - uCloudHeightMin) / range, 0.0, 1.0);
+    if (h <= 0.0 || h >= 1.0) return 0.0;
+    return smoothstep(0.0, 0.12, h) * (1.0 - smoothstep(0.76, 1.0, h));
+}
+
+vec3 CloudWindPosition(vec3 p)
+{
+    vec3 windOffset = vec3(uCloudWind.x, 0.0, uCloudWind.y) * (uCloudWindSpeed * uCloudTime);
+    return p * max(uCloudScale, 0.00001) + windOffset;
+}
+
+float CloudDensity(vec3 worldPos)
+{
+    float heightShape = CloudHeightShape(worldPos);
+    if (heightShape <= 0.0) return 0.0;
+
+    vec3 q = CloudWindPosition(worldPos);
+    float base = CloudFBM3(q);
+    // One extra noise lookup for detail instead of a second multi-octave FBM.
+    float detail = CloudNoise(q * 3.1 + vec3(5.7, 13.1, 2.9));
+    float detailAmount = clamp(uCloudDetail, 0.0, 1.0);
+    float shape = mix(base, base * 0.82 + detail * 0.30, detailAmount);
+
+    float threshold = clamp(uCloudCoverage, 0.0, 1.0);
+    float d = smoothstep(threshold - 0.055, min(0.999, threshold + 0.16), shape);
+    return d * heightShape * max(uCloudDensity, 0.0);
+}
+
+float CloudLightDensity(vec3 worldPos)
+{
+    float heightShape = CloudHeightShape(worldPos);
+    if (heightShape <= 0.0) return 0.0;
+
+    vec3 q = CloudWindPosition(worldPos);
+    float shape = CloudFBM2(q);
+    float threshold = clamp(uCloudCoverage, 0.0, 1.0);
+    float d = smoothstep(threshold - 0.08, min(0.999, threshold + 0.20), shape);
+    return d * heightShape * max(uCloudDensity, 0.0);
+}
+
+float CloudLightTransmittance(vec3 startPos, vec3 towardLight, float sampleStep)
+{
+    float opticalDepth = 0.0;
+    float layerHeight = max(uCloudHeightMax - uCloudHeightMin, 1.0);
+    float lightStep = max(sampleStep * 3.0, layerHeight * 0.065);
+    vec3 p = startPos;
+    for (int i = 0; i < 2; ++i)
+    {
+        p += towardLight * lightStep;
+        opticalDepth += CloudLightDensity(p) * lightStep;
+    }
+    return exp(-opticalDepth * max(uCloudLightAbsorption, 0.0));
+}
+
+bool CloudIntersectLayer(vec3 rayOrigin, vec3 rayDirection, out float tEnter, out float tExit)
+{
+    if (abs(rayDirection.y) < 1e-5)
+    {
+        tEnter = 0.0;
+        tExit = 0.0;
+        return rayOrigin.y > uCloudHeightMin && rayOrigin.y < uCloudHeightMax;
+    }
+
+    float a = (uCloudHeightMin - rayOrigin.y) / rayDirection.y;
+    float b = (uCloudHeightMax - rayOrigin.y) / rayDirection.y;
+    tEnter = max(min(a, b), 0.0);
+    tExit = max(a, b);
+    return tExit > tEnter + 1e-4;
+}
+
+vec4 ApplyVolumetricClouds(vec2 globalUV, vec2 localUV, float sceneDepth, vec4 base)
+{
+    if (uVolumetricCloudEnabled == 0 || uCloudDensity <= 0.0 || uCloudHeightMax <= uCloudHeightMin)
+        return base;
+
+    vec3 nearWorld = ReconstructWorld(localUV, 0.0);
+    vec3 farWorld = ReconstructWorld(localUV, 1.0);
+    vec3 rayVector = farWorld - nearWorld;
+    float raySpan = length(rayVector);
+    if (raySpan <= 1e-4)
+        return base;
+
+    vec3 rayDirection = rayVector / raySpan;
+    vec3 rayOrigin = nearWorld;
+    float sceneDistance = raySpan;
+
+    if (sceneDepth < 0.99999)
+    {
+        vec3 worldSurface = ReconstructWorld(localUV, sceneDepth);
+        sceneDistance = clamp(dot(worldSurface - rayOrigin, rayDirection), 0.0, raySpan);
+    }
+    sceneDistance = min(sceneDistance, max(uCloudMaxDistance, 1.0));
+
+    float tEnter, tExit;
+    if (!CloudIntersectLayer(rayOrigin, rayDirection, tEnter, tExit))
+        return base;
+
+    tExit = min(tExit, sceneDistance);
+    if (tExit <= tEnter + 1e-4)
+        return base;
+
+    float cloudDistance = tExit - tEnter;
+    int requestedSteps = clamp(uCloudSteps, 8, 96);
+    float stepFactor = clamp(cloudDistance / 220.0, 0.0, 1.0);
+    int steps = clamp(int(mix(8.0, float(requestedSteps), stepFactor)), 8, requestedSteps);
+    float stepLength = cloudDistance / float(steps);
+
+    float jitter = Hash(vec3(globalUV * uScreenSize, uCloudTime)) - 0.5;
+    float t = tEnter + stepLength * (0.5 + jitter * 0.65);
+    vec3 lightDir = normalize(-uCloudSunDirection);
+
+    vec3 cloudScattering = vec3(0.0);
+    float transmittance = 1.0;
+
     for (int i = 0; i < 96; ++i)
     {
-        if (i >= samples) break;
-        sampleUV -= delta;
-        if (any(lessThan(sampleUV, vec2(0.0))) || any(greaterThan(sampleUV, vec2(1.0)))) break;
-        vec3 sceneSample = texture(uScene, sampleUV).rgb;
-        vec3 brightSample = texture(uBrightScene, sampleUV).rgb;
-        float luma = dot(sceneSample, vec3(0.2126, 0.7152, 0.0722));
-        vec3 source = brightSample + max(luma - 0.55, 0.0) * sceneSample * 0.35;
-        rays += source * illumination;
-        illumination *= uGodRaysDecay;
+        if (i >= steps || transmittance < 0.025)
+            break;
+
+        vec3 samplePos = rayOrigin + rayDirection * t;
+        float density = CloudDensity(samplePos);
+        if (density > 0.001)
+        {
+            float lightT = 1.0;
+            if (density > 0.015 && uCloudLightIntensity > 0.001)
+                lightT = CloudLightTransmittance(samplePos, lightDir, stepLength);
+
+            float phase = 0.55 + 0.45 * max(dot(-rayDirection, lightDir), 0.0);
+            float height01 = clamp((samplePos.y - uCloudHeightMin) / max(uCloudHeightMax - uCloudHeightMin, 1e-4), 0.0, 1.0);
+            float silver = 0.65 + 0.35 * pow(max(height01, 1e-3), 0.2);
+            float alpha = 1.0 - exp(-density * stepLength);
+            vec3 lit = uCloudColor * (0.55 + lightT * phase * silver * max(uCloudLightIntensity, 0.0));
+            lit *= uCloudLightColor;
+
+            cloudScattering += transmittance * alpha * lit;
+            transmittance *= 1.0 - alpha;
+        }
+        t += stepLength;
     }
-    rays /= float(samples);
-    color.rgb += rays * uGodRaysColor * uGodRaysWeight;
-    return color;
+
+    return vec4(base.rgb * transmittance + cloudScattering, base.a);
 }
 
 void main()
@@ -538,6 +1084,153 @@ void main()
     color = ApplyVolumetricFog(globalUV, ReconstructWorld(uv, depth));
     color = ApplyGodRays(globalUV, color);
     frag_color = color;
+}
+)GLSL";
+
+static const char* kSSRFragmentShader = R"GLSL(
+#version 330 core
+in vec2 uv;
+out vec4 frag_color;
+uniform sampler2D uScene;
+uniform sampler2D uDepth;
+uniform sampler2D uNormal;
+uniform mat4 uViewProjection;
+uniform mat4 uInvViewProjection;
+uniform vec3 uCameraPos;
+uniform vec2 uViewportOrigin;
+uniform vec2 uViewportSize;
+uniform vec2 uScreenSize;
+uniform float uStrength;
+uniform float uMaxDistance;
+uniform float uThickness;
+uniform float uFadeStart;
+uniform float uFadeEnd;
+uniform int uSteps;
+
+vec2 GlobalUV(vec2 localUV) { return uViewportOrigin + localUV * uViewportSize; }
+vec3 ReconstructWorld(vec2 globalUV, float depth)
+{
+    vec4 clip = vec4(globalUV * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 world = uInvViewProjection * clip;
+    if (abs(world.w) < 1e-6) return uCameraPos;
+    return world.xyz / world.w;
+}
+vec2 ProjectUV(vec3 world)
+{
+    vec4 clip = uViewProjection * vec4(world,1.0);
+    if (clip.w <= 1e-5) return vec2(-1.0);
+    return clip.xy / clip.w * 0.5 + 0.5;
+}
+void main()
+{
+    vec2 globalUV = GlobalUV(uv);
+    vec4 base = texture(uScene, globalUV);
+    float depth = texture(uDepth, globalUV).r;
+    if (depth >= 0.99999 || uStrength <= 0.0 || uMaxDistance <= 0.0)
+    {
+        frag_color = base;
+        return;
+    }
+
+    vec4 normalSample = texture(uNormal, globalUV);
+    if (normalSample.a <= 0.001)
+    {
+        frag_color = base;
+        return;
+    }
+    vec3 N = normalize(normalSample.rgb);
+    vec3 worldPos = ReconstructWorld(globalUV, depth);
+    vec3 V = normalize(uCameraPos - worldPos);
+    vec3 R = normalize(reflect(-V, N));
+    if (dot(R, R) < 1e-6)
+    {
+        frag_color = base;
+        return;
+    }
+
+    float cosTheta = max(dot(N, V), 0.0);
+    float fresnel = pow(1.0 - cosTheta, 5.0);
+    fresnel = mix(0.04, 1.0, fresnel);
+    float stepLength = uMaxDistance / float(max(uSteps, 8));
+    vec3 rayPos = worldPos + N * max(uThickness * 0.5, 0.001);
+    vec3 hitColor = vec3(0.0);
+    float confidence = 0.0;
+
+    for (int i = 0; i < 96; ++i)
+    {
+        if (i >= uSteps) break;
+        rayPos += R * stepLength;
+        vec2 hitUV = ProjectUV(rayPos);
+        if (any(lessThan(hitUV, vec2(0.001))) || any(greaterThan(hitUV, vec2(0.999))))
+            break;
+        float hitDepth = texture(uDepth, hitUV).r;
+        if (hitDepth >= 0.99999)
+            continue;
+        vec3 hitWorld = ReconstructWorld(hitUV, hitDepth);
+        float sceneDistance = length(hitWorld - uCameraPos);
+        float rayDistance = length(rayPos - uCameraPos);
+        float thickness = max(uThickness, stepLength * 1.5);
+        if (sceneDistance <= rayDistance + thickness && sceneDistance >= length(worldPos-uCameraPos) + stepLength * 0.25)
+        {
+            hitColor = texture(uScene, hitUV).rgb;
+            float distanceFade = 1.0 - smoothstep(uMaxDistance * uFadeStart, uMaxDistance * uFadeEnd, rayDistance);
+            float edgeFade = 1.0 - smoothstep(0.0, 0.15, max(abs(hitUV.x-0.5), abs(hitUV.y-0.5)) * 2.0);
+            confidence = clamp(uStrength * fresnel * distanceFade * edgeFade, 0.0, 1.0);
+            break;
+        }
+    }
+
+    frag_color = vec4(mix(base.rgb, hitColor, confidence), base.a);
+}
+)GLSL";
+
+static const char* kDecalFragmentShader = R"GLSL(
+#version 330 core
+in vec2 uv;
+out vec4 frag_color;
+uniform sampler2D uScene;
+uniform sampler2D uDepth;
+uniform sampler2D uNormal;
+uniform sampler2D uDecal;
+uniform mat4 uInvViewProjection;
+uniform mat4 uDecalInvModel;
+uniform vec3 uDecalNormal;
+uniform vec4 uColor;
+uniform float uOpacity;
+uniform float uNormalFadeMin;
+uniform float uNormalFadeMax;
+uniform vec2 uViewportOrigin;
+uniform vec2 uViewportSize;
+uniform vec2 uScreenSize;
+vec2 GlobalUV(vec2 localUV) { return uViewportOrigin + localUV * uViewportSize; }
+vec3 ReconstructWorld(vec2 globalUV, float depth)
+{
+    vec4 clip = vec4(globalUV * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 world = uInvViewProjection * clip;
+    if (abs(world.w) < 1e-6) return vec3(0.0);
+    return world.xyz / world.w;
+}
+void main()
+{
+    vec2 globalUV = GlobalUV(uv);
+    vec4 base = texture(uScene, globalUV);
+    float depth = texture(uDepth, globalUV).r;
+    vec4 n = texture(uNormal, globalUV);
+    if (depth >= 0.99999 || n.a <= 0.001 || uOpacity <= 0.0)
+    { frag_color = base; return; }
+    vec3 worldPos = ReconstructWorld(globalUV, depth);
+    vec3 local = (uDecalInvModel * vec4(worldPos,1.0)).xyz;
+    if (any(greaterThan(abs(local), vec3(0.5))))
+    { frag_color = base; return; }
+    vec3 surfaceNormal = normalize(n.rgb);
+    float facing = abs(dot(surfaceNormal, normalize(uDecalNormal)));
+    float facingFade = smoothstep(uNormalFadeMin, max(uNormalFadeMin + 0.001, uNormalFadeMax), facing);
+    if (facingFade <= 0.001)
+    { frag_color = base; return; }
+    vec2 decalUV = local.xz + 0.5;
+    vec4 decal = texture(uDecal, decalUV) * uColor;
+    float alpha = clamp(decal.a * uOpacity * facingFade, 0.0, 1.0);
+    frag_color = vec4(mix(base.rgb, decal.rgb, alpha), base.a);
 }
 )GLSL";
 
@@ -981,6 +1674,15 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		bck_->scene_effect_shader = nullptr;
 	}
 
+	bck_->volumetric_cloud_shader = new GL33_Shader();
+	if (bck_->volumetric_cloud_shader->GL33_Create(
+		(const char*)res_post_vert_glsl, res_post_vert_glsl_len,
+		kVolumetricCloudFragmentShader, std::strlen(kVolumetricCloudFragmentShader)) != 0)
+	{
+		delete bck_->volumetric_cloud_shader;
+		bck_->volumetric_cloud_shader = nullptr;
+	}
+
 	bck_->ambient_occlusion_shader = new GL33_Shader();
 	if (bck_->ambient_occlusion_shader->GL33_Create(
 		(const char*)res_post_vert_glsl, res_post_vert_glsl_len,
@@ -988,6 +1690,24 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 	{
 		delete bck_->ambient_occlusion_shader;
 		bck_->ambient_occlusion_shader = nullptr;
+	}
+
+	bck_->ssr_shader = new GL33_Shader();
+	if (bck_->ssr_shader->GL33_Create(
+		(const char*)res_post_vert_glsl, res_post_vert_glsl_len,
+		kSSRFragmentShader, std::strlen(kSSRFragmentShader)) != 0)
+	{
+		delete bck_->ssr_shader;
+		bck_->ssr_shader = nullptr;
+	}
+
+	bck_->decal_shader = new GL33_Shader();
+	if (bck_->decal_shader->GL33_Create(
+		(const char*)res_post_vert_glsl, res_post_vert_glsl_len,
+		kDecalFragmentShader, std::strlen(kDecalFragmentShader)) != 0)
+	{
+		delete bck_->decal_shader;
+		bck_->decal_shader = nullptr;
 	}
 
 	//SPRITE SHADER
@@ -1193,6 +1913,15 @@ void GL33_Shutdown()
 	}
 	bck_->skeletal_meshes.clear();
 
+	for (auto& [id, landscape] : bck_->landscapes)
+	{
+		(void)id;
+		if (landscape.geometry.vao) glDeleteVertexArrays(1, &landscape.geometry.vao);
+		if (landscape.geometry.vbo) glDeleteBuffers(1, &landscape.geometry.vbo);
+		if (landscape.geometry.ebo) glDeleteBuffers(1, &landscape.geometry.ebo);
+	}
+	bck_->landscapes.clear();
+
 	for (auto& [scene_id, scene] : bck_->gpu_scenes)
 		DestroyMSAAResources(scene);
 
@@ -1200,6 +1929,7 @@ void GL33_Shutdown()
 	{
 		delete s.second;
 	}
+	bck_->debug_mesh_info_textures.clear();
 	for (const auto t : bck_->textures)
 	{
 		delete t.second;
@@ -1207,6 +1937,10 @@ void GL33_Shutdown()
 
 	delete bck_->ui_shader;
 	delete bck_->scene_effect_shader;
+	delete bck_->volumetric_cloud_shader;
+	delete bck_->ambient_occlusion_shader;
+	delete bck_->ssr_shader;
+	delete bck_->decal_shader;
 	delete bck_->vfx_shader;
 	delete bck_->ss_displacement_static_shader;
 	delete bck_->ss_displacement_skinned_shader;
@@ -1436,6 +2170,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		// Render the full opaque scene normally first. Screen-space displacement
 		// is a second pass that re-samples this already-rendered image, so the
 		// displaced mesh must be present in the source image.
+		DrawLandscapes(scene_id, scene, cameraFrustum);
 		DrawOpaqueMeshes(scene_id, scene->meshes, scene->debug_view, cameraFrustum, false);
 		if (!wireframeDebug)
 		{
@@ -1492,9 +2227,12 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 
 		bool has_post_process = !wireframeDebug && !v.second->post_processes.empty();
 		bool has_scene_effects = !wireframeDebug && (HasActiveVolumetricFog(scene) || scene->god_rays.enabled);
+		bool has_volumetric_clouds = !wireframeDebug && scene->volumetric_cloud_enabled;
 		bool has_ambient_occlusion = !wireframeDebug && scene->ambient_occlusion_enabled;
+		bool has_ssr = !wireframeDebug && scene->screen_space_reflections_enabled;
+		bool has_decals = !wireframeDebug && !scene->decals.empty();
 
-		if (has_post_process || has_scene_effects || has_ambient_occlusion)
+		if (has_post_process || has_scene_effects || has_volumetric_clouds || has_ambient_occlusion || has_ssr || has_decals)
 		{
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
 			glReadBuffer(GL_COLOR_ATTACHMENT0);
@@ -1503,22 +2241,29 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 
 			GLuint currentTexture = bck_->post_textures[0];
 			int src = 0;
+			const int vx = (int)(v.second->x_ * winW);
+			const int vy = (int)(v.second->y_ * winH);
+			const int vw = std::max(1, (int)(v.second->width_ * winW));
+			const int vh = std::max(1, (int)(v.second->height_ * winH));
+			if (has_decals && bck_->decal_shader)
+				ApplyDecals(gpu_scene, scene, ctx_->view_mat, ctx_->proj_mat, vx, vy, vw, vh, currentTexture);
+			src = (currentTexture == bck_->post_textures[0]) ? 0 : 1;
+			if (has_ssr && bck_->ssr_shader)
+				ApplyScreenSpaceReflections(gpu_scene, scene, ctx_->view_mat, ctx_->proj_mat, vx, vy, vw, vh, currentTexture);
+			src = (currentTexture == bck_->post_textures[0]) ? 0 : 1;
 			if (has_ambient_occlusion && bck_->ambient_occlusion_shader)
 			{
-				const int vx = (int)(v.second->x_ * winW);
-				const int vy = (int)(v.second->y_ * winH);
-				const int vw = std::max(1, (int)(v.second->width_ * winW));
-				const int vh = std::max(1, (int)(v.second->height_ * winH));
 				ApplyAmbientOcclusion(gpu_scene, scene, ctx_->view_mat, ctx_->proj_mat, vx, vy, vw, vh, currentTexture);
 				src = (currentTexture == bck_->post_textures[0]) ? 0 : 1;
 			}
 			if (has_scene_effects && bck_->scene_effect_shader)
 			{
-				const int vx = (int)(v.second->x_ * winW);
-				const int vy = (int)(v.second->y_ * winH);
-				const int vw = std::max(1, (int)(v.second->width_ * winW));
-				const int vh = std::max(1, (int)(v.second->height_ * winH));
 				ApplySceneEffects(gpu_scene, scene, ctx_->view_mat, ctx_->proj_mat, vx, vy, vw, vh, currentTexture);
+				src = (currentTexture == bck_->post_textures[0]) ? 0 : 1;
+			}
+			if (has_volumetric_clouds && bck_->volumetric_cloud_shader)
+			{
+				ApplyVolumetricCloudsPass(gpu_scene, scene, ctx_->view_mat, ctx_->proj_mat, vx, vy, vw, vh, currentTexture);
 				src = (currentTexture == bck_->post_textures[0]) ? 0 : 1;
 			}
 
@@ -1568,6 +2313,8 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		}
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		DrawGizmos(scene, v.second, [&](){ for (const auto& [vid, vp] : scene->viewports) if (vp == v.second) return vid; return (HRL_id)HRL_INVALID_ID; }());
+		if (scene->debug_view == HRL_DEBUG_VIEW_MESH_INFO)
+			DrawMeshDebugInfoTexts(scene, v.second);
 		DrawWidgets(v.second->widgets, v.second);
 	}
 }
@@ -2770,6 +3517,223 @@ static void GL33_DrawGizmoOverlay(const DebugRenderer& renderer, float line_thic
     glEnable(GL_DEPTH_TEST);
 }
 
+static const char* MeshDebugTypeName(const HRL_Mesh* mesh)
+{
+	if (!mesh) return "Unknown";
+	switch (mesh->type_)
+	{
+	case HRL_3D_MESH: return "Mesh3D";
+	case HRL_3D_SKELETAL_MESH: return "SkeletalMesh";
+	case HRL_2D_MESH: return "Mesh2D";
+	case HRL_SPRITE: return "Sprite";
+	default: return "Unknown";
+	}
+}
+
+static glm::vec3 ComputeMeshAverageNormal(const HRL_Mesh* mesh, int lodLevel)
+{
+	glm::vec3 sum(0.0f);
+	size_t count = 0;
+	if (!mesh) return glm::vec3(0.0f, 1.0f, 0.0f);
+	if (mesh->type_ == HRL_3D_SKELETAL_MESH)
+	{
+		const auto* skinned = static_cast<const HRL_SkeletalMesh*>(mesh);
+		for (const auto& v : skinned->vertices_)
+		{
+			const glm::vec3 n(v.vertex.normal[0], v.vertex.normal[1], v.vertex.normal[2]);
+			if (glm::dot(n, n) > 1e-10f && std::isfinite(n.x) && std::isfinite(n.y) && std::isfinite(n.z))
+			{
+				sum += glm::normalize(n);
+				++count;
+			}
+		}
+	}
+	else if (!mesh->lods_.empty())
+	{
+		const int level = std::clamp(lodLevel, 0, static_cast<int>(mesh->lods_.size()) - 1);
+		for (const auto& v : mesh->lods_[(size_t)level].vertices)
+		{
+			const glm::vec3 n(v.normal[0], v.normal[1], v.normal[2]);
+			if (glm::dot(n, n) > 1e-10f && std::isfinite(n.x) && std::isfinite(n.y) && std::isfinite(n.z))
+			{
+				sum += glm::normalize(n);
+				++count;
+			}
+		}
+	}
+	if (count == 0 || glm::dot(sum, sum) <= 1e-12f)
+		return glm::vec3(0.0f, 1.0f, 0.0f);
+	return glm::normalize(sum / static_cast<float>(count));
+}
+
+static void BuildMeshDebugInfoText(const HRL_Mesh* mesh, std::string& out)
+{
+	out.clear();
+	if (!mesh) return;
+	const int lodLevel = std::max(0, mesh->last_lod_level_);
+	size_t vertexCount = 0;
+	size_t triangleCount = mesh->triangle_count_;
+	if (mesh->type_ == HRL_3D_SKELETAL_MESH)
+	{
+		const auto* skinned = static_cast<const HRL_SkeletalMesh*>(mesh);
+		vertexCount = skinned->vertices_.size();
+		triangleCount = !skinned->indices_.empty() ? skinned->indices_.size() / 3u : skinned->vertices_.size() / 3u;
+	}
+	else if (!mesh->lods_.empty())
+	{
+		const size_t level = std::min<size_t>((size_t)lodLevel, mesh->lods_.size() - 1);
+		const auto& lod = mesh->lods_[level];
+		vertexCount = lod.vertices.size();
+		triangleCount = !lod.indices.empty() ? lod.indices.size() / 3u : lod.vertices.size() / 3u;
+	}
+	const glm::vec3 n = ComputeMeshAverageNormal(mesh, lodLevel);
+	std::ostringstream ss;
+	ss << MeshDebugTypeName(mesh) << "\n"
+	   << "Triangles: " << triangleCount << "\n"
+	   << "Vertices: " << vertexCount << "\n"
+	   << "LOD: " << lodLevel << "\n"
+	   << std::fixed << std::setprecision(2)
+	   << "Normal: (" << n.x << ", " << n.y << ", " << n.z << ")\n"
+	   << "Position: (" << mesh->position_.x << ", " << mesh->position_.y << ", " << mesh->position_.z << ")\n"
+	   << "Scale: (" << mesh->scale_.x << ", " << mesh->scale_.y << ", " << mesh->scale_.z << ")\n"
+	   << "Material: " << static_cast<unsigned long long>(mesh->material_);
+	if (mesh->type_ == HRL_3D_SKELETAL_MESH)
+	{
+		const auto* skinned = static_cast<const HRL_SkeletalMesh*>(mesh);
+		ss << "\nBones: " << skinned->bones_.size()
+		   << "\nAnimation: " << skinned->current_animation_;
+	}
+	out = ss.str();
+}
+
+static void DrawMeshDebugInfoTexts(const hrl_scene_t* scene, const HRL_Viewport* viewport)
+{
+	if (!scene || !viewport || !bck_ || !bck_->ui_shader || !ctx_)
+		return;
+	HRL_Context* privateContext = GetPrivateContext();
+	if (!privateContext || privateContext->fonts.empty())
+		return;
+
+	// Debug mesh information is a screen-space UI pass.
+	// Do not inherit the viewport/FBO state left by the 3D/gizmo passes.
+	const float winW = static_cast<float>(GetWindowWidth());
+	const float winH = static_cast<float>(GetWindowHeight());
+	const int viewportX = static_cast<int>(viewport->x_ * winW);
+	const int viewportY = static_cast<int>(viewport->y_ * winH);
+	const int viewportW = std::max(1, static_cast<int>(viewport->width_ * winW));
+	const int viewportH = std::max(1, static_cast<int>(viewport->height_ * winH));
+
+	// The scene has already been composited to the screen immediately before
+	// this function is called. Mesh info must therefore be drawn over the
+	// default framebuffer, using the owning viewport.
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(viewportX, viewportY, viewportW, viewportH);
+
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	HRL_id fontId = scene->debug_mesh_info_font;
+	if (fontId == HRL_INVALID_ID || privateContext->fonts.find(fontId) == privateContext->fonts.end())
+		fontId = privateContext->fonts.begin()->first;
+
+	const float textSize = scene->debug_mesh_info_text_size;
+	for (const auto& [meshId, mesh] : scene->meshes)
+	{
+		if (!mesh || (mesh->type_ != HRL_3D_MESH && mesh->type_ != HRL_3D_SKELETAL_MESH))
+			continue;
+		const glm::vec4 clip = ctx_->proj_mat * ctx_->view_mat * glm::vec4(glm::vec3(CalculateModelMatrix(mesh) * glm::vec4(mesh->bounds_center_, 1.0f)), 1.0f);
+		if (!std::isfinite(clip.w) || clip.w <= 1e-6f)
+			continue;
+		const glm::vec2 ndc = glm::vec2(clip) / clip.w;
+		if (!std::isfinite(ndc.x) || !std::isfinite(ndc.y) || ndc.x < -1.15f || ndc.x > 1.15f || ndc.y < -1.15f || ndc.y > 1.15f)
+			continue;
+
+		std::string info;
+		BuildMeshDebugInfoText(mesh, info);
+		std::ostringstream withId;
+		withId << "ID: " << static_cast<unsigned long long>(meshId) << "\n" << info;
+		info = withId.str();
+
+		auto& cache = bck_->debug_mesh_info_textures[meshId];
+		if (cache.texture == HRL_INVALID_ID || cache.font != fontId || cache.size != textSize || cache.text != info || !HRL_IsValidTexture(cache.texture))
+		{
+			if (cache.texture != HRL_INVALID_ID && HRL_IsValidTexture(cache.texture))
+				HRL_DeleteTexture(cache.texture);
+			cache = {};
+			cache.font = fontId;
+			cache.size = textSize;
+			cache.text = info;
+			cache.texture = HRL_InternalCreateSDFTextTexture(info.c_str(), fontId, textSize);
+			if (cache.texture == HRL_INVALID_ID)
+				continue;
+			HRL_SetTextureMinFilter(cache.texture, HRL_FILTER_LINEAR);
+			HRL_SetTextureMagFilter(cache.texture, HRL_FILTER_LINEAR);
+			HRL_GetTextureSize(cache.texture, &cache.width, &cache.height);
+		}
+		if (cache.texture == HRL_INVALID_ID || cache.width <= 0 || cache.height <= 0)
+			continue;
+
+		const float vpW = static_cast<float>(viewportW);
+		const float vpH = static_cast<float>(viewportH);
+
+		// HRL_SetDebugMeshInfoTextSize() is a screen-space size, in pixels,
+		// and refers to ONE LINE of text, not the complete generated bitmap.
+		// The SDF texture contains all lines, so scale its total height by
+		// the number of lines while preserving the bitmap aspect ratio.
+		const float requestedLineHeight = std::max(1.0f, textSize);
+		const float lineCount = 1.0f +
+			static_cast<float>(std::count(info.begin(), info.end(), '\n'));
+		const float requestedPixelHeight =
+			requestedLineHeight * lineCount;
+		const float bitmapAspect = static_cast<float>(cache.width) /
+			static_cast<float>(cache.height);
+		const float textW =
+			(requestedPixelHeight * bitmapAspect) / vpW;
+		const float textH = requestedPixelHeight / vpH;
+		const float anchorX = 0.5f + 0.5f * ndc.x;
+		const float anchorY = 0.5f - 0.5f * ndc.y;
+		const float px = anchorX - textW * 0.5f;
+		const float py = anchorY - textH - 4.0f / vpH;
+
+		bck_->ui_shader->Use();
+		bck_->ui_shader->SetMat4("projection", glm::ortho(0.f, 1.f, 1.f, 0.f, -1.f, 1.f));
+		bck_->ui_shader->SetVec4("uTintColor", scene->debug_mesh_info_text_color);
+		bck_->ui_shader->SetInt("uSDFText", 1);
+		glActiveTexture(GL_TEXTURE0);
+		auto texIt = bck_->textures.find(cache.texture);
+		if (texIt == bck_->textures.end() || !texIt->second)
+			continue;
+		glBindTexture(GL_TEXTURE_2D, texIt->second->GetGL_ID());
+		bck_->ui_shader->SetInt("uTexture", 0);
+		const float vertices[16] = {
+			px,        py,        0.0f, 1.0f,
+			px+textW,  py,        1.0f, 1.0f,
+			px+textW,  py+textH,  1.0f, 0.0f,
+			px,        py+textH,  0.0f, 0.0f,
+		};
+		glBindVertexArray(bck_->vao[BUFFER_UI]);
+		glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_UI]);
+		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
+		glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+	}
+
+	for (auto it = bck_->debug_mesh_info_textures.begin(); it != bck_->debug_mesh_info_textures.end(); )
+	{
+		if (privateContext->meshes.find(it->first) == privateContext->meshes.end())
+		{
+			if (it->second.texture != HRL_INVALID_ID && HRL_IsValidTexture(it->second.texture))
+				HRL_DeleteTexture(it->second.texture);
+			it = bck_->debug_mesh_info_textures.erase(it);
+		}
+		else ++it;
+	}
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
+	glViewport(0, 0, static_cast<GLsizei>(winW), static_cast<GLsizei>(winH));
+}
+
 void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport)
 {
 	if (!viewport || widgets.empty())
@@ -2846,6 +3810,30 @@ void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const H
 
 		std::vector<HRL_Widget::WidgetDrawInfos> geometries;
 		w->GetDrawInfos(geometries);
+
+		// A world-projected widget keeps the regular 2D geometry/size of the
+		// widget, but its anchor point is replaced by the 3D point projected
+		// through the current viewport camera.
+		if (w->IsWorldPositionEnabled())
+		{
+			if (!ctx_ || !viewport->camera_)
+				continue;
+			const glm::vec4 clip = ctx_->proj_mat * ctx_->view_mat * glm::vec4(w->GetWorldPosition(), 1.0f);
+			if (!std::isfinite(clip.x) || !std::isfinite(clip.y) || !std::isfinite(clip.w) || clip.w <= 1e-6f)
+				continue;
+			const glm::vec2 ndc = glm::vec2(clip) / clip.w;
+			if (!std::isfinite(ndc.x) || !std::isfinite(ndc.y))
+				continue;
+			const glm::vec2 projected(0.5f + 0.5f * ndc.x, 0.5f - 0.5f * ndc.y);
+			const glm::vec2 screenAnchor = w->GetPosition();
+			const glm::vec2 delta = projected - screenAnchor;
+			for (auto& g : geometries)
+			{
+				g.px += delta.x;
+				g.py += delta.y;
+			}
+		}
+
 		for (const auto& g : geometries)
 		{
 			if (g.sx <= 0.0f || g.sy <= 0.0f || g.a <= 0.0f)
@@ -2986,6 +3974,91 @@ static bool WritePNG_RGBA8(const char* path, int width, int height, const std::v
     return (bool)file;
 }
 
+static void ApplyScreenSpaceReflections(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view,
+    const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex)
+{
+    if (!scene || !hrlScene || !hrlScene->screen_space_reflections_enabled || !bck_->ssr_shader || !scene->depth_texture)
+        return;
+    const int src = (srcIndex == bck_->post_textures[0]) ? 0 : 1;
+    const int dst = 1 - src;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, bck_->post_fbo[src]);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bck_->post_fbo[dst]);
+    glBlitFramebuffer(0,0,scene->width,scene->height,0,0,scene->width,scene->height,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, bck_->post_fbo[dst]);
+    glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND);
+    bck_->ssr_shader->Use();
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, bck_->post_textures[src]); bck_->ssr_shader->SetInt("uScene",0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, scene->depth_texture); bck_->ssr_shader->SetInt("uDepth",1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, scene->textures[4]); bck_->ssr_shader->SetInt("uNormal",2);
+    bck_->ssr_shader->SetMat4("uViewProjection", projection * view);
+    bck_->ssr_shader->SetMat4("uInvViewProjection", glm::inverse(projection * view));
+    bck_->ssr_shader->SetVec3("uCameraPos", ctx_->viewport->camera_->position_);
+    bck_->ssr_shader->SetVec2("uViewportOrigin", glm::vec2((float)viewportX/scene->width,(float)viewportY/scene->height));
+    bck_->ssr_shader->SetVec2("uViewportSize", glm::vec2((float)viewportWidth/scene->width,(float)viewportHeight/scene->height));
+    bck_->ssr_shader->SetVec2("uScreenSize", glm::vec2((float)scene->width,(float)scene->height));
+    bck_->ssr_shader->SetFloat("uStrength", hrlScene->screen_space_reflections_strength);
+    bck_->ssr_shader->SetFloat("uMaxDistance", hrlScene->screen_space_reflections_max_distance);
+    bck_->ssr_shader->SetFloat("uThickness", hrlScene->screen_space_reflections_thickness);
+    bck_->ssr_shader->SetFloat("uFadeStart", hrlScene->screen_space_reflections_fade_start);
+    bck_->ssr_shader->SetFloat("uFadeEnd", hrlScene->screen_space_reflections_fade_end);
+    bck_->ssr_shader->SetInt("uSteps", (int)hrlScene->screen_space_reflections_steps);
+    glBindVertexArray(bck_->vao[BUFFER_QUAD]); glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,nullptr); glBindVertexArray(0);
+    srcIndex = bck_->post_textures[dst];
+}
+
+static void ApplyDecals(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view,
+    const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex)
+{
+    (void)view; (void)projection;
+    if (!scene || !hrlScene || !bck_->decal_shader || hrlScene->decals.empty() || !scene->depth_texture)
+        return;
+    std::vector<HRL_Decal*> decals;
+    decals.reserve(hrlScene->decals.size());
+    for (const auto& [id,d] : hrlScene->decals) { (void)id; if (d && d->enabled && d->texture != HRL_INVALID_ID) decals.push_back(d); }
+    if (decals.empty()) return;
+
+    std::sort(decals.begin(), decals.end(), [](const HRL_Decal* a, const HRL_Decal* b){ return a->id_ < b->id_; });
+    for (HRL_Decal* decal : decals)
+    {
+        auto texIt = bck_->textures.find(decal->texture);
+        if (texIt == bck_->textures.end() || !texIt->second || texIt->second->GetGL_ID()==0) continue;
+        const int src = (srcIndex == bck_->post_textures[0]) ? 0 : 1;
+        const int dst = 1 - src;
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, bck_->post_fbo[src]);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bck_->post_fbo[dst]);
+        glBlitFramebuffer(0,0,scene->width,scene->height,0,0,scene->width,scene->height,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER,bck_->post_fbo[dst]);
+        glViewport(viewportX,viewportY,viewportWidth,viewportHeight);
+        glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND);
+        bck_->decal_shader->Use();
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,bck_->post_textures[src]); bck_->decal_shader->SetInt("uScene",0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,scene->depth_texture); bck_->decal_shader->SetInt("uDepth",1);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D,scene->textures[4]); bck_->decal_shader->SetInt("uNormal",2);
+        glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D,texIt->second->GetGL_ID()); bck_->decal_shader->SetInt("uDecal",3);
+        glm::mat4 model(1.0f);
+        model = glm::translate(model,decal->position);
+        model = glm::rotate(model,glm::radians(decal->rotation.x),glm::vec3(1,0,0));
+        model = glm::rotate(model,glm::radians(decal->rotation.y),glm::vec3(0,1,0));
+        model = glm::rotate(model,glm::radians(decal->rotation.z),glm::vec3(0,0,1));
+        model = glm::scale(model,decal->size);
+        bck_->decal_shader->SetMat4("uInvViewProjection", glm::inverse(projection*view));
+        bck_->decal_shader->SetMat4("uDecalInvModel", glm::inverse(model));
+        bck_->decal_shader->SetVec3("uDecalNormal", glm::normalize(glm::vec3(model * glm::vec4(0,1,0,0))));
+        bck_->decal_shader->SetVec4("uColor", glm::vec4(decal->color,1.0f));
+        bck_->decal_shader->SetFloat("uOpacity",decal->opacity);
+        bck_->decal_shader->SetFloat("uNormalFadeMin",decal->normal_fade_min);
+        bck_->decal_shader->SetFloat("uNormalFadeMax",decal->normal_fade_max);
+        bck_->decal_shader->SetVec2("uViewportOrigin",glm::vec2((float)viewportX/scene->width,(float)viewportY/scene->height));
+        bck_->decal_shader->SetVec2("uViewportSize",glm::vec2((float)viewportWidth/scene->width,(float)viewportHeight/scene->height));
+        bck_->decal_shader->SetVec2("uScreenSize",glm::vec2((float)scene->width,(float)scene->height));
+        glBindVertexArray(bck_->vao[BUFFER_QUAD]); glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,nullptr); glBindVertexArray(0);
+        srcIndex=bck_->post_textures[dst];
+    }
+}
+
 static void ApplyAmbientOcclusion(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view,
     const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex)
 {
@@ -3033,8 +4106,9 @@ static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, cons
     glBindFramebuffer(GL_READ_FRAMEBUFFER, bck_->post_fbo[src]);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, bck_->post_fbo[dst]);
-    glBlitFramebuffer(0, 0, scene->width, scene->height,
-        0, 0, scene->width, scene->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBlitFramebuffer(viewportX, viewportY, viewportX + viewportWidth, viewportY + viewportHeight,
+        viewportX, viewportY, viewportX + viewportWidth, viewportY + viewportHeight,
+        GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
     glBindFramebuffer(GL_FRAMEBUFFER, bck_->post_fbo[dst]);
     glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
@@ -3054,6 +4128,7 @@ static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, cons
     bck_->scene_effect_shader->SetVec3("uCameraPos", ctx_->viewport->camera_->position_);
     bck_->scene_effect_shader->SetVec2("uViewportOrigin", glm::vec2((float)viewportX / (float)scene->width, (float)viewportY / (float)scene->height));
     bck_->scene_effect_shader->SetVec2("uViewportSize", glm::vec2((float)viewportWidth / (float)scene->width, (float)viewportHeight / (float)scene->height));
+    bck_->scene_effect_shader->SetVec2("uScreenSize", glm::vec2((float)scene->width, (float)scene->height));
 
     const auto& globalFog = hrlScene->global_volumetric_fog;
     bck_->scene_effect_shader->SetInt("uGlobalVolumetricFogEnabled", globalFog.enabled ? 1 : 0);
@@ -3080,6 +4155,44 @@ static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, cons
     }
     bck_->scene_effect_shader->SetInt("uVolumetricFogCount", fogCount);
     bck_->scene_effect_shader->SetInt("uVolumetricFogSteps", (int)volumetricFogSteps);
+
+    // Volumetric clouds are a scene-wide atmospheric layer. Use the first
+    // directional light as the sun when available, otherwise a neutral
+    // downward light keeps the effect usable without any light objects.
+    glm::vec3 cloudSunDirection = glm::normalize(glm::vec3(0.35f, -0.85f, 0.2f));
+    glm::vec3 cloudLightColor = hrlScene->volumetric_cloud_light_color;
+    float cloudLightIntensity = hrlScene->volumetric_cloud_light_intensity;
+    for (const auto& [cloudLightId, cloudLight] : hrlScene->lights)
+    {
+        (void)cloudLightId;
+        if (!cloudLight || cloudLight->type_ != HRL_DIRECTIONAL_LIGHT || cloudLight->intensity_ <= 0.0f)
+            continue;
+        cloudSunDirection = GetLightDirection(cloudLight);
+        cloudLightColor = cloudLight->color_;
+        cloudLightIntensity *= std::max(0.0f, cloudLight->intensity_);
+        break;
+    }
+    const auto& clouds = *hrlScene;
+    // Clouds are rendered by the dedicated volumetric_cloud_shader pass below.
+    bck_->scene_effect_shader->SetInt("uVolumetricCloudEnabled", 0);
+    bck_->scene_effect_shader->SetFloat("uCloudCoverage", clouds.volumetric_cloud_coverage);
+    bck_->scene_effect_shader->SetFloat("uCloudDensity", clouds.volumetric_cloud_density);
+    bck_->scene_effect_shader->SetFloat("uCloudHeightMin", clouds.volumetric_cloud_height_min);
+    bck_->scene_effect_shader->SetFloat("uCloudHeightMax", clouds.volumetric_cloud_height_max);
+    bck_->scene_effect_shader->SetFloat("uCloudScale", clouds.volumetric_cloud_scale);
+    bck_->scene_effect_shader->SetFloat("uCloudDetail", clouds.volumetric_cloud_detail);
+    bck_->scene_effect_shader->SetVec2("uCloudWind", clouds.volumetric_cloud_wind);
+    bck_->scene_effect_shader->SetFloat("uCloudWindSpeed", clouds.volumetric_cloud_wind_speed);
+    bck_->scene_effect_shader->SetVec3("uCloudColor", clouds.volumetric_cloud_color);
+    bck_->scene_effect_shader->SetVec3("uCloudLightColor", cloudLightColor);
+    bck_->scene_effect_shader->SetFloat("uCloudLightAbsorption", clouds.volumetric_cloud_light_absorption);
+    bck_->scene_effect_shader->SetFloat("uCloudLightIntensity", cloudLightIntensity);
+    bck_->scene_effect_shader->SetInt("uCloudSteps", (int)clouds.volumetric_cloud_steps);
+    bck_->scene_effect_shader->SetFloat("uCloudMaxDistance", clouds.volumetric_cloud_max_distance);
+    bck_->scene_effect_shader->SetVec3("uCloudSunDirection", cloudSunDirection);
+    static const auto cloudStartTime = std::chrono::steady_clock::now();
+    const float cloudTime = static_cast<float>(std::chrono::duration<double>(std::chrono::steady_clock::now() - cloudStartTime).count());
+    bck_->scene_effect_shader->SetFloat("uCloudTime", cloudTime);
 
     const auto& rays = hrlScene->god_rays;
     glm::vec2 lightUV(0.5f);
@@ -3511,6 +4624,7 @@ static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewPr
 				glDrawArrays(GL_TRIANGLES, 0, staticGpu->vertex_count);
 		}
 	}
+	DrawLandscapeShadowCasters(scene, lightViewProjection, lightView, lightProjection, shadowResolution, pointLight, lightPosition, farPlane, face);
 	glBindVertexArray(0);
 	(void)face;
 }
@@ -4033,6 +5147,444 @@ static bool GL33_UploadMeshLOD(GL33_Backend::MeshLOD_GPU& gpu,
 	gpu.vertex_count = (GLsizei)vertexCount;
 	glBindVertexArray(0);
 	return true;
+}
+
+static glm::mat4 CalculateLandscapeModelMatrix(const HRL_Landscape* landscape)
+{
+	glm::mat4 model(1.f);
+	model = glm::translate(model, landscape->position_);
+	model = glm::rotate(model, glm::radians(landscape->rotation_.x), glm::vec3(1.f, 0.f, 0.f));
+	model = glm::rotate(model, glm::radians(landscape->rotation_.y), glm::vec3(0.f, 1.f, 0.f));
+	model = glm::rotate(model, glm::radians(landscape->rotation_.z), glm::vec3(0.f, 0.f, 1.f));
+	model = glm::scale(model, landscape->scale_);
+	return model;
+}
+
+static float SampleLandscapeHeight(const GL33_Texture* texture, float u, float v)
+{
+	if (!texture || texture->GetWidth() == 0 || texture->GetHeight() == 0)
+		return 0.f;
+	const auto& pixels = texture->GetCpuRGBA();
+	const int width = static_cast<int>(texture->GetWidth());
+	const int height = static_cast<int>(texture->GetHeight());
+	if (pixels.size() < static_cast<size_t>(width) * static_cast<size_t>(height) * 4u)
+		return 0.f;
+
+	u = glm::clamp(u, 0.f, 1.f);
+	v = glm::clamp(v, 0.f, 1.f);
+	const float fx = u * static_cast<float>(std::max(1, width - 1));
+	const float fy = v * static_cast<float>(std::max(1, height - 1));
+	const int x0 = std::clamp(static_cast<int>(std::floor(fx)), 0, width - 1);
+	const int y0 = std::clamp(static_cast<int>(std::floor(fy)), 0, height - 1);
+	const int x1 = std::min(x0 + 1, width - 1);
+	const int y1 = std::min(y0 + 1, height - 1);
+	const float tx = fx - static_cast<float>(x0);
+	const float ty = fy - static_cast<float>(y0);
+
+	auto read = [&](int x, int y) -> float {
+		const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+		return static_cast<float>(pixels[index]) / 255.f;
+	};
+	const float a = glm::mix(read(x0, y0), read(x1, y0), tx);
+	const float b = glm::mix(read(x0, y1), read(x1, y1), tx);
+	return glm::mix(a, b, ty);
+}
+
+static bool BuildLandscapeGeometry(const HRL_Landscape* landscape, const GL33_Texture* heightmap,
+	std::vector<HRL_Vertex3D>& vertices, std::vector<HRL_uint>& indices,
+	glm::vec3& boundsCenter, float& boundsRadius)
+{
+	if (!landscape || !heightmap)
+		return false;
+
+	const HRL_uint rx = std::clamp<HRL_uint>(landscape->resolution_x_, 2u, 512u);
+	const HRL_uint rz = std::clamp<HRL_uint>(landscape->resolution_z_, 2u, 512u);
+	const size_t vertexCount = static_cast<size_t>(rx + 1u) * static_cast<size_t>(rz + 1u);
+	const size_t indexCount = static_cast<size_t>(rx) * static_cast<size_t>(rz) * 6u;
+	if (vertexCount > static_cast<size_t>(std::numeric_limits<GLsizei>::max()) ||
+		indexCount > static_cast<size_t>(std::numeric_limits<GLsizei>::max()))
+		return false;
+
+	vertices.resize(vertexCount);
+	indices.resize(indexCount);
+
+	const float cellX = landscape->size_.x / static_cast<float>(rx);
+	const float cellZ = landscape->size_.y / static_cast<float>(rz);
+	const float du = 1.f / static_cast<float>(rx);
+	const float dv = 1.f / static_cast<float>(rz);
+
+	float minHeight = std::numeric_limits<float>::max();
+	float maxHeight = -std::numeric_limits<float>::max();
+
+	for (HRL_uint z = 0; z <= rz; ++z)
+	{
+		const float v = static_cast<float>(z) / static_cast<float>(rz);
+		for (HRL_uint x = 0; x <= rx; ++x)
+		{
+			const float u = static_cast<float>(x) / static_cast<float>(rx);
+			const float h = SampleLandscapeHeight(heightmap, u, v) * landscape->height_scale_;
+			minHeight = std::min(minHeight, h);
+			maxHeight = std::max(maxHeight, h);
+
+			HRL_Vertex3D& vertex = vertices[static_cast<size_t>(z) * static_cast<size_t>(rx + 1u) + x];
+			const float hL = SampleLandscapeHeight(heightmap, std::max(0.f, u - du), v) * landscape->height_scale_;
+			const float hR = SampleLandscapeHeight(heightmap, std::min(1.f, u + du), v) * landscape->height_scale_;
+			const float hD = SampleLandscapeHeight(heightmap, u, std::max(0.f, v - dv)) * landscape->height_scale_;
+			const float hU = SampleLandscapeHeight(heightmap, u, std::min(1.f, v + dv)) * landscape->height_scale_;
+
+			const float dhx = (hR - hL) / std::max(2.f * cellX, 1e-6f);
+			const float dhz = (hU - hD) / std::max(2.f * cellZ, 1e-6f);
+			glm::vec3 normal = glm::normalize(glm::vec3(-dhx, 1.f, -dhz));
+			glm::vec3 tangent = glm::normalize(glm::vec3(1.f, dhx, 0.f));
+			tangent = glm::normalize(tangent - normal * glm::dot(normal, tangent));
+			if (glm::dot(tangent, tangent) < 1e-8f)
+				tangent = glm::vec3(1.f, 0.f, 0.f);
+			glm::vec3 bitangent = glm::normalize(glm::cross(normal, tangent));
+			if (glm::dot(bitangent, bitangent) < 1e-8f)
+				bitangent = glm::vec3(0.f, 0.f, 1.f);
+
+			const float localX = (u - 0.5f) * landscape->size_.x;
+			const float localZ = (v - 0.5f) * landscape->size_.y;
+			vertex.position[0] = localX;
+			vertex.position[1] = h;
+			vertex.position[2] = localZ;
+			vertex.normal[0] = normal.x;
+			vertex.normal[1] = normal.y;
+			vertex.normal[2] = normal.z;
+			vertex.uv[0] = u * landscape->uv_scale_.x;
+			vertex.uv[1] = v * landscape->uv_scale_.y;
+			vertex.tangent[0] = tangent.x;
+			vertex.tangent[1] = tangent.y;
+			vertex.tangent[2] = tangent.z;
+			vertex.bitangent[0] = bitangent.x;
+			vertex.bitangent[1] = bitangent.y;
+			vertex.bitangent[2] = bitangent.z;
+		}
+	}
+
+	size_t writeIndex = 0;
+	for (HRL_uint z = 0; z < rz; ++z)
+	{
+		for (HRL_uint x = 0; x < rx; ++x)
+		{
+			const HRL_uint a = z * (rx + 1u) + x;
+			const HRL_uint b = a + 1u;
+			const HRL_uint c = a + (rx + 1u);
+			const HRL_uint d = c + 1u;
+			// a-c-b gives an upward-facing (+Y) normal in the HRL coordinate system.
+			indices[writeIndex++] = a;
+			indices[writeIndex++] = c;
+			indices[writeIndex++] = b;
+			indices[writeIndex++] = b;
+			indices[writeIndex++] = c;
+			indices[writeIndex++] = d;
+		}
+	}
+
+	boundsCenter = glm::vec3(0.f, 0.5f * (minHeight + maxHeight), 0.f);
+	const glm::vec3 halfExtents(
+		0.5f * std::abs(landscape->size_.x),
+		0.5f * std::abs(maxHeight - minHeight),
+		0.5f * std::abs(landscape->size_.y));
+	boundsRadius = glm::length(halfExtents);
+	return true;
+}
+
+static void DestroyLandscapeGPU(GL33_Backend::LandscapeGPU& gpu)
+{
+	if (gpu.geometry.vao) glDeleteVertexArrays(1, &gpu.geometry.vao);
+	if (gpu.geometry.vbo) glDeleteBuffers(1, &gpu.geometry.vbo);
+	if (gpu.geometry.ebo) glDeleteBuffers(1, &gpu.geometry.ebo);
+	gpu = {};
+}
+
+static bool EnsureLandscapeGPU(const HRL_Landscape* landscape, GL33_Backend::LandscapeGPU& gpu)
+{
+	if (!landscape)
+		return false;
+	if (gpu.geometry.vao != 0 && gpu.revision == landscape->revision_ && gpu.heightmap == landscape->heightmap_)
+		return true;
+
+	if (landscape->heightmap_ == HRL_INVALID_ID)
+		return false;
+	const auto texIt = bck_->textures.find(landscape->heightmap_);
+	if (texIt == bck_->textures.end() || !texIt->second || texIt->second->GetGL_ID() == 0)
+		return false;
+
+	std::vector<HRL_Vertex3D> vertices;
+	std::vector<HRL_uint> indices;
+	glm::vec3 boundsCenter(0.f);
+	float boundsRadius = 0.f;
+	if (!BuildLandscapeGeometry(landscape, texIt->second, vertices, indices, boundsCenter, boundsRadius))
+		return false;
+
+	GL33_Backend::LandscapeGPU rebuilt;
+	if (!GL33_UploadMeshLOD(rebuilt.geometry, vertices.data(), vertices.size(), indices.data(), indices.size()))
+		return false;
+	rebuilt.revision = landscape->revision_;
+	rebuilt.heightmap = landscape->heightmap_;
+	rebuilt.bounds_center = boundsCenter;
+	rebuilt.bounds_radius = boundsRadius;
+
+	DestroyLandscapeGPU(gpu);
+	gpu = std::move(rebuilt);
+	return true;
+}
+
+static bool BindLandscapeMaterial(HRL_id landscapeId, HRL_Material* material, const HRL_Landscape* landscape,
+	const glm::mat4& model)
+{
+	if (!bck_ || !ctx_ || !landscape)
+		return false;
+	const auto shaderIt = bck_->shaders.find(HRL_MESH_3D_SHADER);
+	if (shaderIt == bck_->shaders.end() || !shaderIt->second)
+		return false;
+	GL33_Shader* shader = shaderIt->second;
+
+	shader->Use();
+	ctx_->shader = shader;
+	ctx_->bound_shader = shader;
+	ctx_->bound_material = material;
+
+	shader->SetMat4("projection", ctx_->proj_mat);
+	shader->SetMat4("view", ctx_->view_mat);
+	shader->SetMat4("model", model);
+	glm::mat3 normalMatrix(1.f);
+	const glm::mat3 model3(model);
+	const float det = glm::determinant(model3);
+	if (std::isfinite(det) && std::abs(det) > 1e-8f)
+		normalMatrix = glm::transpose(glm::inverse(model3));
+	shader->SetMat3("normalMatrix", normalMatrix);
+	shader->SetUint("uSpriteID", 0u);
+	shader->SetVec4("UVRegion", glm::vec4(0.f, 0.f, 1.f, 1.f));
+	shader->SetVec3("CamPos", ctx_->viewport->camera_->position_);
+	shader->SetVec3("TintColor", glm::vec3(1.f));
+	shader->SetInt("TwoSided", 0);
+	shader->SetInt("DebugView", static_cast<int>(ctx_->current_scene ? ctx_->current_scene->debug_view : HRL_DEBUG_VIEW_NONE));
+	shader->SetInt("ss_displacement_enabled", 0);
+
+	shader->SetInt("FogEnabled", ctx_->current_fog ? (ctx_->current_fog->enabled ? 1 : 0) : 0);
+	shader->SetInt("FogMode", ctx_->current_fog ? static_cast<int>(ctx_->current_fog->mode) : 0);
+	shader->SetVec4("FogColor", ctx_->current_fog ? glm::vec4(ctx_->current_fog->r, ctx_->current_fog->g, ctx_->current_fog->b, 1.f) : glm::vec4(0.f, 0.f, 0.f, 1.f));
+	shader->SetFloat("FogStart", ctx_->current_fog ? ctx_->current_fog->range_start : 20.f);
+	shader->SetFloat("FogEnd", ctx_->current_fog ? ctx_->current_fog->range_end : 100.f);
+	shader->SetFloat("FogDensity", ctx_->current_fog ? ctx_->current_fog->density : 0.1f);
+
+	shader->SetFloat("BaseColorAlpha", 1.f);
+	shader->SetFloat("RoughnessValue", 1.f);
+	shader->SetFloat("MetallicValue", 0.f);
+	shader->SetFloat("SpecularValue", 1.f);
+	shader->SetFloat("OpacityValue", 1.f);
+	shader->SetInt("RoughnessUseValue", 0);
+	shader->SetInt("MetallicUseValue", 0);
+	shader->SetInt("SpecularUseValue", 0);
+	shader->SetInt("OpacityUseValue", 0);
+	shader->SetInt("RoughnessInvert", 0);
+	shader->SetInt("AlphaInvert", 0);
+	shader->SetInt("ShadowMap2D_0", SHADOW_2D_TEXTURE_UNIT_BASE + 0);
+	shader->SetInt("ShadowMap2D_1", SHADOW_2D_TEXTURE_UNIT_BASE + 1);
+	shader->SetInt("ShadowMap2D_2", SHADOW_2D_TEXTURE_UNIT_BASE + 2);
+	shader->SetInt("ShadowMap2D_3", SHADOW_2D_TEXTURE_UNIT_BASE + 3);
+	shader->SetInt("ShadowMapCube_0", SHADOW_CUBE_TEXTURE_UNIT_BASE + 0);
+	shader->SetInt("ShadowMapCube_1", SHADOW_CUBE_TEXTURE_UNIT_BASE + 1);
+	shader->SetInt("ShadowMapCube_2", SHADOW_CUBE_TEXTURE_UNIT_BASE + 2);
+	shader->SetInt("ShadowMapCube_3", SHADOW_CUBE_TEXTURE_UNIT_BASE + 3);
+	shader->SetInt("EnvironmentMap", ENVIRONMENT_TEXTURE_UNIT);
+
+	bool environmentEnabled = false;
+	if (ctx_->current_scene && ctx_->current_scene->environment_mapping_enabled)
+	{
+		HRL_id envId = ctx_->current_scene->environment_texture;
+		if (envId == HRL_INVALID_ID) envId = ctx_->current_scene->sky_texture;
+		auto envIt = bck_->textures.find(envId);
+		if (envIt != bck_->textures.end() && envIt->second)
+		{
+			environmentEnabled = true;
+			glActiveTexture(GL_TEXTURE0 + ENVIRONMENT_TEXTURE_UNIT);
+			glBindTexture(GL_TEXTURE_2D, envIt->second->GetGL_ID());
+		}
+	}
+	shader->SetInt("EnvironmentEnabled", environmentEnabled ? 1 : 0);
+	shader->SetFloat("EnvironmentStrength", environmentEnabled ? 1.0f : 0.0f);
+
+	for (int i = 0; i < 6; ++i)
+	{
+		shader->SetInt(tex_uniform_name[i], i);
+		if (!material)
+		{
+			ApplyFallback(i);
+			continue;
+		}
+		auto itParam = material->textureParams_.find(std::string(tex_uniform_name[i]));
+		if (itParam == material->textureParams_.end())
+		{
+			ApplyFallback(i);
+			continue;
+		}
+		auto itTexture = bck_->textures.find(itParam->second);
+		if (itTexture == bck_->textures.end() || !itTexture->second)
+		{
+			ApplyFallback(i);
+			continue;
+		}
+		glActiveTexture(GL_TEXTURE0 + i);
+		glBindTexture(GL_TEXTURE_2D, itTexture->second->GetGL_ID());
+	}
+
+	shader->SetInt(HRL_T_AMBIENT_OCCLUSION, AO_TEXTURE_UNIT);
+	ApplyFallbackToUnit(AO_TEXTURE_UNIT, ROUGHNESS_INT);
+	if (material)
+	{
+		if (auto aoParam = material->textureParams_.find(std::string(HRL_T_AMBIENT_OCCLUSION)); aoParam != material->textureParams_.end())
+		{
+			auto aoTexture = bck_->textures.find(aoParam->second);
+			if (aoTexture != bck_->textures.end() && aoTexture->second)
+			{
+				glActiveTexture(GL_TEXTURE0 + AO_TEXTURE_UNIT);
+				glBindTexture(GL_TEXTURE_2D, aoTexture->second->GetGL_ID());
+			}
+		}
+		for (const auto& [name, value] : material->intParams_) shader->SetInt(name, value);
+		for (const auto& [name, value] : material->floatParams_) shader->SetFloat(name, value);
+		for (const auto& [name, value] : material->vec2Params_) shader->SetVec2(name, value);
+		for (const auto& [name, value] : material->vec3Params_) shader->SetVec3(name, value);
+		for (const auto& [name, value] : material->vec4Params_) shader->SetVec4(name, value);
+	}
+	return true;
+}
+
+static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum)
+{
+	if (!bck_ || !ctx_ || !ctx_->viewport || !ctx_->viewport->camera_ || !scene || scene->landscapes.empty())
+		return;
+
+	// Remove backend allocations for landscapes deleted from the public context.
+	for (auto it = bck_->landscapes.begin(); it != bck_->landscapes.end(); )
+	{
+		if (GetPrivateContext()->landscapes.find(it->first) == GetPrivateContext()->landscapes.end())
+		{
+			DestroyLandscapeGPU(it->second);
+			it = bck_->landscapes.erase(it);
+		}
+		else
+			++it;
+	}
+
+	const bool wireframe = scene->debug_view == HRL_DEBUG_VIEW_WIREFRAME;
+	GLint previousPolygonMode[2] = {GL_FILL, GL_FILL};
+	glGetIntegerv(GL_POLYGON_MODE, previousPolygonMode);
+	GLboolean previousCull = glIsEnabled(GL_CULL_FACE);
+	GLint previousCullFace = GL_BACK;
+	glGetIntegerv(GL_CULL_FACE_MODE, &previousCullFace);
+
+	glEnable(GL_DEPTH_TEST);
+	glDepthMask(GL_TRUE);
+	glDepthFunc(GL_LESS);
+	glDisable(GL_BLEND);
+	if (wireframe)
+	{
+		glDisable(GL_CULL_FACE);
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+	}
+	else
+	{
+		glEnable(GL_CULL_FACE);
+		glCullFace(GL_BACK);
+		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	}
+
+	for (const auto& [id, landscape] : scene->landscapes)
+	{
+		if (!landscape)
+			continue;
+		auto& gpu = bck_->landscapes[id];
+		if (!EnsureLandscapeGPU(landscape, gpu) || gpu.geometry.vao == 0 || gpu.geometry.index_count <= 0)
+			continue;
+
+		const glm::mat4 model = CalculateLandscapeModelMatrix(landscape);
+		const glm::vec3 center = glm::vec3(model * glm::vec4(gpu.bounds_center, 1.f));
+		const float maxScale = std::max({std::abs(landscape->scale_.x), std::abs(landscape->scale_.y), std::abs(landscape->scale_.z), 1e-6f});
+		if (!SphereInsideFrustum(frustum, center, gpu.bounds_radius * maxScale))
+			continue;
+
+		HRL_Material* material = nullptr;
+		if (landscape->material_ != HRL_INVALID_ID)
+		{
+			auto matIt = GetPrivateContext()->materials.find(landscape->material_);
+			if (matIt != GetPrivateContext()->materials.end()) material = matIt->second;
+		}
+		if (!BindLandscapeMaterial(id, material, landscape, model))
+			continue;
+
+		const bool twoSided = MaterialIsTwoSided(material);
+		if (wireframe || twoSided) glDisable(GL_CULL_FACE);
+		else { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); }
+		glBindVertexArray(gpu.geometry.vao);
+		glDrawElements(GL_TRIANGLES, gpu.geometry.index_count, GL_UNSIGNED_INT, nullptr);
+	}
+
+	glBindVertexArray(0);
+	glPolygonMode(GL_FRONT, previousPolygonMode[0]);
+	glPolygonMode(GL_BACK, previousPolygonMode[1]);
+	glCullFace(previousCullFace);
+	if (previousCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+}
+
+static void DrawLandscapeShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection,
+	const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution,
+	bool pointLight, const glm::vec3& lightPosition, float farPlane, int face)
+{
+	(void)lightView;
+	(void)lightProjection;
+	(void)shadowResolution;
+	(void)face;
+	if (!scene || !bck_ || scene->landscapes.empty())
+		return;
+
+	const FrustumPlaneSet frustum = BuildFrustum(lightViewProjection);
+	for (const auto& [id, landscape] : scene->landscapes)
+	{
+		if (!landscape)
+			continue;
+		auto& gpu = bck_->landscapes[id];
+		if (!EnsureLandscapeGPU(landscape, gpu) || gpu.geometry.vao == 0 || gpu.geometry.index_count <= 0)
+			continue;
+
+		const glm::mat4 model = CalculateLandscapeModelMatrix(landscape);
+		const glm::vec3 center = glm::vec3(model * glm::vec4(gpu.bounds_center, 1.f));
+		const float maxScale = std::max({std::abs(landscape->scale_.x), std::abs(landscape->scale_.y), std::abs(landscape->scale_.z), 1e-6f});
+		const float radius = gpu.bounds_radius * maxScale;
+		if (pointLight)
+		{
+			const float limit = farPlane + radius;
+			if (glm::dot(center - lightPosition, center - lightPosition) > limit * limit)
+				continue;
+		}
+		else if (!SphereInsideFrustum(frustum, center, radius))
+			continue;
+
+		GL33_Shader* shader = pointLight ? bck_->shadow_point_shader : bck_->shadow_2d_shader;
+		if (!shader)
+			continue;
+		shader->Use();
+		shader->SetMat4("lightSpaceMatrix", lightViewProjection);
+		shader->SetMat4("lightViewProjection", lightViewProjection);
+		shader->SetVec3("lightPosition", lightPosition);
+		shader->SetFloat("farPlane", farPlane);
+		shader->SetMat4("model", model);
+
+		HRL_Material* material = nullptr;
+		if (landscape->material_ != HRL_INVALID_ID)
+		{
+			auto matIt = GetPrivateContext()->materials.find(landscape->material_);
+			if (matIt != GetPrivateContext()->materials.end()) material = matIt->second;
+		}
+		if (MaterialIsTwoSided(material)) glDisable(GL_CULL_FACE);
+		else { glEnable(GL_CULL_FACE); glCullFace(GL_FRONT); }
+
+		glBindVertexArray(gpu.geometry.vao);
+		glDrawElements(GL_TRIANGLES, gpu.geometry.index_count, GL_UNSIGNED_INT, nullptr);
+	}
 }
 
 static bool GL33_UploadSkeletalMesh(GL33_Backend::SkeletalMeshGPU& gpu,

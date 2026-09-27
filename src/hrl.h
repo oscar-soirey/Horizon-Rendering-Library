@@ -238,7 +238,8 @@ typedef enum HRL_EDebugView{
 	HRL_DEBUG_VIEW_LIGHTS,
 	HRL_DEBUG_VIEW_LIGHTING = HRL_DEBUG_VIEW_LIGHTS,
 	HRL_DEBUG_VIEW_WIREFRAME,
-	HRL_DEBUG_VIEW_LOD
+	HRL_DEBUG_VIEW_LOD,
+	HRL_DEBUG_VIEW_MESH_INFO
 }HRL_EDebugView;
 
 typedef enum HRL_ELODMode {
@@ -506,6 +507,29 @@ extern "C" {
 		const HRL_Vertex3D* _vertices, size_t _vertexCount,
 		const HRL_uint* _indices, size_t _indexCount
 	);
+
+	/* ============================================================================
+	 *  LANDSCAPES (OpenGL 3.3)
+	 * ============================================================================ */
+
+	/**
+	 * @brief Creates a heightmap-driven landscape in a scene.
+	 *
+	 * The heightmap is sampled from its red channel in [0..1]. Geometry is
+	 * generated lazily by the OpenGL renderer as a regular grid.
+	 */
+	HRL_API HRL_id HRL_CreateLandscape(HRL_id _sceneid, HRL_id _heightmap);
+	HRL_API void HRL_DeleteLandscape(HRL_id _landscape);
+	HRL_API int HRL_IsValidLandscape(HRL_id _landscape);
+	HRL_API void HRL_SetLandscapeHeightmap(HRL_id _landscape, HRL_id _heightmap);
+	HRL_API void HRL_SetLandscapePosition(HRL_id _landscape, float x, float y, float z);
+	HRL_API void HRL_SetLandscapeRotation(HRL_id _landscape, float pitch, float yaw, float roll);
+	HRL_API void HRL_SetLandscapeScale(HRL_id _landscape, float x, float y, float z);
+	HRL_API void HRL_SetLandscapeSize(HRL_id _landscape, float width, float depth);
+	HRL_API void HRL_SetLandscapeHeight(HRL_id _landscape, float height);
+	HRL_API void HRL_SetLandscapeResolution(HRL_id _landscape, HRL_uint x, HRL_uint z);
+	HRL_API void HRL_SetLandscapeUVScale(HRL_id _landscape, float u, float v);
+	HRL_API void HRL_SetLandscapeMaterial(HRL_id _landscape, HRL_id _material);
 
 	/** Creates a skeletal mesh from CPU-side data returned by the FBX importer.
 	 * HRL copies the data and the caller may free the source structure afterwards. */
@@ -1078,6 +1102,20 @@ extern "C" {
 	 */
 	HRL_API int HRL_IsValidPostProcess(HRL_id _id);
 
+	/* ============================================================================
+	 *  DECALS (OpenGL 3.3)
+	 * ============================================================================ */
+	HRL_API HRL_id HRL_CreateDecal(HRL_id scene);
+	HRL_API void HRL_DeleteDecal(HRL_id decal);
+	HRL_API int HRL_IsValidDecal(HRL_id decal);
+	HRL_API void HRL_SetDecalEnabled(HRL_id decal, int enable);
+	HRL_API void HRL_SetDecalPosition(HRL_id decal, float x, float y, float z);
+	HRL_API void HRL_SetDecalRotation(HRL_id decal, float pitch, float yaw, float roll);
+	HRL_API void HRL_SetDecalSize(HRL_id decal, float x, float y, float z);
+	HRL_API void HRL_SetDecalTexture(HRL_id decal, HRL_id texture);
+	HRL_API void HRL_SetDecalColor(HRL_id decal, float r, float g, float b);
+	HRL_API void HRL_SetDecalOpacity(HRL_id decal, float opacity);
+	HRL_API void HRL_SetDecalNormalFade(HRL_id decal, float min_dot, float max_dot);
 
 	/* ============================================================================
 	 *  SHADERS
@@ -1550,6 +1588,42 @@ extern "C" {
 	HRL_API void HRL_SetAmbientOcclusionBias(HRL_id scene, float bias);
 	HRL_API void HRL_SetAmbientOcclusionPower(HRL_id scene, float power);
 
+	/* SCREEN-SPACE REFLECTIONS (OpenGL 3.3) */
+	HRL_API void HRL_SetScreenSpaceReflectionsEnabled(HRL_id scene, int enable);
+	HRL_API void HRL_SetScreenSpaceReflectionsStrength(HRL_id scene, float strength);
+	HRL_API void HRL_SetScreenSpaceReflectionsMaxDistance(HRL_id scene, float distance);
+	HRL_API void HRL_SetScreenSpaceReflectionsThickness(HRL_id scene, float thickness);
+	HRL_API void HRL_SetScreenSpaceReflectionsFade(HRL_id scene, float start, float end);
+	HRL_API void HRL_SetScreenSpaceReflectionsSteps(HRL_id scene, HRL_uint steps);
+
+	/* VOLUMETRIC CLOUDS (OpenGL 3.3) */
+	/** Enables/disables a scene-wide volumetric cloud layer. */
+	HRL_API void HRL_SetVolumetricCloudEnabled(HRL_id scene, int enable);
+	/** Sets cloud coverage in [0..1]. Higher values produce fewer clouds. */
+	HRL_API void HRL_SetVolumetricCloudCoverage(HRL_id scene, float coverage);
+	/** Sets the density multiplier of the cloud medium. */
+	HRL_API void HRL_SetVolumetricCloudDensity(HRL_id scene, float density);
+	/** Sets the bottom and top altitude of the cloud layer in world units. */
+	HRL_API void HRL_SetVolumetricCloudHeight(HRL_id scene, float min_height, float max_height);
+	/** Sets the base 3D noise scale. */
+	HRL_API void HRL_SetVolumetricCloudScale(HRL_id scene, float scale);
+	/** Sets the fraction of high-frequency detail mixed into the base cloud shape. */
+	HRL_API void HRL_SetVolumetricCloudDetail(HRL_id scene, float detail);
+	/** Sets horizontal wind direction components and movement speed. */
+	HRL_API void HRL_SetVolumetricCloudWind(HRL_id scene, float wind_x, float wind_z, float speed);
+	/** Sets the base cloud albedo/scattering color. */
+	HRL_API void HRL_SetVolumetricCloudColor(HRL_id scene, float r, float g, float b);
+	/** Sets the sun/light color used to shade clouds. */
+	HRL_API void HRL_SetVolumetricCloudLightColor(HRL_id scene, float r, float g, float b);
+	/** Sets cloud light absorption along the light ray. */
+	HRL_API void HRL_SetVolumetricCloudLightAbsorption(HRL_id scene, float absorption);
+	/** Sets the cloud light intensity multiplier. */
+	HRL_API void HRL_SetVolumetricCloudLightIntensity(HRL_id scene, float intensity);
+	/** Sets volumetric ray-march sample count (8..96). */
+	HRL_API void HRL_SetVolumetricCloudSteps(HRL_id scene, HRL_uint steps);
+	/** Sets the maximum world-space distance traced through the cloud layer. */
+	HRL_API void HRL_SetVolumetricCloudMaxDistance(HRL_id scene, float distance);
+
 	/* ============================================================================
 	 *  MATRICES
 	 * ============================================================================ */
@@ -1581,9 +1655,13 @@ extern "C" {
 	/**
 	 * @brief Overrides the scene rendering with a diagnostic visualization mode.
 	 * Useful for inspecting normals, lighting, or other render passes in isolation.
-	 * @param mode One of HRL_DEBUG_VIEW_NONE, HRL_DEBUG_VIEW_UNLIT, HRL_DEBUG_VIEW_NORMAL, HRL_DEBUG_VIEW_LIGHTING, HRL_DEBUG_VIEW_WIREFRAME or HRL_DEBUG_VIEW_LOD.
+	 * @param mode One of HRL_DEBUG_VIEW_NONE, HRL_DEBUG_VIEW_UNLIT, HRL_DEBUG_VIEW_NORMAL, HRL_DEBUG_VIEW_LIGHTING, HRL_DEBUG_VIEW_WIREFRAME, HRL_DEBUG_VIEW_LOD or HRL_DEBUG_VIEW_MESH_INFO.
 	 */
 	HRL_API void HRL_DrawSceneAsDebugMode(HRL_id _sceneid, HRL_EDebugView mode);
+
+	HRL_API void HRL_SetDebugMeshInfoFont(HRL_id _sceneid, HRL_id _fontid);
+	HRL_API void HRL_SetDebugMeshInfoTextSize(HRL_id _sceneid, float _size);
+	HRL_API void HRL_SetDebugMeshInfoTextColor(HRL_id _sceneid, float r, float g, float b, float a);
 
 
 	/* ============================================================================
@@ -1720,6 +1798,12 @@ extern "C" {
 	HRL_API int HRL_IsValidWidget(HRL_id widget);
 
 	HRL_API void HRL_SetWidgetPosition(HRL_id widget, float x, float y);
+	/** Projects this 2D widget at a world-space location. The widget remains
+	 * screen-facing and keeps its pixel size regardless of depth. */
+	HRL_API void HRL_SetWidgetWorldPosition(HRL_id widget, float x, float y, float z);
+	/** Enables/disables projection of the widget from its world-space position. */
+	HRL_API void HRL_SetWidgetWorldPositionEnabled(HRL_id widget, int enabled);
+	HRL_API int HRL_IsWidgetWorldPositionEnabled(HRL_id widget);
 	HRL_API void HRL_SetWidgetSize(HRL_id widget, float width, float height);
 	HRL_API void HRL_SetWidgetAlpha(HRL_id widget, float a);
 	HRL_API void HRL_SetWidgetAnchor(HRL_id widget, float ax, float ay);

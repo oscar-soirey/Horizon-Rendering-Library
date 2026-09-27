@@ -2,11 +2,11 @@
 
 <img src="./docs/assets/icon.png" alt="C++Extended logo" width="128">
 
-> \\\*\\\*Version\\\*\\\* `26.6` — A lightweight, explicit rendering abstraction layer.
+> **Version** `26.6` — A lightweight, explicit rendering abstraction layer.
 
 HRL is a C/C++ rendering library designed to sit on top of multiple graphics backends (OpenGL, Vulkan, D3D11/12, Metal, and more) behind a unified, stable API. It is built around a simple principle: **nothing exists until you create it, and everything you create must be explicitly destroyed.**
 
-\---
+---
 
 ## Showcase
 
@@ -24,11 +24,15 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 |-|-|-|
 |<img src="./docs/assets/screenshots/wireframe.png" alt="Screenshot" width="300">|<img src="./docs/assets/screenshots/unlit.png" alt="Unlit" width="300">|<img src="./docs/assets/screenshots/vfx.png" alt="VFX" width="300">|
 
+|Debug Mesh Infos|UI|Landscape|
+|-|-|-|
+|<img src="./docs/assets/screenshots/debugmeshinfos.png" alt="Debug Mesh Infos" width="300">|<img src="./docs/assets/screenshots/ui.png" alt="UI" width="300">|<img src="./docs/assets/screenshots/landscape.png" alt="Landscape" width="300">|
+
 # Full Documentation
 
 [Official Site](https://oscar-soirey.github.io/Horizon-Rendering-Library)
 
-\---
+---
 
 # Credits
 
@@ -42,7 +46,7 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 * [@CodeBYMehdi](https://github.com/CodeBYMehdi)
 * contact : mehdibjjj@gmail.com
 
-\---
+---
 
 ## Table of Contents
 
@@ -63,7 +67,7 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
   * [Debug Utilities](#debug-utilities)
 * [Minimal Example](#minimal-example)
 
-\---
+---
 
 ## Supported Backends
 
@@ -78,7 +82,7 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 |`HRL_NVN`|NVN|Nintedo|
 |`HRL_GNM`|GNM|Playstation|
 
-\---
+---
 
 # Comparaison des backends graphiques
 
@@ -139,13 +143,13 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 
 
 
-\---
+---
 
 ## Core Philosophy — Explicit Object Model
 
 HRL does **not** manage object lifetimes on your behalf. Every object — scene, mesh, texture, shader, material, light, camera, viewport, font — must be explicitly created before use and explicitly destroyed when no longer needed.
 
-**If you did not call the `HRL_Create\\\*` function for an object, that object does not exist.** There are no implicit defaults loaded in the background, no hidden allocations, and no garbage collection. This design gives you full, deterministic control over GPU memory and render state.
+**If you did not call the `HRL_Create*` function for an object, that object does not exist.** There are no implicit defaults loaded in the background, no hidden allocations, and no garbage collection. This design gives you full, deterministic control over GPU memory and render state.
 
 The consequences of this model are straightforward:
 
@@ -154,9 +158,9 @@ The consequences of this model are straightforward:
 * A material without a shader is invalid.
 * A scene with no camera produces no output.
 
-Every `HRL_Create\\\*` function returns an `HRL_id`. Always check that the returned value is **not** `HRL_INVALID_ID` before using it.
+Every `HRL_Create*` function returns an `HRL_id`. Always check that the returned value is **not** `HRL_INVALID_ID` before using it.
 
-\---
+---
 
 ## Lifecycle
 
@@ -180,7 +184,7 @@ HRL_InitContext(width, height, loader)
 HRL_Shutdown() (clean every objects automatically)
 ```
 
-\---
+---
 
 ## Object Overview
 
@@ -198,7 +202,7 @@ HRL_Shutdown() (clean every objects automatically)
 |Light|`HRL_CreateLight`|Scene|
 |Post Process|`HRL_CreatePostProcess`|Scene, Material|
 
-\---
+---
 
 ## Key Functions
 
@@ -211,7 +215,7 @@ HRL_Init(HRL_uint api);
 Selects the graphics backend. Must be called first, before any other function.
 
 ```c
-HRL_InitContext(HRL_uint width, HRL_uint height, void\\\* loader);
+HRL_InitContext(HRL_uint width, HRL_uint height, void* loader);
 ```
 
 Creates the rendering context. `loader` is your platform's function loader (e.g. `glfwGetProcAddress` for OpenGL).
@@ -222,7 +226,7 @@ HRL_Shutdown();
 
 Releases all internal resources. Call before closing the window.
 
-\---
+---
 
 ### Scenes
 
@@ -238,13 +242,13 @@ Pass `HRL_True` to render directly to the screen, or `HRL_False` to render into 
 void HRL_DeleteScene(HRL_id sceneid);
 ```
 
-\---
+---
 
 ### Meshes \& Sprites
 
 ```c
-HRL_id HRL_CreateMesh(HRL_id sceneid, HRL_uint type, float\\\* vertices);
-HRL_id HRL_CreateMeshFromFile(HRL_id sceneid, HRL_uint type, const char\\\* data, size_t size);
+HRL_id HRL_CreateMesh(HRL_id sceneid, HRL_uint type, float* vertices);
+HRL_id HRL_CreateMeshFromFile(HRL_id sceneid, HRL_uint type, const char* data, size_t size);
 HRL_id HRL_CreateMeshSprite(HRL_id sceneid);
 ```
 
@@ -264,40 +268,40 @@ void HRL_SetMeshRotation(HRL_id meshid, float pitch, float yaw, float roll);
 void HRL_SetMeshScale(HRL_id meshid, float x, float y, float z);
 ```
 
-\---
+---
 
 ### Materials \& Shaders
 
 A **shader** is a compiled GPU program. A **material** is an instance of a shader with specific uniform values bound to it. The same shader can back many different materials.
 
 ```c
-HRL_id HRL_CreateShader(const char\\\* vertSrc, size_t vertSize, const char\\\* fragSrc, size_t fragSize);
+HRL_id HRL_CreateShader(const char* vertSrc, size_t vertSize, const char* fragSrc, size_t fragSize);
 HRL_id HRL_CreateMaterial(HRL_id shaderid);
 ```
 
 Setting uniforms on a material:
 
 ```c
-void HRL_MaterialSetFloat(HRL_id matid, const char\\\* name, float value);
-void HRL_MaterialSetVec3(HRL_id matid, const char\\\* name, float x, float y, float z);
-void HRL_MaterialSetTexture(HRL_id matid, const char\\\* name, HRL_id textureid);
+void HRL_MaterialSetFloat(HRL_id matid, const char* name, float value);
+void HRL_MaterialSetVec3(HRL_id matid, const char* name, float x, float y, float z);
+void HRL_MaterialSetTexture(HRL_id matid, const char* name, HRL_id textureid);
 // Also available: SetInt, SetBool, SetVec2, SetVec4
 ```
 
 HRL provides built-in default shaders for common cases: `HRL_SpriteShader`, `HRL_Mesh2DShader`, `HRL_Mesh3DShader`, `HRL_DebugShader`.
 
-\---
+---
 
 ### Textures \& Fonts
 
 ```c
-HRL_id HRL_CreateTexture(const char\\\* data, size_t size);
+HRL_id HRL_CreateTexture(const char* data, size_t size);
 ```
 
 Accepted formats: `png`, `jpeg`, `bmp`, `tga`, `gif` (first frame), `hdr`, `psd` (partial). Data must be the raw file contents read in binary mode.
 
 ```c
-HRL_id HRL_CreateTextureFromText(const char\\\* text, HRL_id fontid,
+HRL_id HRL_CreateTextureFromText(const char* text, HRL_id fontid,
     float fontSize, float wrapWidth,
     float r, float g, float b,
     float bg_r, float bg_g, float bg_b, float bg_a);
@@ -306,12 +310,12 @@ HRL_id HRL_CreateTextureFromText(const char\\\* text, HRL_id fontid,
 Rasterizes a UTF-8 string into a GPU texture. Pass `wrapWidth = 0` to disable line wrapping. Set `bg_a = 0` for a transparent background.
 
 ```c
-HRL_id HRL_CreateFont(const char\\\* data, size_t size);
+HRL_id HRL_CreateFont(const char* data, size_t size);
 ```
 
 Loads a TrueType font (`.ttf`) from a memory buffer. Required before calling `HRL_CreateTextureFromText`.
 
-\---
+---
 
 ### Lights
 
@@ -329,7 +333,7 @@ void HRL_SetLightLocation(HRL_id lightid, float x, float y, float z);
 void HRL_SetLightRotation(HRL_id lightid, float pitch, float yaw, float roll);
 ```
 
-\---
+---
 
 ### Camera \& Viewports
 
@@ -350,28 +354,28 @@ HRL_id HRL_CreateViewport(HRL_id sceneid, HRL_id cameraid, float x, float y, flo
 
 Multiple viewports can be created for the same scene, enabling split-screen or picture-in-picture setups.
 
-\---
+---
 
 ### Error Handling
 
 HRL records the last error internally. Query it after any operation that returns an `HRL_id` or may fail:
 
 ```c
-HRL_Error HRL_GetLastError(const char\\\*\\\* detail, HRL_Severity\\\* severity);
+HRL_Error HRL_GetLastError(const char** detail, HRL_Severity* severity);
 ```
 
 For continuous monitoring, register a callback that will be invoked every time an error occurs:
 
 ```c
 void HRL_RegisterErrorCallback(HRL_ErrorCallback callback);
-// Signature: void callback(HRL_Error code, HRL_Severity severity, const char\\\* detail)
+// Signature: void callback(HRL_Error code, HRL_Severity severity, const char* detail)
 ```
 
 The convenience macro `HRL_CheckErrors()` prints any pending error to stdout, including the source file and line number. Suitable for debug builds.
 
 Severity levels: `HRL_SEVERITY_WEAK_WARNING` · `HRL_SEVERITY_WARNING` · `HRL_SEVERITY_ERROR` · `HRL_SEVERITY_FATAL`
 
-\---
+---
 
 ### Debug Utilities
 
@@ -395,10 +399,10 @@ void HRL_DrawDebugPoint(...);     // Screen-space point
 **Screenshot:**
 
 ```c
-void HRL_TakeScreenshot(HRL_id sceneid, const char\\\* path); // Saves as PNG
+void HRL_TakeScreenshot(HRL_id sceneid, const char* path); // Saves as PNG
 ```
 
-\---
+---
 
 ## Minimal Example
 
@@ -436,7 +440,7 @@ while (!glfwWindowShouldClose(window)) {
 HRL_Shutdown();
 ```
 
-\---
+---
 
 *HRL is licensed under the Apache License 2.0. See* [*LICENSE*](http://www.apache.org/licenses/LICENSE-2.0) *for details.
 Contact: oscarsoirey.contact@gmail.com*

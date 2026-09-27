@@ -816,6 +816,13 @@ void HRL_Shutdown()
 		}
 		scene->lights.clear();
 
+		for (const auto& [id, landscape] : scene->landscapes)
+		{
+			(void)id;
+			delete landscape;
+		}
+		scene->landscapes.clear();
+
 		std::vector<HRL_id> vfx_system_ids;
 		vfx_system_ids.reserve(scene->vfx_systems.size());
 		for (const auto& [id, system] : scene->vfx_systems) { (void)system; vfx_system_ids.push_back(id); }
@@ -826,6 +833,12 @@ void HRL_Shutdown()
 			delete fog;
 		}
 		scene->volumetric_fogs.clear();
+
+		for (const auto& [id, decal] : scene->decals)
+		{
+			delete decal;
+		}
+		scene->decals.clear();
 
 		for (const auto& [id, viewport] : scene->viewports)
 		{
@@ -848,8 +861,10 @@ void HRL_Shutdown()
 
 	//nettoyer les caches flat
 	ctx_.meshes.clear();
+	ctx_.landscapes.clear();
 	ctx_.lights.clear();
 	ctx_.volumetric_fogs.clear();
+	ctx_.decals.clear();
 	ctx_.vfx_systems.clear();
 	ctx_.vfx_emitters.clear();
 	ctx_.vfx_curves.clear();
@@ -1988,8 +2003,9 @@ void HRL_DeleteScene(HRL_id _sceneid)
 	}
 
 	//on collecte les IDs d'abord pour eviter l'invalidation d'iterateur
-	std::vector<HRL_id> mesh_ids, light_ids, fog_ids, gizmo_ids, vfx_system_ids, viewport_ids, camera_ids;
+	std::vector<HRL_id> mesh_ids, landscape_ids, light_ids, fog_ids, gizmo_ids, vfx_system_ids, viewport_ids, camera_ids;
 	for (const auto& [id, mesh]     : it->second->meshes)          mesh_ids.push_back(id);
+	for (const auto& [id, landscape] : it->second->landscapes)   { (void)landscape; landscape_ids.push_back(id); }
 	for (const auto& [id, light]    : it->second->lights)         light_ids.push_back(id);
 	for (const auto& [id, fog]      : it->second->volumetric_fogs) fog_ids.push_back(id);
 	for (const auto& [id, gizmo]   : it->second->gizmos)          gizmo_ids.push_back(id);
@@ -1999,6 +2015,7 @@ void HRL_DeleteScene(HRL_id _sceneid)
 
 	//delete every objects that owns the scene
 	for (auto id : mesh_ids)      HRL_DeleteMesh(id);
+	for (auto id : landscape_ids) HRL_DeleteLandscape(id);
 	for (auto id : light_ids)     HRL_DeleteLight(id);
 	for (auto id : fog_ids)       HRL_DeleteVolumetricFog(id);
 	for (auto id : gizmo_ids)     HRL_DeleteGizmo(id);
@@ -3908,7 +3925,226 @@ void HRL_SetAmbientOcclusionPower(HRL_id scene, float power)
 	it->second->ambient_occlusion_power = power;
 }
 
+void HRL_SetScreenSpaceReflectionsEnabled(HRL_id scene, int enable)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetScreenSpaceReflectionsEnabled: invalid scene ID"); return; }
+	it->second->screen_space_reflections_enabled = (enable != 0);
+}
 
+void HRL_SetScreenSpaceReflectionsStrength(HRL_id scene, float strength)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetScreenSpaceReflectionsStrength: invalid scene ID"); return; }
+	if (!std::isfinite(strength)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetScreenSpaceReflectionsStrength: strength must be finite"); return; }
+	it->second->screen_space_reflections_strength = std::max(0.0f, strength);
+}
+
+void HRL_SetScreenSpaceReflectionsMaxDistance(HRL_id scene, float distance)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetScreenSpaceReflectionsMaxDistance: invalid scene ID"); return; }
+	if (!std::isfinite(distance) || distance <= 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetScreenSpaceReflectionsMaxDistance: distance must be > 0"); return; }
+	it->second->screen_space_reflections_max_distance = distance;
+}
+
+void HRL_SetScreenSpaceReflectionsThickness(HRL_id scene, float thickness)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetScreenSpaceReflectionsThickness: invalid scene ID"); return; }
+	if (!std::isfinite(thickness) || thickness <= 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetScreenSpaceReflectionsThickness: thickness must be > 0"); return; }
+	it->second->screen_space_reflections_thickness = thickness;
+}
+
+void HRL_SetScreenSpaceReflectionsFade(HRL_id scene, float start, float end)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetScreenSpaceReflectionsFade: invalid scene ID"); return; }
+	if (!std::isfinite(start) || !std::isfinite(end) || end <= start) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetScreenSpaceReflectionsFade: invalid fade range"); return; }
+	it->second->screen_space_reflections_fade_start = glm::clamp(start, 0.0f, 0.99f);
+	it->second->screen_space_reflections_fade_end = glm::clamp(end, 0.0f, 1.0f);
+	if (it->second->screen_space_reflections_fade_end <= it->second->screen_space_reflections_fade_start)
+		it->second->screen_space_reflections_fade_end = std::min(1.0f, it->second->screen_space_reflections_fade_start + 0.01f);
+}
+
+void HRL_SetScreenSpaceReflectionsSteps(HRL_id scene, HRL_uint steps)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetScreenSpaceReflectionsSteps: invalid scene ID"); return; }
+	it->second->screen_space_reflections_steps = std::max<HRL_uint>(8u, std::min<HRL_uint>(96u, steps));
+}
+
+void HRL_SetVolumetricCloudEnabled(HRL_id scene, int enable)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudEnabled: invalid scene ID"); return; }
+	it->second->volumetric_cloud_enabled = (enable != HRL_FALSE);
+}
+
+void HRL_SetVolumetricCloudCoverage(HRL_id scene, float coverage)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudCoverage: invalid scene ID"); return; }
+	if (!std::isfinite(coverage)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudCoverage: coverage must be finite"); return; }
+	it->second->volumetric_cloud_coverage = glm::clamp(coverage, 0.0f, 1.0f);
+}
+
+void HRL_SetVolumetricCloudDensity(HRL_id scene, float density)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudDensity: invalid scene ID"); return; }
+	if (!std::isfinite(density) || density < 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudDensity: density must be finite and >= 0"); return; }
+	it->second->volumetric_cloud_density = density;
+}
+
+void HRL_SetVolumetricCloudHeight(HRL_id scene, float min_height, float max_height)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudHeight: invalid scene ID"); return; }
+	if (!std::isfinite(min_height) || !std::isfinite(max_height) || max_height <= min_height + 0.001f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudHeight: max height must be greater than min height"); return; }
+	it->second->volumetric_cloud_height_min = min_height;
+	it->second->volumetric_cloud_height_max = max_height;
+}
+
+void HRL_SetVolumetricCloudScale(HRL_id scene, float scale)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudScale: invalid scene ID"); return; }
+	if (!std::isfinite(scale) || scale <= 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudScale: scale must be > 0"); return; }
+	it->second->volumetric_cloud_scale = scale;
+}
+
+void HRL_SetVolumetricCloudDetail(HRL_id scene, float detail)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudDetail: invalid scene ID"); return; }
+	if (!std::isfinite(detail)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudDetail: detail must be finite"); return; }
+	it->second->volumetric_cloud_detail = glm::clamp(detail, 0.0f, 1.0f);
+}
+
+void HRL_SetVolumetricCloudWind(HRL_id scene, float wind_x, float wind_z, float speed)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudWind: invalid scene ID"); return; }
+	if (!std::isfinite(wind_x) || !std::isfinite(wind_z) || !std::isfinite(speed) || speed < 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudWind: invalid wind parameters"); return; }
+	it->second->volumetric_cloud_wind = glm::vec2(wind_x, wind_z);
+	it->second->volumetric_cloud_wind_speed = speed;
+}
+
+void HRL_SetVolumetricCloudColor(HRL_id scene, float r, float g, float b)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudColor: invalid scene ID"); return; }
+	if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudColor: color must contain finite values"); return; }
+	it->second->volumetric_cloud_color = glm::clamp(glm::vec3(r, g, b), glm::vec3(0.0f), glm::vec3(1.0f));
+}
+
+void HRL_SetVolumetricCloudLightColor(HRL_id scene, float r, float g, float b)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudLightColor: invalid scene ID"); return; }
+	if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudLightColor: color must contain finite values"); return; }
+	it->second->volumetric_cloud_light_color = glm::clamp(glm::vec3(r, g, b), glm::vec3(0.0f), glm::vec3(8.0f));
+}
+
+void HRL_SetVolumetricCloudLightAbsorption(HRL_id scene, float absorption)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudLightAbsorption: invalid scene ID"); return; }
+	if (!std::isfinite(absorption) || absorption < 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudLightAbsorption: absorption must be finite and >= 0"); return; }
+	it->second->volumetric_cloud_light_absorption = absorption;
+}
+
+void HRL_SetVolumetricCloudLightIntensity(HRL_id scene, float intensity)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudLightIntensity: invalid scene ID"); return; }
+	if (!std::isfinite(intensity) || intensity < 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudLightIntensity: intensity must be finite and >= 0"); return; }
+	it->second->volumetric_cloud_light_intensity = intensity;
+}
+
+void HRL_SetVolumetricCloudSteps(HRL_id scene, HRL_uint steps)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudSteps: invalid scene ID"); return; }
+	it->second->volumetric_cloud_steps = std::max<HRL_uint>(8u, std::min<HRL_uint>(96u, steps));
+}
+
+void HRL_SetVolumetricCloudMaxDistance(HRL_id scene, float distance)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudMaxDistance: invalid scene ID"); return; }
+	if (!std::isfinite(distance) || distance <= 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVolumetricCloudMaxDistance: distance must be > 0"); return; }
+	it->second->volumetric_cloud_max_distance = distance;
+}
+
+
+HRL_id HRL_CreateDecal(HRL_id scene)
+{
+	auto sceneIt = ctx_.scenes.find(scene);
+	if (sceneIt == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateDecal: invalid scene ID"); return HRL_INVALID_ID; }
+	auto* decal = new (std::nothrow) HRL_Decal();
+	if (!decal) { SetErrorCode(HRL_OUT_OF_MEMORY, HRL_SEVERITY_ERROR, "HRL_CreateDecal: failed to allocate decal"); return HRL_INVALID_ID; }
+	const HRL_id id = GenerateHRL_ID();
+	decal->id_ = id;
+	decal->scene_ = scene;
+	sceneIt->second->decals.emplace(id, decal);
+	ctx_.decals.emplace(id, decal);
+	return id;
+}
+
+void HRL_DeleteDecal(HRL_id decalId)
+{
+	auto it = ctx_.decals.find(decalId);
+	if (it == ctx_.decals.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteDecal: invalid ID"); return; }
+	if (auto sceneIt = ctx_.scenes.find(it->second->scene_); sceneIt != ctx_.scenes.end())
+		sceneIt->second->decals.erase(decalId);
+	delete it->second;
+	ctx_.decals.erase(it);
+}
+
+static HRL_Decal* GetDecalForEdit(HRL_id id, const char* fn)
+{
+	auto it = ctx_.decals.find(id);
+	if (it == ctx_.decals.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, std::string(fn) + ": invalid decal ID"); return nullptr; }
+	return it->second;
+}
+
+void HRL_SetDecalEnabled(HRL_id id, int enable)
+{
+	if (auto* d = GetDecalForEdit(id, "HRL_SetDecalEnabled")) d->enabled = (enable != 0);
+}
+void HRL_SetDecalPosition(HRL_id id, float x, float y, float z)
+{
+	if (auto* d = GetDecalForEdit(id, "HRL_SetDecalPosition")) { if (!std::isfinite(x)||!std::isfinite(y)||!std::isfinite(z)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetDecalPosition: invalid position"); return; } d->position = glm::vec3(x,y,z); }
+}
+void HRL_SetDecalRotation(HRL_id id, float pitch, float yaw, float roll)
+{
+	if (auto* d = GetDecalForEdit(id, "HRL_SetDecalRotation")) { if (!std::isfinite(pitch)||!std::isfinite(yaw)||!std::isfinite(roll)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetDecalRotation: invalid rotation"); return; } d->rotation = glm::vec3(pitch,yaw,roll); }
+}
+void HRL_SetDecalSize(HRL_id id, float x, float y, float z)
+{
+	if (auto* d = GetDecalForEdit(id, "HRL_SetDecalSize")) { if (!std::isfinite(x)||!std::isfinite(y)||!std::isfinite(z)||x<=0||y<=0||z<=0) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetDecalSize: size must be > 0"); return; } d->size=glm::vec3(x,y,z); }
+}
+void HRL_SetDecalTexture(HRL_id id, HRL_id texture)
+{
+	if (auto* d = GetDecalForEdit(id, "HRL_SetDecalTexture")) d->texture = texture;
+}
+void HRL_SetDecalColor(HRL_id id, float r, float g, float b)
+{
+	if (auto* d = GetDecalForEdit(id, "HRL_SetDecalColor")) { if (!std::isfinite(r)||!std::isfinite(g)||!std::isfinite(b)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetDecalColor: invalid color"); return; } d->color=glm::clamp(glm::vec3(r,g,b), glm::vec3(0.0f), glm::vec3(1.0f)); }
+}
+void HRL_SetDecalOpacity(HRL_id id, float opacity)
+{
+	if (auto* d = GetDecalForEdit(id, "HRL_SetDecalOpacity")) { if (!std::isfinite(opacity)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetDecalOpacity: opacity must be finite"); return; } d->opacity=glm::clamp(opacity,0.0f,1.0f); }
+}
+void HRL_SetDecalNormalFade(HRL_id id, float min_dot, float max_dot)
+{
+	if (auto* d = GetDecalForEdit(id, "HRL_SetDecalNormalFade")) { if (!std::isfinite(min_dot)||!std::isfinite(max_dot)) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetDecalNormalFade: values must be finite"); return; } d->normal_fade_min=glm::clamp(min_dot,0.0f,1.0f); d->normal_fade_max=glm::clamp(max_dot,0.0f,1.0f); if (d->normal_fade_max <= d->normal_fade_min) d->normal_fade_max=std::min(1.0f,d->normal_fade_min+0.01f); }
+}
+
+int HRL_IsValidDecal(HRL_id id)
+{ return ctx_.decals.find(id) != ctx_.decals.end() ? 1 : 0; }
 
 //MATRICES
 void HRL_GetProjectionMatrix(float *aa)
@@ -6402,6 +6638,203 @@ HRL_id HRL_CreateMaterialFromFBXIndexedWithShader(
 	return material;
 }
 
+static HRL_Landscape* GetLandscapeForEdit(HRL_id id, const char* fn)
+{
+	auto it = ctx_.landscapes.find(id);
+	if (it == ctx_.landscapes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, std::string(fn) + ": invalid landscape ID");
+		return nullptr;
+	}
+	return it->second;
+}
+
+HRL_id HRL_CreateLandscape(HRL_id _sceneid, HRL_id _heightmap)
+{
+	auto sceneIt = ctx_.scenes.find(_sceneid);
+	if (sceneIt == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateLandscape: invalid scene ID");
+		return HRL_INVALID_ID;
+	}
+	if (_heightmap == HRL_INVALID_ID || !g_Backend.RHI_IsValidTexture || !g_Backend.RHI_IsValidTexture(_heightmap))
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateLandscape: invalid heightmap texture ID");
+		return HRL_INVALID_ID;
+	}
+	auto* landscape = new (std::nothrow) HRL_Landscape();
+	if (!landscape)
+	{
+		SetErrorCode(HRL_OUT_OF_MEMORY, HRL_SEVERITY_ERROR, "HRL_CreateLandscape: allocation failed");
+		return HRL_INVALID_ID;
+	}
+	const HRL_id id = GenerateHRL_ID();
+	landscape->id_ = id;
+	landscape->scene_ = _sceneid;
+	landscape->heightmap_ = _heightmap;
+	sceneIt->second->landscapes.emplace(id, landscape);
+	ctx_.landscapes.emplace(id, landscape);
+	sceneIt->second->shadows_dirty = true;
+	++sceneIt->second->gi_geometry_revision;
+	return id;
+}
+
+void HRL_DeleteLandscape(HRL_id _landscape)
+{
+	auto it = ctx_.landscapes.find(_landscape);
+	if (it == ctx_.landscapes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_DeleteLandscape: invalid landscape ID");
+		return;
+	}
+	HRL_Landscape* landscape = it->second;
+	if (auto sceneIt = ctx_.scenes.find(landscape->scene_); sceneIt != ctx_.scenes.end())
+	{
+		sceneIt->second->landscapes.erase(_landscape);
+		sceneIt->second->shadows_dirty = true;
+		++sceneIt->second->gi_geometry_revision;
+	}
+	ctx_.landscapes.erase(it);
+	delete landscape;
+}
+
+int HRL_IsValidLandscape(HRL_id _landscape)
+{
+	return ctx_.landscapes.find(_landscape) != ctx_.landscapes.end() ? HRL_TRUE : HRL_FALSE;
+}
+
+void HRL_SetLandscapeHeightmap(HRL_id _landscape, HRL_id _heightmap)
+{
+	HRL_Landscape* landscape = GetLandscapeForEdit(_landscape, "HRL_SetLandscapeHeightmap");
+	if (!landscape) return;
+	if (_heightmap == HRL_INVALID_ID || !g_Backend.RHI_IsValidTexture || !g_Backend.RHI_IsValidTexture(_heightmap))
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLandscapeHeightmap: invalid heightmap texture ID");
+		return;
+	}
+	landscape->heightmap_ = _heightmap;
+	++landscape->revision_;
+	if (auto it = ctx_.scenes.find(landscape->scene_); it != ctx_.scenes.end())
+	{
+		it->second->shadows_dirty = true;
+		++it->second->gi_geometry_revision;
+	}
+}
+
+void HRL_SetLandscapePosition(HRL_id _landscape, float x, float y, float z)
+{
+	HRL_Landscape* landscape = GetLandscapeForEdit(_landscape, "HRL_SetLandscapePosition");
+	if (!landscape) return;
+	if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetLandscapePosition: values must be finite");
+		return;
+	}
+	landscape->position_ = glm::vec3(x, y, z);
+	if (auto it = ctx_.scenes.find(landscape->scene_); it != ctx_.scenes.end()) MarkSceneGIGeometryDirty(it->second);
+}
+
+void HRL_SetLandscapeRotation(HRL_id _landscape, float pitch, float yaw, float roll)
+{
+	HRL_Landscape* landscape = GetLandscapeForEdit(_landscape, "HRL_SetLandscapeRotation");
+	if (!landscape) return;
+	if (!std::isfinite(pitch) || !std::isfinite(yaw) || !std::isfinite(roll))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetLandscapeRotation: values must be finite");
+		return;
+	}
+	landscape->rotation_ = glm::vec3(pitch, yaw, roll);
+	if (auto it = ctx_.scenes.find(landscape->scene_); it != ctx_.scenes.end()) MarkSceneGIGeometryDirty(it->second);
+}
+
+void HRL_SetLandscapeScale(HRL_id _landscape, float x, float y, float z)
+{
+	HRL_Landscape* landscape = GetLandscapeForEdit(_landscape, "HRL_SetLandscapeScale");
+	if (!landscape) return;
+	if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || x <= 0.f || y <= 0.f || z <= 0.f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetLandscapeScale: scale components must be finite and > 0");
+		return;
+	}
+	landscape->scale_ = glm::vec3(x, y, z);
+	if (auto it = ctx_.scenes.find(landscape->scene_); it != ctx_.scenes.end()) MarkSceneGIGeometryDirty(it->second);
+}
+
+void HRL_SetLandscapeSize(HRL_id _landscape, float width, float depth)
+{
+	HRL_Landscape* landscape = GetLandscapeForEdit(_landscape, "HRL_SetLandscapeSize");
+	if (!landscape) return;
+	if (!std::isfinite(width) || !std::isfinite(depth) || width <= 0.f || depth <= 0.f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetLandscapeSize: width/depth must be finite and > 0");
+		return;
+	}
+	landscape->size_ = glm::vec2(width, depth);
+	if (auto it = ctx_.scenes.find(landscape->scene_); it != ctx_.scenes.end()) MarkSceneGIGeometryDirty(it->second);
+}
+
+void HRL_SetLandscapeHeight(HRL_id _landscape, float height)
+{
+	HRL_Landscape* landscape = GetLandscapeForEdit(_landscape, "HRL_SetLandscapeHeight");
+	if (!landscape) return;
+	if (!std::isfinite(height) || height <= 0.f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetLandscapeHeight: height must be finite and > 0");
+		return;
+	}
+	landscape->height_scale_ = height;
+	++landscape->revision_;
+	if (auto it = ctx_.scenes.find(landscape->scene_); it != ctx_.scenes.end())
+	{
+		it->second->shadows_dirty = true;
+		++it->second->gi_geometry_revision;
+	}
+}
+
+void HRL_SetLandscapeResolution(HRL_id _landscape, HRL_uint x, HRL_uint z)
+{
+	HRL_Landscape* landscape = GetLandscapeForEdit(_landscape, "HRL_SetLandscapeResolution");
+	if (!landscape) return;
+	x = std::clamp<HRL_uint>(x, 2u, 512u);
+	z = std::clamp<HRL_uint>(z, 2u, 512u);
+	if (landscape->resolution_x_ == x && landscape->resolution_z_ == z) return;
+	landscape->resolution_x_ = x;
+	landscape->resolution_z_ = z;
+	++landscape->revision_;
+	if (auto it = ctx_.scenes.find(landscape->scene_); it != ctx_.scenes.end())
+	{
+		it->second->shadows_dirty = true;
+		++it->second->gi_geometry_revision;
+	}
+}
+
+void HRL_SetLandscapeUVScale(HRL_id _landscape, float u, float v)
+{
+	HRL_Landscape* landscape = GetLandscapeForEdit(_landscape, "HRL_SetLandscapeUVScale");
+	if (!landscape) return;
+	if (!std::isfinite(u) || !std::isfinite(v) || u <= 0.f || v <= 0.f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetLandscapeUVScale: values must be finite and > 0");
+		return;
+	}
+	landscape->uv_scale_ = glm::vec2(u, v);
+}
+
+void HRL_SetLandscapeMaterial(HRL_id _landscape, HRL_id _material)
+{
+	HRL_Landscape* landscape = GetLandscapeForEdit(_landscape, "HRL_SetLandscapeMaterial");
+	if (!landscape) return;
+	if (_material != HRL_INVALID_ID && ctx_.materials.find(_material) == ctx_.materials.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLandscapeMaterial: invalid material ID");
+		return;
+	}
+	landscape->material_ = _material;
+	if (auto it = ctx_.scenes.find(landscape->scene_); it != ctx_.scenes.end())
+		it->second->shadows_dirty = true;
+	MarkAllScenesGILightingDirty();
+}
+
 HRL_id HRL_CreateSkeletalMesh(HRL_id _sceneid, const HRL_SkeletalMeshData* _data)
 {
 	auto sceneIt = ctx_.scenes.find(_sceneid);
@@ -6951,6 +7384,7 @@ void HRL_DrawSceneAsDebugMode(HRL_id _sceneid, HRL_EDebugView mode)
 	case HRL_DEBUG_VIEW_LIGHTS:
 	case HRL_DEBUG_VIEW_WIREFRAME:
 	case HRL_DEBUG_VIEW_LOD:
+	case HRL_DEBUG_VIEW_MESH_INFO:
 		it->second->debug_view = mode;
 		break;
 	default:
@@ -6960,6 +7394,57 @@ void HRL_DrawSceneAsDebugMode(HRL_id _sceneid, HRL_EDebugView mode)
 }
 
 
+
+void HRL_SetDebugMeshInfoFont(HRL_id _sceneid, HRL_id _fontid)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetDebugMeshInfoFont: invalid scene ID");
+		return;
+	}
+	if (_fontid != HRL_INVALID_ID && ctx_.fonts.find(_fontid) == ctx_.fonts.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetDebugMeshInfoFont: invalid font ID");
+		return;
+	}
+	it->second->debug_mesh_info_font = _fontid;
+}
+
+void HRL_SetDebugMeshInfoTextSize(HRL_id _sceneid, float _size)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetDebugMeshInfoTextSize: invalid scene ID");
+		return;
+	}
+	if (!std::isfinite(_size) || _size <= 0.0f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetDebugMeshInfoTextSize: size must be finite and positive");
+		return;
+	}
+	// Debug mesh info text size is expressed in screen pixels.
+	// Keep the value as-is so the OpenGL debug pass can render it at the
+	// requested pixel height independently of the viewport resolution.
+	it->second->debug_mesh_info_text_size = std::clamp(_size, 1.0f, 256.0f);
+}
+
+void HRL_SetDebugMeshInfoTextColor(HRL_id _sceneid, float r, float g, float b, float a)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetDebugMeshInfoTextColor: invalid scene ID");
+		return;
+	}
+	if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b) || !std::isfinite(a))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetDebugMeshInfoTextColor: color values must be finite");
+		return;
+	}
+	it->second->debug_mesh_info_text_color = glm::clamp(glm::vec4(r, g, b, a), glm::vec4(0.0f), glm::vec4(1.0f));
+}
 
 static HRL_Widget* FindWidget(HRL_id widget)
 {
@@ -7105,6 +7590,44 @@ void HRL_SetWidgetPosition(HRL_id widget, float x, float y)
 		return;
 	}
 	w->SetPosition(x, y);
+}
+
+void HRL_SetWidgetWorldPosition(HRL_id widget, float x, float y, float z)
+{
+	HRL_Widget* w = FindWidget(widget);
+	if (!w)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetWidgetWorldPosition: invalid widget ID");
+		return;
+	}
+	if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetWidgetWorldPosition: coordinates must be finite");
+		return;
+	}
+	w->SetWorldPosition(x, y, z);
+}
+
+void HRL_SetWidgetWorldPositionEnabled(HRL_id widget, int enabled)
+{
+	HRL_Widget* w = FindWidget(widget);
+	if (!w)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetWidgetWorldPositionEnabled: invalid widget ID");
+		return;
+	}
+	w->SetWorldPositionEnabled(enabled != HRL_FALSE);
+}
+
+int HRL_IsWidgetWorldPositionEnabled(HRL_id widget)
+{
+	HRL_Widget* w = FindWidget(widget);
+	if (!w)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_IsWidgetWorldPositionEnabled: invalid widget ID");
+		return HRL_FALSE;
+	}
+	return w->IsWorldPositionEnabled() ? HRL_TRUE : HRL_FALSE;
 }
 
 void HRL_SetWidgetSize(HRL_id widget, float width, float height)

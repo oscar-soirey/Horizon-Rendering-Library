@@ -14,6 +14,7 @@
 #include <future>
 #include <iterator>
 #include <cstdio>
+#include <vector>
 
 #include "src/example.h"
 
@@ -409,21 +410,27 @@ int main()
       }
   );
 
-  auto floorAlbedoFuture = ReadBinaryFileAsync("floor/Tiles086_1K-JPG_Color.jpg");
-  auto floorNormalFuture = ReadBinaryFileAsync("floor/Tiles086_1K-JPG_NormalGL.jpg");
-  auto floorRoughnessFuture = ReadBinaryFileAsync("floor/Tiles086_1K-JPG_Roughness.jpg");
-  auto floorDisplacementFuture = ReadBinaryFileAsync("floor/Tiles086_1K-JPG_Displacement.jpg");
+  auto floorAlbedoFuture = ReadBinaryFileAsync("wall/Rock064_4K-JPG_Color.jpg");
+  auto floorNormalFuture = ReadBinaryFileAsync("wall/Rock064_4K-JPG_NormalGL.jpg");
+  auto floorRoughnessFuture = ReadBinaryFileAsync("wall/Rock064_4K-JPG_Roughness.jpg");
+  auto floorDisplacementFuture = ReadBinaryFileAsync("wall/Rock064_4K-JPG_Displacement.jpg");
+  auto floorAOFuture = ReadBinaryFileAsync("wall/Rock064_4K-JPG_AmbientOcclusion.jpg");
+  auto heightmapFuture = ReadBinaryFileAsync("heightmap700.jpg");
 
   // Queue every texture for HRL's async CPU decode / GPU upload.
   HRL_id skyTexture = QueueTextureFromFuture(skyDataFuture, "MorningSkyHDRI011B_12K_TONEMAPPED.jpg");
   HRL_id floorAlbedoTexture = QueueTextureFromFuture(
-      floorAlbedoFuture, "floor/Tiles086_1K-JPG_Color.jpg");
+      floorAlbedoFuture, "wall/Rock064_4K-JPG_Color.jpg");
   HRL_id floorNormalTexture = QueueTextureFromFuture(
-      floorNormalFuture, "floor/Tiles086_1K-JPG_NormalGL.jpg");
+      floorNormalFuture, "wall/Rock064_4K-JPG_NormalGL.jpg");
   HRL_id floorRoughnessTexture = QueueTextureFromFuture(
-      floorRoughnessFuture, "floor/Tiles086_1K-JPG_Roughness.jpg");
+      floorRoughnessFuture, "wall/Rock064_4K-JPG_Roughness.jpg");
   HRL_id floorDisplacementTexture = QueueTextureFromFuture(
-      floorDisplacementFuture, "floor/Tiles086_1K-JPG_Displacement.jpg");
+      floorDisplacementFuture, "wall/Rock064_4K-JPG_Displacement.jpg");
+    HRL_id floorAOTexture = QueueTextureFromFuture(
+    floorAOFuture, "wall/Rock064_4K-JPG_AmbientOcclusion.jpg");
+    HRL_id heightmapTexture = QueueTextureFromFuture(
+    heightmapFuture, "heightmap700.jpg");
 
 
   HRL_SetDebugLineThickness(3.f);
@@ -471,6 +478,101 @@ int main()
     HRL_id post_mat = HRL_CreateMaterial(HRL_DEFAULT_POST_PROCESS_SHADER);
     HRL_id post_process = HRL_CreatePostProcess(viewport, post_mat, 1);
     HRL_MaterialSetFloat(post_mat, "bloomStrength", 0.f);
+
+
+
+    HRL_SetVolumetricCloudEnabled(scene, 0);
+    HRL_SetVolumetricCloudCoverage(scene, 0.58f);
+    HRL_SetVolumetricCloudDensity(scene, 1.15f);
+    HRL_SetVolumetricCloudHeight(scene, 100.0f, 180.0f);
+    HRL_SetVolumetricCloudWind(scene, 0.15f, 0.18f, 0.1f);
+    HRL_SetVolumetricCloudSteps(scene, 32);
+
+
+
+    HRL_id sun = HRL_CreateLight(scene, HRL_DIRECTIONAL_LIGHT);
+
+    HRL_SetLightColor(sun, 1.0f, 0.92f, 0.78f);
+    HRL_SetLightIntensity(sun, 2.0f);
+    HRL_SetLightRotation(sun, -45.0f, -35.0f, 0.0f);
+
+    HRL_SetLightCastShadows(sun, HRL_TRUE);
+    HRL_SetLightShadowBias(sun, 0.002f);
+    HRL_SetLightShadowStrength(sun, 0.85f);
+    HRL_SetLightShadowResolution(sun, 2048);
+
+
+    HRL_SetScreenSpaceReflectionsEnabled(scene, HRL_TRUE);
+
+    HRL_SetScreenSpaceReflectionsStrength(scene, 0.8f);
+    HRL_SetScreenSpaceReflectionsMaxDistance(scene, 60.0f);
+    HRL_SetScreenSpaceReflectionsThickness(scene, 0.2f);
+
+    HRL_SetScreenSpaceReflectionsFade(
+        scene,
+        10.0f,   // début du fade
+        55.0f    // disparition
+    );
+
+    HRL_SetScreenSpaceReflectionsSteps(scene, 48);
+
+    HRL_SetFogEnabled(scene, 0);
+
+    HRL_SetGlobalVolumetricFogEnabled(scene, 0);
+
+    HRL_SetGlobalVolumetricFogDensity(scene, 0.01f);
+    HRL_SetGlobalVolumetricFogColor(
+        scene,
+        0.35f,
+        0.45f,
+        0.55f
+    );
+
+    HRL_SetGlobalVolumetricFogSteps(scene, 24);
+
+
+
+    HRL_id decal = HRL_CreateDecal(scene);
+
+    HRL_SetDecalEnabled(decal, HRL_TRUE);
+
+    HRL_SetDecalPosition(
+        decal,
+        0.0f,
+        0.02f,
+        0.0f
+    );
+
+    HRL_SetDecalRotation(
+        decal,
+        0.0f,
+        0.0f,
+        0.0f
+    );
+
+    HRL_SetDecalSize(
+        decal,
+        2.0f,
+        1.0f,
+        2.0f
+    );
+
+    HRL_SetDecalTexture(decal, floorNormalTexture);
+
+    HRL_SetDecalColor(
+        decal,
+        1.0f,
+        1.0f,
+        1.0f
+    );
+
+    HRL_SetDecalOpacity(decal, 0.9f);
+
+    HRL_SetDecalNormalFade(
+        decal,
+        0.6f,
+        0.95f
+    );
 
 
 
@@ -616,6 +718,12 @@ int main()
       gizmo,
       HRL_TRUE
   );
+
+
+
+
+
+
 
 
   // ---------------------------------------------------------------------------
@@ -894,9 +1002,11 @@ int main()
     if (!HRL_IsTextureReady(floorAlbedoTexture) ||
         !HRL_IsTextureReady(floorNormalTexture) ||
         !HRL_IsTextureReady(floorRoughnessTexture) ||
-        !HRL_IsTextureReady(floorDisplacementTexture))
+        !HRL_IsTextureReady(floorDisplacementTexture) ||
+        !HRL_IsTextureReady(floorAOTexture) ||
+        !HRL_IsTextureReady(heightmapTexture))
     {
-      std::printf("Une ou plusieurs textures du sol n'ont pas pu être chargées.\n");
+      printf("Une ou plusieurs textures du sol n'ont pas pu être chargées.\n");
       HRL_Shutdown();
       glfwDestroyWindow(win);
       glfwTerminate();
@@ -953,6 +1063,14 @@ int main()
         floorMaterial,
         HRL_T_ROUGHNESS,
         roughnessTexture
+    );
+
+    //AO
+    HRL_id aoTexture = floorAOTexture;
+        HRL_MaterialSetTexture(
+        floorMaterial,
+        HRL_T_AMBIENT_OCCLUSION,
+        aoTexture
     );
 
     // ------------------------------------------------------------
@@ -1040,7 +1158,7 @@ int main()
 
     HRL_id sky =
     HRL_CreateLight(scene, HRL_SKY_LIGHT);
-    HRL_SetLightIntensity(sky, 0.15f);
+    HRL_SetLightIntensity(sky, 0.35f);
     HRL_SetLightColor(sky, 1.f, 0.9f, 0.8f);
 
     HRL_SetAmbientOcclusionEnabled(scene, HRL_TRUE);
@@ -1050,66 +1168,51 @@ int main()
     HRL_SetAmbientOcclusionBias(scene, 0.03f);
     HRL_SetAmbientOcclusionPower(scene, 1.4f);
 
-  // ---------------------------------------------------------------------------
-  // Point light + shadow map cubemap.
-  // ---------------------------------------------------------------------------
 
-  HRL_id light =
-      HRL_CreateLight(
-          scene,
-          HRL_POINT_LIGHT
-      );
 
-  HRL_SetLightAttenuation(
-      light,
-      0.012f
-  );
 
-  HRL_SetLightIntensity(
-      light,
-      5.f
-  );
 
-  HRL_SetLightColor(
-      light,
-      1.f,
-      0.9f,
-      0.75f
-  );
 
-  HRL_SetLightLocation(
-      light,
-      5.f,
-      7.f,
-      5.f
-  );
+    //Landscape
+    HRL_id heightmapT = heightmapTexture;
+    HRL_id landscape = HRL_CreateLandscape(scene, heightmapT);
 
-  HRL_SetLightRotation(
-      light,
-      0.f,
-      0.f,
-      0.f
-  );
+    HRL_SetLandscapeSize(
+        landscape,
+        500.0f,
+        500.0f
+    );
 
-  HRL_SetLightCastShadows(
-      light,
-      HRL_TRUE
-  );
+    HRL_SetLandscapeHeight(
+        landscape,
+        100.0f
+    );
 
-  HRL_SetLightShadowResolution(
-      light,
-      1024
-  );
+    HRL_SetLandscapeResolution(
+        landscape,
+        256,
+        256
+    );
 
-  HRL_SetLightShadowBias(
-      light,
-      0.0015f
-  );
+    HRL_SetLandscapeUVScale(
+        landscape,
+        32.0f,
+        32.0f
+    );
 
-  HRL_SetLightShadowStrength(
-      light,
-      0.35f
-  );
+    HRL_SetLandscapePosition(
+        landscape,
+        0.0f,
+        -10.0f,
+        0.0f
+    );
+
+    HRL_SetLandscapeMaterial(
+        landscape,
+        floorMaterial
+    );
+
+
 
 
   // ------------------------------------------------------------
@@ -1437,6 +1540,112 @@ int main()
   );
 
 
+
+    std::ifstream fontFile("FiraCode-Regular.ttf", std::ios::binary);
+    std::vector<char> fontData(
+        (std::istreambuf_iterator<char>(fontFile)),
+        std::istreambuf_iterator<char>()
+    );
+
+    HRL_id font = HRL_INVALID_ID;
+    if (!fontData.empty())
+    {
+        font = HRL_CreateFont(fontData.data(), fontData.size());
+    }
+
+
+    /*
+
+
+    // --------------------------------------------------------
+    // Centered title
+    // anchor = the point INSIDE the widget used by position.
+    // --------------------------------------------------------
+    HRL_id title = HRL_CreateWidget(viewport, HRL_WIDGET_LABEL);
+    HRL_SetWidgetPosition(title, 0.5f, 0.07f);
+    HRL_SetWidgetSize(title, 0.45f, 0.07f);
+    HRL_SetWidgetAnchor(title, 0.5f, 0.5f);
+    HRL_SetLabelText(title, "HRL Responsive Widgets");
+    HRL_SetLabelTextSize(title, 28.0f);
+    if (font != HRL_INVALID_ID)
+        HRL_SetLabelFont(title, font);
+
+    HRL_SetWidgetWorldPositionEnabled(title, 1);
+    HRL_SetWidgetWorldPosition(title, 0,0,0);
+
+    // --------------------------------------------------------
+    // Slider + progress bar
+    // --------------------------------------------------------
+    HRL_id progress = HRL_CreateWidget(viewport, HRL_WIDGET_PROGRESSBAR);
+    HRL_SetWidgetPosition(progress, 0.5f, 0.28f);
+    HRL_SetWidgetSize(progress, 0.50f, 0.045f);
+    HRL_SetWidgetAnchor(progress, 0.5f, 0.5f);
+    HRL_SetProgressBarValue(progress, 0.25f);
+    HRL_SetProgressBarBackgroundColor(progress, 0.12f, 0.12f, 0.12f, 1.0f);
+    HRL_SetProgressBarFillColor(progress, 0.20f, 0.70f, 1.0f, 1.0f);
+
+    HRL_id slider = HRL_CreateWidget(viewport, HRL_WIDGET_SLIDER);
+    HRL_SetWidgetPosition(slider, 0.5f, 0.20f);
+    HRL_SetWidgetSize(slider, 0.50f, 0.045f);
+    HRL_SetWidgetAnchor(slider, 0.5f, 0.5f);
+    HRL_SetSliderRange(slider, 0.0f, 1.0f);
+    HRL_SetSliderValue(slider, 0.25f);
+
+    // --------------------------------------------------------
+    // Button near the bottom-right corner.
+    // Its right/bottom edge stays at the same relative margin.
+    // --------------------------------------------------------
+    HRL_id button = HRL_CreateWidget(viewport, HRL_WIDGET_BUTTON);
+    HRL_SetWidgetPosition(button, 0.95f, 0.95f);
+    HRL_SetWidgetSize(button, 0.25f, 0.075f);
+    HRL_SetWidgetAnchor(button, 1.0f, 1.0f);
+    HRL_SetButtonText(button, "Increase Progress");
+    HRL_SetButtonTextSize(button, 18.0f);
+    if (font != HRL_INVALID_ID)
+        HRL_SetButtonTextFont(button, font);
+
+    // --------------------------------------------------------
+    // Checkbox near the top-right corner.
+    // --------------------------------------------------------
+    HRL_id checkbox = HRL_CreateWidget(viewport, HRL_WIDGET_CHECKBOX);
+    HRL_SetWidgetPosition(checkbox, 0.95f, 0.05f);
+    HRL_SetWidgetSize(checkbox, 0.04f, 0.04f);
+    HRL_SetWidgetAnchor(checkbox, 1.0f, 0.0f);
+
+    // --------------------------------------------------------
+    // Small labels showing how the four corner anchors behave.
+    // --------------------------------------------------------
+    const struct Corner {
+        float x, y;
+        float ax, ay;
+        const char* text;
+    } corners[] = {
+        {0.03f, 0.04f, 0.0f, 0.0f, "Top Left"},
+        {0.97f, 0.04f, 1.0f, 0.0f, "Top Right"},
+        {0.03f, 0.96f, 0.0f, 1.0f, "Bottom Left"},
+        {0.97f, 0.96f, 1.0f, 1.0f, "Bottom Right"},
+    };
+
+    std::vector<HRL_id> cornerLabels;
+    for (const Corner& corner : corners)
+    {
+        HRL_id label = HRL_CreateWidget(viewport, HRL_WIDGET_LABEL);
+        HRL_SetWidgetPosition(label, corner.x, corner.y);
+        HRL_SetWidgetSize(label, 0.12f, 0.035f);
+        HRL_SetWidgetAnchor(label, corner.ax, corner.ay);
+        HRL_SetLabelText(label, corner.text);
+        HRL_SetLabelTextSize(label, 14.0f);
+        if (font != HRL_INVALID_ID)
+            HRL_SetLabelFont(label, font);
+        cornerLabels.push_back(label);
+    }
+
+    */
+
+
+
+
+
   while (!glfwWindowShouldClose(win))
   {
     CalculateDeltaTime();
@@ -1492,12 +1701,22 @@ int main()
     );
 
 
+      double mouseX, mouseY;
+      glfwGetCursorPos(win, &mouseX, &mouseY);
+      printf("Current hovered Object: %d\n", HRL_GL_GetHoveredObject(scene, (int)mouseX, (int)mouseY, nullptr));
+
+
     // Rotation lente du mesh FBX pour vérifier les normales, shadows et environment map.
     static float modelYaw = 0.f;
 
     modelYaw += 20.f * (float)dt;
 
-
+    HRL_SetMeshRotation(
+        model,
+        0.f,
+        modelYaw,
+        0.f
+    );
 
 
     HRL_UpdateSkeletalAnimations(
@@ -1576,17 +1795,22 @@ int main()
           HRL_DEBUG_VIEW_LOD
       );
 
+  if (glfwGetKey(win, GLFW_KEY_F7) == GLFW_PRESS)
+  {
+      HRL_SetDebugMeshInfoFont(scene, font);
+      HRL_SetDebugMeshInfoTextSize(scene, 18.f);
+      HRL_SetDebugMeshInfoTextColor(scene, 1, 1, 1, 1);
+      HRL_DrawSceneAsDebugMode(
+          scene,
+          HRL_DEBUG_VIEW_MESH_INFO
+      );
+  }
+
 
     if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS)
       glfwSetWindowShouldClose(
           win,
           true
-      );
-
-
-    if (glfwGetKey(win, GLFW_KEY_F7) == GLFW_PRESS)
-      HRL_SetAntialiasingMode(
-          HRL_ANTIALIASING_8X
       );
 
 
@@ -1622,7 +1846,7 @@ int main()
           0.f,
           20.f,
           0.f,
-          5.f,
+          30.f,
           16,
           1.f,
           0.f,
