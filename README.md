@@ -1,6 +1,8 @@
 # Horizon Rendering Library
 
-> **Version** `0.5` — A lightweight, explicit rendering abstraction layer.
+<img src="./docs/assets/icon.png" alt="C++Extended logo" width="128">
+
+> **Version** `26.6` — A lightweight, explicit rendering abstraction layer.
 
 HRL is a C/C++ rendering library designed to sit on top of multiple graphics backends (OpenGL, Vulkan, D3D11/12, Metal, and more) behind a unified, stable API. It is built around a simple principle: **nothing exists until you create it, and everything you create must be explicitly destroyed.**
 
@@ -53,6 +55,67 @@ HRL is a C/C++ rendering library designed to sit on top of multiple graphics bac
 | `HRL_Metal`      | Metal       | Apple                 |
 | `HRL_NVN`        | NVN         | Nintedo               |
 | `HRL_GNM`        | GNM         | Playstation           |
+
+---
+
+# Comparaison des backends graphiques
+
+| Fonctionnalité                    |   OpenGL 3.3  |    Vulkan   | Direct3D 11 | Direct3D 12 |    Metal    |
+| --------------------------------- | :-----------: | :---------: | :---------: | :---------: | :---------: |
+| Initialisation / contexte         |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Swapchain / présentation          |       —       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Mesh 3D                           |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Mesh indexé                       |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Sprite                            |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Skeletal mesh                     |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| LOD                               |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Textures                          |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Filtrage texture                  |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Matériaux PBR                     |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Albedo                            |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Normal map                        |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Metallic / Roughness              |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Specular                          |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Alpha                             |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Lights point / directional / spot |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Sky light                         |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Fog classique                     |       ✅       |  ✅ |  ✅ |  ✅ |  ✅ |
+| MSAA / antialiasing               |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Color picking                     |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Debug rendering                   |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Debug views                       |       ✅       |  ⚠️ Partiel |  ⚠️ Partiel |  ⚠️ Partiel |  ⚠️ Partiel |
+| Screenshot                        |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Post-processing                   |       ✅       |      ❌      |      ❌      |      ❌      |      ❌      |
+| Ambient Occlusion                 |       ✅       |      ❌      |      ❌      |      ❌      |      ❌      |
+| God Rays                          |       ✅       |      ❌      |      ❌      |      ❌      |      ❌      |
+| Sky Sphere                        |       ✅       |      ❌      |      ❌      |      ❌      |      ❌      |
+| Environment mapping               |       ✅       |      ❌      |      ❌      |      ❌      |      ❌      |
+| Ombres des lights                 |       ✅       |      ❌      |      ❌      |      ❌      |      ❌      |
+| Volumetric fog                    |       ✅       |      ❌      |      ❌      |      ❌      |      ❌      |
+| Global volumetric fog             |       ✅       |      ❌      |      ❌      |      ❌      |      ❌      |
+| GI / DDGI                         |       ✅       |      ❌      |      ❌      |      ❌      |      ❌      |
+| SSGI                              | API seulement |      ❌      |      ❌      |      ❌      |      ❌      |
+| VCT                               | API seulement |      ❌      |      ❌      |      ❌      |      ❌      |
+| LPV                               | API seulement |      ❌      |      ❌      |      ❌      |      ❌      |
+| Path tracing                      | API seulement |      ❌      |      ❌      |      ❌      |      ❌      |
+| Ray tracing                       | ❌ |      ✅      |      ❌      |      ✅      |      ✅      |
+| VFX / particules                  |       ✅       |     ✅/⚠️    |     ✅/⚠️    |     ✅/⚠️    |     ✅/⚠️    |
+| VFX mesh particles                |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Widgets                           |       ✅       |      ✅      |      ✅      |      ✅      |      ✅      |
+| Gizmos                            |       ✅       |      ⚠️     |      ⚠️     |      ⚠️     |      ⚠️     |
+| Post-process materials            |       ✅       |      ❌      |      ❌      |      ❌      |      ❌      |
+| Async texture/shader              |    CPU/API    |      ✅     |      ⚠️     |      ✅      |      ✅      |
+| FBX                        |  ✅  | ✅ | ✅ | ✅ | ✅ |
+| Screen Space Displacement map     |  ✅          | ✅           | ✅              | ✅            | ✅ |
+| Virtualized Geomtry               |  ❌           | ✅          | ❌              | ✅            | ✅ |
+
+## Légende
+
+* ✅ — 
+* ⚠️ — 
+* ❌ — 
+
+
 
 ---
 

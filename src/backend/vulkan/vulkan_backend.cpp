@@ -17,6 +17,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -556,6 +557,7 @@ static std::pair<int,int> SceneDimensions(const hrl_scene_t* scene)
 
 static glm::mat4 ModelMatrix(const HRL_Mesh* mesh)
 {
+    if (!mesh) return glm::mat4(1.0f);
     glm::mat4 model(1.0f);
     model = glm::translate(model, mesh->position_);
     model = glm::translate(model, mesh->pivot_point_);
@@ -721,7 +723,15 @@ static void SetUniformRaw(std::vector<unsigned char>& data, const VulkanShader* 
 static void SetUniformVec3(std::vector<unsigned char>& data, const VulkanShader* shader, const char* name, const glm::vec3& value)
 {
     const VulkanUniformField* f = FindUniform(shader, name);
-    if (!f || f->offset + 16 > data.size()) return;
+    if (!f) return;
+    if (f->type == VulkanUniformField::Type::Vec4)
+    {
+        if (f->offset + 16 > data.size()) return;
+        const glm::vec4 value4(value, 1.0f);
+        std::memcpy(data.data() + f->offset, &value4, sizeof(value4));
+        return;
+    }
+    if (f->offset + 12 > data.size()) return;
     std::memcpy(data.data() + f->offset, &value, sizeof(float) * 3);
 }
 
@@ -755,8 +765,17 @@ static void FillUniforms(const VulkanShader* shader, const SceneDrawState& state
     const glm::mat4 model = modelOverride ? *modelOverride : (mesh ? ModelMatrix(mesh) : glm::mat4(1.0f));
     SetUniformMat(data, shader, "model", model);
     SetUniformMat(data, shader, "uModel", model);
-    SetUniformMat3(data, shader, "normalMatrix", glm::mat3(glm::transpose(glm::inverse(model))));
-    SetUniformMat(data, shader, "uNormalMatrix", glm::transpose(glm::inverse(model)));
+
+    // Match the OpenGL renderer: normals/tangents use the inverse-transpose of
+    // the object transform. A singular scale must not poison the whole draw
+    // with NaNs, so fall back to an identity normal matrix in that case.
+    glm::mat3 normalMatrix(1.0f);
+    const glm::mat3 model3(model);
+    const float determinant = glm::determinant(model3);
+    if (std::isfinite(determinant) && std::abs(determinant) > 1e-8f)
+        normalMatrix = glm::transpose(glm::inverse(model3));
+    SetUniformMat3(data, shader, "normalMatrix", normalMatrix);
+    SetUniformMat(data, shader, "uNormalMatrix", glm::mat4(normalMatrix));
 
     if (mesh)
     {
@@ -791,7 +810,7 @@ static void FillUniforms(const VulkanShader* shader, const SceneDrawState& state
         int dbg = static_cast<int>(state.scene->debug_view);
         SetUniformRaw(data, shader, "DebugView", dbg);
         SetUniformRaw(data, shader, "uDebugView", dbg);
-        float threshold = 1.0f;
+        float threshold = 0.75f;
         SetUniformRaw(data, shader, "BrightThreshold", threshold);
     }
 
@@ -823,6 +842,11 @@ static void FillUniforms(const VulkanShader* shader, const SceneDrawState& state
         SetUniformRaw(data, shader, "MetallicValue", metallic);
         SetUniformRaw(data, shader, "SpecularValue", specular);
         SetUniformRaw(data, shader, "OpacityValue", opacity);
+        const auto twoSidedIt = state.material->intParams_.find(HRL_MATERIAL_PARAM_TWO_SIDED);
+        const int twoSided = (twoSidedIt != state.material->intParams_.end() && twoSidedIt->second != 0) ? 1 : 0;
+        SetUniformRaw(data, shader, "TwoSided", twoSided);
+        const int normalUseTexture = state.material->textureParams_.count("T_Normal") ? 1 : 0;
+        SetUniformRaw(data, shader, "NormalUseTexture", normalUseTexture);
         SetUniformRaw(data, shader, "RoughnessUseValue", state.material->textureParams_.count("T_Roughness") ? 0 : 1);
         SetUniformRaw(data, shader, "MetallicUseValue", state.material->textureParams_.count("T_Metallic") ? 0 : 1);
         SetUniformRaw(data, shader, "SpecularUseValue", state.material->textureParams_.count("T_Specular") ? 0 : 1);
@@ -999,23 +1023,24 @@ static bool CreatePipeline(const PipelineKey& key, VkRenderPass renderPass, VkPi
     else if (key.mode == 1)
     {
         bindings[0] = {0, sizeof(HRL_SkeletalVertex), VK_VERTEX_INPUT_RATE_VERTEX};
-        attrs[0] = {0,0,VK_FORMAT_R32G32B32_SFLOAT,0};
-        attrs[1] = {1,0,VK_FORMAT_R32G32B32_SFLOAT,12};
-        attrs[2] = {2,0,VK_FORMAT_R32G32_SFLOAT,24};
-        attrs[3] = {3,0,VK_FORMAT_R32G32B32_SFLOAT,32};
-        attrs[4] = {4,0,VK_FORMAT_R32G32B32_SFLOAT,44};
-        attrs[5] = {5,0,VK_FORMAT_R32G32B32A32_UINT,56};
-        attrs[6] = {6,0,VK_FORMAT_R32G32B32A32_SFLOAT,72};
+        constexpr uint32_t vb = 0;
+        attrs[0] = {0,vb,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, vertex) + offsetof(HRL_Vertex3D, position))};
+        attrs[1] = {1,vb,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, vertex) + offsetof(HRL_Vertex3D, normal))};
+        attrs[2] = {2,vb,VK_FORMAT_R32G32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, vertex) + offsetof(HRL_Vertex3D, uv))};
+        attrs[3] = {3,vb,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, vertex) + offsetof(HRL_Vertex3D, tangent))};
+        attrs[4] = {4,vb,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, vertex) + offsetof(HRL_Vertex3D, bitangent))};
+        attrs[5] = {5,vb,VK_FORMAT_R32G32B32A32_UINT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, boneIndices))};
+        attrs[6] = {6,vb,VK_FORMAT_R32G32B32A32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, boneWeights))};
         bindingCount = 1; attrCount = 7;
     }
     else
     {
         bindings[0] = {0, sizeof(HRL_Vertex3D), VK_VERTEX_INPUT_RATE_VERTEX};
-        attrs[0] = {0,0,VK_FORMAT_R32G32B32_SFLOAT,0};
-        attrs[1] = {1,0,VK_FORMAT_R32G32B32_SFLOAT,12};
-        attrs[2] = {2,0,VK_FORMAT_R32G32_SFLOAT,24};
-        attrs[3] = {3,0,VK_FORMAT_R32G32B32_SFLOAT,32};
-        attrs[4] = {4,0,VK_FORMAT_R32G32B32_SFLOAT,44};
+        attrs[0] = {0,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_Vertex3D, position))};
+        attrs[1] = {1,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_Vertex3D, normal))};
+        attrs[2] = {2,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_Vertex3D, uv))};
+        attrs[3] = {3,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_Vertex3D, tangent))};
+        attrs[4] = {4,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_Vertex3D, bitangent))};
         bindingCount = 1; attrCount = 5;
     }
 
@@ -1038,6 +1063,9 @@ static bool CreatePipeline(const PipelineKey& key, VkRenderPass renderPass, VkPi
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.lineWidth = 1.0f;
     rs.cullMode = key.cull ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+    // Projection() flips NDC Y to match OpenGL's coordinate convention.
+    // That reverses triangle winding in Vulkan framebuffer coordinates, so
+    // the equivalent OpenGL GL_CCW front face is VK_FRONT_FACE_CLOCKWISE.
     rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
 
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
@@ -1739,30 +1767,69 @@ static void DrawMesh(VkCommandBuffer cmd, const SceneDrawState& state, HRL_Mesh*
 
 static uint32_t IdToColor(HRL_id id) { return id; }
 
+static HRL_id ResolveBuiltinMeshShader(const HRL_Mesh* mesh, HRL_id requestedShader)
+{
+    if (!mesh) return requestedShader;
+
+    // The FBX automatic-material path can select the skeletal built-in shader
+    // for a material when the source file contains both static and skinned
+    // geometry. A static vertex buffer cannot be consumed by the skeletal
+    // pipeline (locations 5/6 are absent), so force reserved built-ins to match
+    // the actual mesh type. Custom shaders are never changed.
+    if (mesh->type_ == HRL_3D_MESH && requestedShader == HRL_SKINNED_3D_MESH_SHADER)
+        return HRL_MESH_3D_SHADER;
+    if (mesh->type_ == HRL_3D_SKELETAL_MESH && requestedShader == HRL_MESH_3D_SHADER)
+        return HRL_SKINNED_3D_MESH_SHADER;
+    return requestedShader;
+}
+
 static void DrawOneMesh(VkCommandBuffer cmd, const SceneDrawState& state, HRL_id meshId, HRL_Mesh* mesh, int lodLevel)
 {
     if (!mesh) return;
     auto matIt = GetPrivateContext()->materials.find(mesh->material_);
     if (matIt == GetPrivateContext()->materials.end() || !matIt->second) return;
     HRL_Material* material = matIt->second;
-    const VulkanShader* shader = GetShader(material->shader_);
-    auto gpuIt = g.meshes.find(meshId);
-    if (!shader || gpuIt == g.meshes.end()) return;
-    MeshGPU& gpu = gpuIt->second;
 
     const bool skeletal = mesh->type_ == HRL_3D_SKELETAL_MESH;
     const bool sprite = mesh->type_ == HRL_SPRITE;
-    uint32_t mode = skeletal ? 1u : (sprite ? 2u : 0u);
+    const HRL_id effectiveShaderId = ResolveBuiltinMeshShader(mesh, material->shader_);
+    const VulkanShader* shader = GetShader(effectiveShaderId);
+    auto gpuIt = g.meshes.find(meshId);
+    if (!shader || gpuIt == g.meshes.end()) return;
+    MeshGPU& gpu = gpuIt->second;
+    if (skeletal != gpu.skeletal) return;
+
+    const uint32_t mode = skeletal ? 1u : (sprite ? 2u : 0u);
     bool twoSided = false;
     auto ts = material->intParams_.find(HRL_MATERIAL_PARAM_TWO_SIDED);
     if (ts != material->intParams_.end()) twoSided = ts->second != 0;
     const bool blend = sprite;
-    PipelineKey key{material->shader_, mode, twoSided ? 0u : 1u, blend ? 1u : 0u, g.scenes.at(mesh->scene_).render_pass};
+    auto sceneIt = g.scenes.find(mesh->scene_);
+    if (sceneIt == g.scenes.end() || !sceneIt->second.render_pass) return;
+
+    // Built-in mesh pipelines intentionally disable culling. This removes the
+    // dependency on an imported winding convention while the Vulkan clip-space
+    // conversion differs from OpenGL. The fragment shader still honors
+    // TwoSided when deciding whether to flip the lighting normal.
+    const bool builtinMeshShader =
+        effectiveShaderId == HRL_MESH_3D_SHADER ||
+        effectiveShaderId == HRL_SKINNED_3D_MESH_SHADER;
+    const uint32_t cullMode = (builtinMeshShader && !sprite)
+        ? 0u
+        : (twoSided ? 0u : 1u);
+
+    PipelineKey key{effectiveShaderId, mode, cullMode, blend ? 1u : 0u, sceneIt->second.render_pass};
     const VkPipeline pipeline = GetPipeline(key, key.render_pass);
     if (!pipeline) return;
 
     std::vector<unsigned char> uniform(shader->uniform_block_size, 0);
-    FillUniforms(shader, state, mesh, uniform, IdToColor(meshId), sprite);
+    // DrawOneMesh resolves the concrete material locally, but SceneDrawState is
+    // shared by the viewport pass. Populate a per-draw copy before filling the
+    // material uniforms; otherwise TintColor/alpha/PBR values stay zero and the
+    // built-in mesh fragment shader discards every fragment.
+    SceneDrawState drawState = state;
+    drawState.material = material;
+    FillUniforms(shader, drawState, mesh, uniform, IdToColor(meshId), sprite);
     const size_t offset = AllocateUniform(uniform.size(), uniform.data());
     if (offset == std::numeric_limits<size_t>::max()) return;
     VkDescriptorSet ds = BindResources(material, shader, nullptr, uniform.size());
@@ -1806,6 +1873,7 @@ static void DrawOneMesh(VkCommandBuffer cmd, const SceneDrawState& state, HRL_id
         }
     }
 }
+
 
 
 static glm::mat4 MakeVFXSystemMatrix(const HRL_VFXSystem* system)
