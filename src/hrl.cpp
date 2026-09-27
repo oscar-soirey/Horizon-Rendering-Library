@@ -1789,6 +1789,9 @@ void HRL_SetLightShadowResolution(HRL_id _lightid, int _resolution)
 		return;
 	}
 	it->second->shadow_resolution_ = _resolution;
+	auto scene_it = ctx_.scenes.find(it->second->scene_);
+	if (scene_it != ctx_.scenes.end())
+		scene_it->second->shadows_dirty = true;
 }
 
 void HRL_SetSpotLightInnerCutoff(HRL_id _lightid, float inner_cutoff)

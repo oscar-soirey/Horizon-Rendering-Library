@@ -473,6 +473,11 @@ int main()
     HRL_MaterialSetFloat(post_mat, "bloomStrength", 1.f);
 
 
+    HRL_SetGlobalVolumetricFogEnabled(scene, HRL_TRUE);
+    HRL_SetGlobalVolumetricFogDensity(scene, 2.f);
+    HRL_SetGlobalVolumetricFogSteps(scene, 48);
+
+
   // ---------------------------------------------------------------------------
   // Sky sphere image + environment mapping
   // sky_equirectangular.png est une texture equirectangulaire 2:1.

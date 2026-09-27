@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstdlib>
 #include <cstddef>
 #include <cstring>
@@ -39,13 +40,34 @@ constexpr uint32_t kUniformBinding = 31;
 constexpr size_t kInitialUniformCapacity = 2u * 1024u * 1024u;
 constexpr size_t kDebugBufferCapacity = 4u * 1024u * 1024u;
 
-struct LightGPU
+struct alignas(16) LightGPU
 {
-    glm::vec4 position{0.0f};
-    glm::vec4 rotation{0.0f};
-    glm::vec4 color{1.0f};
-    glm::vec4 params{0.0f}; // type, intensity, inner, outer
+    // Exact std140 layout of the GLSL Light struct:
+    //   0..15   : type, intensity, attenuation, innerCutoff
+    //   16..31  : position.xyz, outerCutoff
+    //   32..47  : rotation.xyz, padding
+    //   48..63  : color.xyz, shadowStrength
+    //   64..127 : shadowMatrix (mat4)
+    //   128..143: shadowParams (vec4)
+    uint32_t type = 0;
+    float intensity = 0.0f;
+    float attenuation = 0.0f;
+    float innerCutoff = 0.0f;
+
+    glm::vec4 position_outer{0.0f};
+    glm::vec4 rotation_padding{0.0f};
+    glm::vec4 color_shadow{1.0f, 1.0f, 1.0f, 1.0f};
+    glm::mat4 shadowMatrix{1.0f};
+    glm::vec4 shadowParams{0.0f, 0.0f, -1.0f, 0.0f};
 };
+
+static_assert(offsetof(LightGPU, type) == 0, "LightGPU::type offset mismatch");
+static_assert(offsetof(LightGPU, position_outer) == 16, "LightGPU::position offset mismatch");
+static_assert(offsetof(LightGPU, rotation_padding) == 32, "LightGPU::rotation offset mismatch");
+static_assert(offsetof(LightGPU, color_shadow) == 48, "LightGPU::color offset mismatch");
+static_assert(offsetof(LightGPU, shadowMatrix) == 64, "LightGPU::shadowMatrix offset mismatch");
+static_assert(offsetof(LightGPU, shadowParams) == 128, "LightGPU::shadowParams offset mismatch");
+static_assert(sizeof(LightGPU) == 144, "LightGPU must match std140 Light layout");
 
 struct LightBlockGPU
 {
@@ -66,6 +88,7 @@ struct ImageResource
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkExtent2D extent{0,0};
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
@@ -116,6 +139,25 @@ struct SceneGPU
 
     ImageResource post_a;
     ImageResource post_b;
+    ImageResource depth_resolve;
+    VkRenderPass post_render_pass = VK_NULL_HANDLE;
+    VkFramebuffer post_framebuffer_a = VK_NULL_HANDLE;
+    VkFramebuffer post_framebuffer_b = VK_NULL_HANDLE;
+    VkImageLayout post_a_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout post_b_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout depth_resolve_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+};
+
+struct ShadowGPU
+{
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> face_framebuffers;
+    ImageResource depth;
+    std::vector<VkImageView> face_views;
+    bool cube = false;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    int resolution = 0;
 };
 
 struct PipelineKey
@@ -228,6 +270,8 @@ struct VulkanState
 
     std::vector<HRL_id> pending_screenshot_scenes;
     std::unordered_map<HRL_id, std::string> screenshot_paths;
+    std::unordered_map<HRL_id, ShadowGPU> shadow_maps;
+    std::unordered_map<HRL_id, std::unordered_map<HRL_id, int>> active_shadow_slots_by_scene;
     bool frame_open = false;
     bool present_requested = false;
     bool surface_warning_emitted = false;
@@ -367,6 +411,31 @@ static bool CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImag
         VkError("vkCreateImageView", r);
         return false;
     }
+    if (usage & VK_IMAGE_USAGE_SAMPLED_BIT)
+    {
+        VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        const bool nearest = (aspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0;
+        si.magFilter = nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        si.minFilter = nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.mipLodBias = 0.0f;
+        si.anisotropyEnable = VK_FALSE;
+        si.maxAnisotropy = 1.0f;
+        si.compareEnable = VK_FALSE;
+        si.minLod = 0.0f;
+        si.maxLod = 0.0f;
+        if (vkCreateSampler(g.device, &si, nullptr, &out.sampler) != VK_SUCCESS)
+        {
+            vkDestroyImageView(g.device, out.view, nullptr);
+            vkDestroyImage(g.device, out.image, nullptr);
+            vkFreeMemory(g.device, out.memory, nullptr);
+            out = {};
+            return false;
+        }
+    }
     out.format = format;
     out.extent = {width,height};
     out.samples = samples;
@@ -387,6 +456,7 @@ static bool CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags a
 
 static void DestroyImage(ImageResource& image)
 {
+    if (image.sampler) vkDestroySampler(g.device, image.sampler, nullptr);
     if (image.view) vkDestroyImageView(g.device, image.view, nullptr);
     if (image.image) vkDestroyImage(g.device, image.image, nullptr);
     if (image.memory) vkFreeMemory(g.device, image.memory, nullptr);
@@ -395,7 +465,8 @@ static void DestroyImage(ImageResource& image)
 
 static void TransitionImage(VkCommandBuffer cmd, VkImage image,
                             VkImageLayout old_layout, VkImageLayout new_layout,
-                            VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT)
+                            VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+                            uint32_t layerCount = 1)
 {
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     b.oldLayout = old_layout;
@@ -405,7 +476,7 @@ static void TransitionImage(VkCommandBuffer cmd, VkImage image,
     b.image = image;
     b.subresourceRange.aspectMask = aspect;
     b.subresourceRange.levelCount = 1;
-    b.subresourceRange.layerCount = 1;
+    b.subresourceRange.layerCount = std::max(1u, layerCount);
     VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED)
@@ -538,12 +609,12 @@ static VkSampleCountFlagBits ChooseMSAA(int requested)
 static VkFormat FindDepthFormat()
 {
     const std::array<VkFormat,3> candidates{VK_FORMAT_D32_SFLOAT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D16_UNORM};
+    const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     for (VkFormat f : candidates)
     {
         VkFormatProperties p{};
         vkGetPhysicalDeviceFormatProperties(g.physical, f, &p);
-        if (p.linearTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT ||
-            p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+        if ((p.optimalTilingFeatures & required) == required)
             return f;
     }
     return VK_FORMAT_D32_SFLOAT;
@@ -566,6 +637,11 @@ static glm::mat4 ModelMatrix(const HRL_Mesh* mesh)
     model = glm::rotate(model, glm::radians(mesh->rotation_.z), glm::vec3(0,0,1));
     model = glm::translate(model, -mesh->pivot_point_);
     model = glm::scale(model, mesh->scale_);
+    if (mesh->type_ == HRL_3D_SKELETAL_MESH)
+    {
+        if (const auto* skeletal = dynamic_cast<const HRL_SkeletalMesh*>(mesh))
+            model *= skeletal->fbx_geometry_to_world_;
+    }
     return model;
 }
 
@@ -812,6 +888,11 @@ static void FillUniforms(const VulkanShader* shader, const SceneDrawState& state
         SetUniformRaw(data, shader, "uDebugView", dbg);
         float threshold = 0.75f;
         SetUniformRaw(data, shader, "BrightThreshold", threshold);
+        HRL_id envId = state.scene->environment_texture != HRL_INVALID_ID
+            ? state.scene->environment_texture
+            : state.scene->sky_texture;
+        const int envEnabled = (state.scene->environment_mapping_enabled && envId != HRL_INVALID_ID && GetTexture(envId)) ? 1 : 0;
+        SetUniformRaw(data, shader, "EnvironmentEnabled", envEnabled);
     }
 
     if (state.material)
@@ -851,6 +932,11 @@ static void FillUniforms(const VulkanShader* shader, const SceneDrawState& state
         SetUniformRaw(data, shader, "MetallicUseValue", state.material->textureParams_.count("T_Metallic") ? 0 : 1);
         SetUniformRaw(data, shader, "SpecularUseValue", state.material->textureParams_.count("T_Specular") ? 0 : 1);
         SetUniformRaw(data, shader, "OpacityUseValue", state.material->textureParams_.count("T_Alpha") ? 0 : 1);
+        float envStrength = 0.0f;
+        auto esit = state.material->floatParams_.find("EnvironmentStrength");
+        if (esit != state.material->floatParams_.end()) envStrength = esit->second;
+        else if (state.scene && state.scene->environment_mapping_enabled) envStrength = 0.35f;
+        SetUniformRaw(data, shader, "EnvironmentStrength", envStrength);
 
         for (const auto& [name, value] : state.material->intParams_) SetUniformRaw(data, shader, name.c_str(), value);
         for (const auto& [name, value] : state.material->floatParams_) SetUniformRaw(data, shader, name.c_str(), value);
@@ -987,7 +1073,32 @@ static bool CreatePipeline(const PipelineKey& key, VkRenderPass renderPass, VkPi
     std::array<VkVertexInputAttributeDescription,7> attrs{};
     uint32_t bindingCount = 0;
     uint32_t attrCount = 0;
-    if (key.mode == 3 || key.mode == 7)
+    if (key.mode == 9 || key.mode == 10)
+    {
+        if (key.mode == 10)
+        {
+            bindings[0] = {0, sizeof(HRL_SkeletalVertex), VK_VERTEX_INPUT_RATE_VERTEX};
+            attrs[0] = {0,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, vertex) + offsetof(HRL_Vertex3D, position))};
+            attrs[1] = {1,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, vertex) + offsetof(HRL_Vertex3D, normal))};
+            attrs[2] = {2,0,VK_FORMAT_R32G32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, vertex) + offsetof(HRL_Vertex3D, uv))};
+            attrs[3] = {3,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, vertex) + offsetof(HRL_Vertex3D, tangent))};
+            attrs[4] = {4,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, vertex) + offsetof(HRL_Vertex3D, bitangent))};
+            attrs[5] = {5,0,VK_FORMAT_R32G32B32A32_UINT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, boneIndices))};
+            attrs[6] = {6,0,VK_FORMAT_R32G32B32A32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_SkeletalVertex, boneWeights))};
+            bindingCount = 1; attrCount = 7;
+        }
+        else
+        {
+            bindings[0] = {0, sizeof(HRL_Vertex3D), VK_VERTEX_INPUT_RATE_VERTEX};
+            attrs[0] = {0,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_Vertex3D, position))};
+            attrs[1] = {1,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_Vertex3D, normal))};
+            attrs[2] = {2,0,VK_FORMAT_R32G32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_Vertex3D, uv))};
+            attrs[3] = {3,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_Vertex3D, tangent))};
+            attrs[4] = {4,0,VK_FORMAT_R32G32B32_SFLOAT,static_cast<uint32_t>(offsetof(HRL_Vertex3D, bitangent))};
+            bindingCount = 1; attrCount = 5;
+        }
+    }
+    else if (key.mode == 3 || key.mode == 7)
     {
         bindings[0] = {0, sizeof(DebugVertex), VK_VERTEX_INPUT_RATE_VERTEX};
         attrs[0] = {0,0,VK_FORMAT_R32G32B32_SFLOAT,0};
@@ -1062,19 +1173,19 @@ static bool CreatePipeline(const PipelineKey& key, VkRenderPass renderPass, VkPi
     rs.rasterizerDiscardEnable = VK_FALSE;
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.lineWidth = 1.0f;
-    rs.cullMode = key.cull ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+    rs.cullMode = key.cull == 2 ? VK_CULL_MODE_FRONT_BIT : (key.cull ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
     // Projection() flips NDC Y to match OpenGL's coordinate convention.
     // That reverses triangle winding in Vulkan framebuffer coordinates, so
     // the equivalent OpenGL GL_CCW front face is VK_FRONT_FACE_CLOCKWISE.
     rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
 
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    ms.rasterizationSamples = g.msaa;
+    ms.rasterizationSamples = (key.mode == 5 || key.mode == 9 || key.mode == 10) ? VK_SAMPLE_COUNT_1_BIT : g.msaa;
     ms.sampleShadingEnable = VK_FALSE;
 
     VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    ds.depthTestEnable = (key.mode == 0 || key.mode == 1 || key.mode == 8) ? VK_TRUE : VK_FALSE;
-    ds.depthWriteEnable = ((key.mode == 0 || key.mode == 1) && key.blend == 0) ? VK_TRUE : VK_FALSE;
+    ds.depthTestEnable = (key.mode == 0 || key.mode == 1 || key.mode == 8 || key.mode == 9 || key.mode == 10) ? VK_TRUE : VK_FALSE;
+    ds.depthWriteEnable = ((key.mode == 0 || key.mode == 1 || key.mode == 9 || key.mode == 10) && key.blend == 0) ? VK_TRUE : VK_FALSE;
     ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 
     std::array<VkPipelineColorBlendAttachmentState,3> cbAtt{};
@@ -1100,7 +1211,7 @@ static bool CreatePipeline(const PipelineKey& key, VkRenderPass renderPass, VkPi
         a.colorWriteMask = VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
     }
     VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    cb.attachmentCount = (key.mode == 4 || key.mode == 5 || key.mode == 6 || key.mode == 3) ? 3 : 3;
+    cb.attachmentCount = (key.mode == 5) ? 1u : ((key.mode == 9 || key.mode == 10) ? 0u : 3u);
     cb.pAttachments = cbAtt.data();
 
     std::array<VkDynamicState,2> dynamicStates{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -1549,124 +1660,569 @@ static void DestroySwapchain()
     g.swapchain = VK_NULL_HANDLE;
 }
 
-static bool CreateSceneTargets(SceneGPU& scene)
+
+static void UpdateDescriptorImage(VkDescriptorSet set, uint32_t binding, const ImageResource& image)
 {
-    const VkImageUsageFlags colorUsage = scene.samples == VK_SAMPLE_COUNT_1_BIT
-        ? (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
-        : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    const VkImageUsageFlags pickUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    if (!CreateImage(scene.width, scene.height, scene.color_format, colorUsage, scene.samples, VK_IMAGE_ASPECT_COLOR_BIT, scene.samples == VK_SAMPLE_COUNT_1_BIT ? scene.color : scene.color_msaa)) return false;
-    if (scene.samples == VK_SAMPLE_COUNT_1_BIT)
+    if (!set || !image.view || !image.sampler) return;
+    VkDescriptorImageInfo ii{};
+    ii.sampler = image.sampler;
+    ii.imageView = image.view;
+    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = set;
+    w.dstBinding = binding;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &ii;
+    vkUpdateDescriptorSets(g.device, 1, &w, 0, nullptr);
+}
+
+static uint32_t ShaderSamplerBinding(const VulkanShader* shader, const char* name, uint32_t fallback)
+{
+    if (!shader || !name) return fallback;
+    auto it = shader->samplers.find(name);
+    return it == shader->samplers.end() ? fallback : it->second;
+}
+
+static glm::vec3 GetLightDirection(const HRL_Light* light)
+{
+    if (!light) return glm::vec3(0,-1,0);
+    const float pitch = glm::radians(light->rotation_.x);
+    const float yaw = glm::radians(light->rotation_.y);
+    glm::vec3 dir(std::cos(yaw)*std::cos(pitch), std::sin(pitch), std::sin(yaw)*std::cos(pitch));
+    if (glm::length(dir) < 1e-5f) return glm::vec3(0,-1,0);
+    return glm::normalize(dir);
+}
+
+static bool CreateDepthCubeImage(uint32_t width, uint32_t height, VkFormat format, ImageResource& out)
+{
+    out = {};
+    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ii.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.extent = {width, height, 1};
+    ii.mipLevels = 1;
+    ii.arrayLayers = 6;
+    ii.format = format;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateImage(g.device, &ii, nullptr, &out.image) != VK_SUCCESS)
+        return false;
+
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(g.device, out.image, &req);
+    const uint32_t type = FindMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (type == UINT32_MAX)
     {
-        if (!CreateImage(scene.width, scene.height, scene.color_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
-                          scene.samples, VK_IMAGE_ASPECT_COLOR_BIT, scene.bright)) return false;
-        if (!CreateImage(scene.width, scene.height, scene.picking_format, pickUsage, scene.samples, VK_IMAGE_ASPECT_COLOR_BIT, scene.picking_image)) return false;
-        if (!CreateImage(scene.width, scene.height, scene.depth_format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, scene.samples, VK_IMAGE_ASPECT_DEPTH_BIT, scene.depth)) return false;
+        DestroyImage(out);
+        return false;
+    }
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = type;
+    if (vkAllocateMemory(g.device, &ai, nullptr, &out.memory) != VK_SUCCESS)
+    {
+        DestroyImage(out);
+        return false;
+    }
+    if (vkBindImageMemory(g.device, out.image, out.memory, 0) != VK_SUCCESS)
+    {
+        DestroyImage(out);
+        return false;
+    }
+
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = out.image;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+    vi.format = format;
+    vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    vi.subresourceRange.levelCount = 1;
+    vi.subresourceRange.layerCount = 6;
+    if (vkCreateImageView(g.device, &vi, nullptr, &out.view) != VK_SUCCESS)
+    {
+        DestroyImage(out);
+        return false;
+    }
+
+    VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    si.magFilter = VK_FILTER_NEAREST;
+    si.minFilter = VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.maxLod = 0.0f;
+    if (vkCreateSampler(g.device, &si, nullptr, &out.sampler) != VK_SUCCESS)
+    {
+        DestroyImage(out);
+        return false;
+    }
+    out.format = format;
+    out.extent = {width, height};
+    out.samples = VK_SAMPLE_COUNT_1_BIT;
+    return true;
+}
+
+static bool CreateShadowRenderPass(VkFormat format, VkRenderPass& out)
+{
+    VkAttachmentDescription att{};
+    att.format = format;
+    att.samples = VK_SAMPLE_COUNT_1_BIT;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    att.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference depthRef{0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sub{};
+    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.pDepthStencilAttachment = &depthRef;
+
+    VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rp.attachmentCount = 1;
+    rp.pAttachments = &att;
+    rp.subpassCount = 1;
+    rp.pSubpasses = &sub;
+    return vkCreateRenderPass(g.device, &rp, nullptr, &out) == VK_SUCCESS;
+}
+
+static bool CreateShadowFaceView(VkImage image, VkFormat format, uint32_t layer, VkImageView& out)
+{
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = image;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = format;
+    vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    vi.subresourceRange.baseArrayLayer = layer;
+    vi.subresourceRange.layerCount = 1;
+    vi.subresourceRange.levelCount = 1;
+    return vkCreateImageView(g.device, &vi, nullptr, &out) == VK_SUCCESS;
+}
+
+static void DestroyShadowResource(HRL_id lightId)
+{
+    auto it = g.shadow_maps.find(lightId);
+    if (it == g.shadow_maps.end()) return;
+    for (VkFramebuffer fb : it->second.face_framebuffers)
+        if (fb) vkDestroyFramebuffer(g.device, fb, nullptr);
+    if (it->second.framebuffer)
+        vkDestroyFramebuffer(g.device, it->second.framebuffer, nullptr);
+    for (VkImageView view : it->second.face_views)
+        if (view) vkDestroyImageView(g.device, view, nullptr);
+    if (it->second.render_pass)
+        vkDestroyRenderPass(g.device, it->second.render_pass, nullptr);
+    DestroyImage(it->second.depth);
+    g.shadow_maps.erase(it);
+}
+
+static bool EnsureShadowResource(HRL_Light* light)
+{
+    if (!light || !light->cast_shadows_) return false;
+    if (light->type_ != HRL_POINT_LIGHT && light->type_ != HRL_DIRECTIONAL_LIGHT && light->type_ != HRL_SPOT_LIGHT)
+        return false;
+
+    const int resolution = std::clamp(light->shadow_resolution_, 128, 4096);
+    const bool cube = light->type_ == HRL_POINT_LIGHT;
+    auto it = g.shadow_maps.find(light->id_);
+    if (it != g.shadow_maps.end() && it->second.resolution == resolution && it->second.cube == cube && it->second.depth.image)
+        return true;
+    if (it != g.shadow_maps.end()) DestroyShadowResource(light->id_);
+
+    ShadowGPU shadow{};
+    shadow.resolution = resolution;
+    shadow.cube = cube;
+
+    const VkFormat format = FindDepthFormat();
+    const bool imageOk = cube
+        ? CreateDepthCubeImage(resolution, resolution, format, shadow.depth)
+        : CreateImage(resolution, resolution, format,
+                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                      VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, shadow.depth);
+    if (!imageOk) return false;
+    if (!CreateShadowRenderPass(format, shadow.render_pass))
+    {
+        DestroyImage(shadow.depth);
+        return false;
+    }
+
+    if (cube)
+    {
+        shadow.face_views.resize(6, VK_NULL_HANDLE);
+        shadow.face_framebuffers.resize(6, VK_NULL_HANDLE);
+        for (uint32_t face = 0; face < 6; ++face)
+        {
+            if (!CreateShadowFaceView(shadow.depth.image, format, face, shadow.face_views[face]))
+            {
+                for (VkFramebuffer fb : shadow.face_framebuffers) if (fb) vkDestroyFramebuffer(g.device, fb, nullptr);
+                for (VkImageView view : shadow.face_views) if (view) vkDestroyImageView(g.device, view, nullptr);
+                vkDestroyRenderPass(g.device, shadow.render_pass, nullptr);
+                DestroyImage(shadow.depth);
+                return false;
+            }
+            VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+            fb.renderPass = shadow.render_pass;
+            fb.attachmentCount = 1;
+            fb.pAttachments = &shadow.face_views[face];
+            fb.width = resolution;
+            fb.height = resolution;
+            fb.layers = 1;
+            if (vkCreateFramebuffer(g.device, &fb, nullptr, &shadow.face_framebuffers[face]) != VK_SUCCESS)
+            {
+                for (VkFramebuffer existing : shadow.face_framebuffers) if (existing) vkDestroyFramebuffer(g.device, existing, nullptr);
+                for (VkImageView view : shadow.face_views) if (view) vkDestroyImageView(g.device, view, nullptr);
+                vkDestroyRenderPass(g.device, shadow.render_pass, nullptr);
+                DestroyImage(shadow.depth);
+                return false;
+            }
+        }
     }
     else
     {
-        // MSAA images are created above; create the resolve images separately.
-        if (!CreateImage(scene.width, scene.height, scene.color_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
-                          VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT, scene.color)) return false;
-        if (!CreateImage(scene.width, scene.height, scene.color_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
-                          VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT, scene.bright)) return false;
-        if (!CreateImage(scene.width, scene.height, scene.picking_format, pickUsage, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT, scene.picking_image)) return false;
-        if (!CreateImage(scene.width, scene.height, scene.depth_format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, scene.samples, VK_IMAGE_ASPECT_DEPTH_BIT, scene.depth_msaa)) return false;
-        scene.depth = scene.depth_msaa;
-        scene.depth_msaa = {};
-        if (!CreateImage(scene.width, scene.height, scene.color_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                          scene.samples, VK_IMAGE_ASPECT_COLOR_BIT, scene.bright_msaa)) return false;
-        if (!CreateImage(scene.width, scene.height, scene.picking_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                          scene.samples, VK_IMAGE_ASPECT_COLOR_BIT, scene.picking_msaa)) return false;
-    }
-    // Ensure the color MSAA images exist when samples > 1.
-    if (scene.samples > VK_SAMPLE_COUNT_1_BIT)
-    {
-        if (!scene.color_msaa.image)
+        VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fb.renderPass = shadow.render_pass;
+        fb.attachmentCount = 1;
+        fb.pAttachments = &shadow.depth.view;
+        fb.width = resolution;
+        fb.height = resolution;
+        fb.layers = 1;
+        if (vkCreateFramebuffer(g.device, &fb, nullptr, &shadow.framebuffer) != VK_SUCCESS)
         {
-            if (!CreateImage(scene.width, scene.height, scene.color_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                              scene.samples, VK_IMAGE_ASPECT_COLOR_BIT, scene.color_msaa)) return false;
+            vkDestroyRenderPass(g.device, shadow.render_pass, nullptr);
+            DestroyImage(shadow.depth);
+            return false;
         }
     }
 
-    // Create render pass with color + bright + picking and depth; MSAA uses resolve attachments.
-    std::array<VkAttachmentDescription,7> attachments{};
-    uint32_t count = 4;
-    attachments[0] = {0, scene.color_format, scene.samples, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE,
-                      VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    attachments[1] = {0, scene.color_format, scene.samples, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE,
-                      VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    attachments[2] = {0, scene.picking_format, scene.samples, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE,
-                      VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    attachments[3] = {0, scene.depth_format, scene.samples, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_DONT_CARE,
-                      VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference colors[3] = {{0,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},{1,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},{2,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
-    VkAttachmentReference depth{3,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference resolves[3] = {{VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},{VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},{VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
-    if (scene.samples > VK_SAMPLE_COUNT_1_BIT)
-    {
-        attachments[4] = {0, scene.color_format, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE,
-                          VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        attachments[5] = {0, scene.color_format, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE,
-                          VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        attachments[6] = {0, scene.picking_format, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE,
-                          VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        resolves[0] = {4,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        resolves[1] = {5,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        resolves[2] = {6,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        count = 7;
-    }
-    VkSubpassDescription sub{};
-    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    sub.colorAttachmentCount = 3;
-    sub.pColorAttachments = colors;
-    sub.pResolveAttachments = scene.samples > VK_SAMPLE_COUNT_1_BIT ? resolves : nullptr;
-    sub.pDepthStencilAttachment = &depth;
-    VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    rp.attachmentCount = count;
-    rp.pAttachments = attachments.data();
-    rp.subpassCount = 1;
-    rp.pSubpasses = &sub;
-    if (vkCreateRenderPass(g.device, &rp, nullptr, &scene.render_pass) != VK_SUCCESS) return false;
+    shadow.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    g.shadow_maps.emplace(light->id_, std::move(shadow));
+    return true;
+}
 
-    std::array<VkImageView,7> views{};
-    if (scene.samples > VK_SAMPLE_COUNT_1_BIT)
+static glm::mat4 VulkanClipProjection(glm::mat4 proj)
+{
+    glm::mat4 zclip(1.0f);
+    zclip[2][2] = 0.5f;
+    zclip[3][2] = 0.5f;
+    proj = zclip * proj;
+    proj[1][1] *= -1.0f;
+    return proj;
+}
+
+static glm::vec3 SceneShadowCenter(const hrl_scene_t* scene)
+{
+    if (!scene || scene->meshes.empty()) return glm::vec3(0.0f);
+
+    glm::vec3 boundsMin(std::numeric_limits<float>::max());
+    glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
+    bool found = false;
+
+    for (const auto& [id, mesh] : scene->meshes)
     {
-        views[0] = scene.color_msaa.view;
-        views[1] = scene.bright_msaa.view;
-        views[2] = scene.picking_msaa.view;
-        views[3] = scene.depth.view;
-        views[4] = scene.color.view;
-        views[5] = scene.bright.view;
-        views[6] = scene.picking_image.view;
+        if (!mesh) continue;
+        const glm::mat4 model = ModelMatrix(mesh);
+        const glm::vec3 localCenter = mesh->bounds_center_;
+        const glm::vec3 localExtents(std::max(mesh->bounds_radius_, 0.5f));
+
+        // Transform the eight corners so rotated/scaled meshes contribute
+        // correctly to the directional light's orthographic shadow volume.
+        for (int x = -1; x <= 1; x += 2)
+        for (int y = -1; y <= 1; y += 2)
+        for (int z = -1; z <= 1; z += 2)
+        {
+            const glm::vec3 corner = localCenter + glm::vec3(x, y, z) * localExtents;
+            const glm::vec3 world = glm::vec3(model * glm::vec4(corner, 1.0f));
+            boundsMin = glm::min(boundsMin, world);
+            boundsMax = glm::max(boundsMax, world);
+            found = true;
+        }
+    }
+
+    return found ? (boundsMin + boundsMax) * 0.5f : glm::vec3(0.0f);
+}
+
+static glm::mat4 ShadowMatrixForLight(const HRL_Light* light, const glm::vec3& sceneCenter = glm::vec3(0.0f))
+{
+    if (!light) return glm::mat4(1.0f);
+    const glm::vec3 dir = glm::normalize(GetLightDirection(light));
+    const glm::vec3 up = std::abs(glm::dot(dir, glm::vec3(0,1,0))) > 0.98f ? glm::vec3(0,0,1) : glm::vec3(0,1,0);
+    glm::mat4 view(1.0f);
+    glm::mat4 proj(1.0f);
+    if (light->type_ == HRL_SPOT_LIGHT)
+    {
+        const float outer = glm::clamp(light->outerCutoff, 1.0f, 89.0f);
+        proj = glm::perspective(glm::radians(outer * 2.0f), 1.0f, 0.1f, 100.0f);
+        view = glm::lookAt(light->position_, light->position_ + dir, up);
+    }
+    else if (light->type_ == HRL_DIRECTIONAL_LIGHT)
+    {
+        // Center the directional shadow volume around the actual scene instead
+        // of assuming everything lives near the world origin.
+        const glm::vec3 lp = sceneCenter - dir * 80.0f;
+        proj = glm::ortho(-60.0f, 60.0f, -60.0f, 60.0f, 0.1f, 200.0f);
+        view = glm::lookAt(lp, sceneCenter, up);
     }
     else
     {
-        views[0] = scene.color.view;
-        views[1] = scene.bright.view;
-        views[2] = scene.picking_image.view;
-        views[3] = scene.depth.view;
+        // Point-light shadow matrices are supplied per cubemap face elsewhere.
+        return glm::mat4(1.0f);
     }
-    VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-    fb.renderPass = scene.render_pass;
-    fb.attachmentCount = count;
-    fb.pAttachments = views.data();
-    fb.width = scene.width; fb.height = scene.height; fb.layers = 1;
-    if (vkCreateFramebuffer(g.device, &fb, nullptr, &scene.framebuffer) != VK_SUCCESS) return false;
-    scene.color_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    proj = VulkanClipProjection(proj);
+    const glm::mat4 bias = glm::translate(glm::mat4(1.0f), glm::vec3(0.5f)) *
+                           glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
+    return bias * proj * view;
+}
+
+static void RenderShadowPassForFace(hrl_scene_t* scene, ShadowGPU& shadow, const HRL_Light* light,
+                                    uint32_t face, const glm::mat4& lightMatrix)
+{
+    if (!scene || !light || !shadow.render_pass) return;
+    const VkFramebuffer fb = shadow.cube ? shadow.face_framebuffers[face] : shadow.framebuffer;
+    if (!fb) return;
+
+    if (shadow.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+    {
+        TransitionImage(g.frame_command, shadow.depth.image, shadow.layout,
+                        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT,
+                        shadow.cube ? 6u : 1u);
+        shadow.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    }
+
+    VkClearValue clear{};
+    clear.depthStencil = {1.0f, 0};
+    VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    bi.renderPass = shadow.render_pass;
+    bi.framebuffer = fb;
+    bi.renderArea.extent = {(uint32_t)shadow.resolution, (uint32_t)shadow.resolution};
+    bi.clearValueCount = 1;
+    bi.pClearValues = &clear;
+    vkCmdBeginRenderPass(g.frame_command, &bi, VK_SUBPASS_CONTENTS_INLINE);
+
+    VkViewport vp{0,0,(float)shadow.resolution,(float)shadow.resolution,0,1};
+    VkRect2D sc{{0,0},{(uint32_t)shadow.resolution,(uint32_t)shadow.resolution}};
+    vkCmdSetViewport(g.frame_command, 0, 1, &vp);
+    vkCmdSetScissor(g.frame_command, 0, 1, &sc);
+
+    for (const auto& [meshId, mesh] : scene->meshes)
+    {
+        if (!mesh || mesh->type_ == HRL_SPRITE) continue;
+        const bool skinned = mesh->type_ == HRL_3D_SKELETAL_MESH;
+        const HRL_id sid = g.builtin_shader_ids.at(skinned ? "shadow_skinned" : "shadow_static");
+        const VulkanShader* shader = GetShader(sid);
+        if (!shader) continue;
+        PipelineKey key{sid, skinned ? 10u : 9u, 0u, 0u, shadow.render_pass};
+        VkPipeline pipeline = GetPipeline(key, shadow.render_pass);
+        if (!pipeline) continue;
+
+        std::vector<unsigned char> uniform(shader->uniform_block_size, 0);
+        SetUniformMat(uniform, shader, "lightSpaceMatrix", lightMatrix);
+        SetUniformMat(uniform, shader, "model", ModelMatrix(mesh));
+        if (skinned)
+        {
+            const auto* sm = dynamic_cast<const HRL_SkeletalMesh*>(mesh);
+            const VulkanUniformField* f = FindUniform(shader, "boneMatrices");
+            if (sm && f)
+            {
+                const size_t n = std::min<size_t>(std::min<size_t>(sm->bone_matrices_.size(), f->array_count), HRL_MAX_SKELETAL_BONES);
+                for (size_t i=0; i<n; ++i)
+                    std::memcpy(uniform.data() + f->offset + i*64, &sm->bone_matrices_[i], sizeof(glm::mat4));
+            }
+        }
+        if (light->type_ == HRL_POINT_LIGHT)
+        {
+            SetUniformRaw(uniform, shader, "uPointShadow", 1);
+            SetUniformVec3(uniform, shader, "uLightPosition", light->position_);
+            SetUniformRaw(uniform, shader, "uFarPlane", 100.0f);
+        }
+        else
+        {
+            SetUniformRaw(uniform, shader, "uPointShadow", 0);
+            SetUniformVec3(uniform, shader, "uLightPosition", light->position_);
+            SetUniformRaw(uniform, shader, "uFarPlane", 100.0f);
+        }
+        const size_t off = AllocateUniform(uniform.size(), uniform.data());
+        if (off == std::numeric_limits<size_t>::max()) continue;
+        VkDescriptorSet ds = BindResources(nullptr, shader, nullptr, uniform.size());
+        if (!ds) continue;
+
+        vkCmdBindPipeline(g.frame_command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        const uint32_t dyn = static_cast<uint32_t>(off);
+        vkCmdBindDescriptorSets(g.frame_command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                g.pipeline_layout, 0, 1, &ds, 1, &dyn);
+
+        auto gpuIt = g.meshes.find(meshId);
+        if (gpuIt == g.meshes.end()) continue;
+        MeshGPU& gpu = gpuIt->second;
+        VkDeviceSize zero = 0;
+        if (skinned)
+        {
+            if (!gpu.skeletal_vertex.buffer || gpu.skeletal_vertex_count == 0) continue;
+            vkCmdBindVertexBuffers(g.frame_command, 0, 1, &gpu.skeletal_vertex.buffer, &zero);
+            if (gpu.skeletal_index.buffer && gpu.skeletal_index_count)
+            {
+                vkCmdBindIndexBuffer(g.frame_command, gpu.skeletal_index.buffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(g.frame_command, gpu.skeletal_index_count, 1, 0, 0, 0);
+            }
+            else vkCmdDraw(g.frame_command, gpu.skeletal_vertex_count, 1, 0, 0);
+        }
+        else if (!skinned && !gpu.levels.empty())
+        {
+            const MeshLevelGPU& lvl = gpu.levels[0];
+            if (!lvl.vertex.buffer || !lvl.vertex_count) continue;
+            vkCmdBindVertexBuffers(g.frame_command, 0, 1, &lvl.vertex.buffer, &zero);
+            if (lvl.index.buffer && lvl.index_count)
+            {
+                vkCmdBindIndexBuffer(g.frame_command, lvl.index.buffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(g.frame_command, lvl.index_count, 1, 0, 0, 0);
+            }
+            else vkCmdDraw(g.frame_command, lvl.vertex_count, 1, 0, 0);
+        }
+    }
+    vkCmdEndRenderPass(g.frame_command);
+    shadow.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+}
+
+static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id sceneId)
+{
+    auto& slots = g.active_shadow_slots_by_scene[sceneId];
+    slots.clear();
+    if (!scene) return;
+
+    int slot = 0;
+    for (const auto& [id, light] : scene->lights)
+    {
+        if (!light || !light->cast_shadows_ || slot >= 4) continue;
+        if (!EnsureShadowResource(light)) continue;
+        slots[id] = slot++;
+
+        ShadowGPU& shadow = g.shadow_maps.at(id);
+        if (light->type_ == HRL_POINT_LIGHT)
+        {
+            static const glm::vec3 directions[6] = {
+                { 1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0,-1, 0}, {0,0, 1}, {0,0,-1}
+            };
+            static const glm::vec3 ups[6] = {
+                {0,-1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}, {0,-1,0}, {0,-1,0}
+            };
+            const glm::mat4 proj = VulkanClipProjection(glm::perspective(glm::radians(90.0f), 1.0f, 0.05f, 100.0f));
+            for (uint32_t face=0; face<6; ++face)
+            {
+                const glm::mat4 view = glm::lookAt(light->position_, light->position_ + directions[face], ups[face]);
+                RenderShadowPassForFace(scene, shadow, light, face, proj * view);
+            }
+        }
+        else
+        {
+            RenderShadowPassForFace(scene, shadow, light, 0, ShadowMatrixForLight(light, SceneShadowCenter(scene)));
+        }
+
+        if (shadow.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        {
+            TransitionImage(g.frame_command, shadow.depth.image,
+                            shadow.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT,
+                            shadow.cube ? 6u : 1u);
+            shadow.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+    }
+
+    // Release resources that are no longer active for this scene (disabled, unsupported, or over the four public shadow slots).
+    std::vector<HRL_id> stale;
+    stale.reserve(scene->lights.size());
+    for (const auto& [id, light] : scene->lights)
+    {
+        if (g.shadow_maps.find(id) != g.shadow_maps.end() && slots.find(id) == slots.end())
+            stale.push_back(id);
+    }
+    for (HRL_id id : stale) DestroyShadowResource(id);
+}
+
+static bool EnsurePostResources(SceneGPU& scene)
+{
+    if (!scene.post_a.image)
+    {
+        if (!CreateImage(scene.width, scene.height, scene.color_format,
+                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT, scene.post_a)) return false;
+    }
+    if (!scene.post_b.image)
+    {
+        if (!CreateImage(scene.width, scene.height, scene.color_format,
+                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_ASPECT_COLOR_BIT, scene.post_b)) return false;
+    }
+    if (!scene.post_render_pass)
+    {
+        VkAttachmentDescription att{0,scene.color_format,VK_SAMPLE_COUNT_1_BIT,VK_ATTACHMENT_LOAD_OP_LOAD,VK_ATTACHMENT_STORE_OP_STORE,
+                                    VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkAttachmentReference ref{0,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription sub{}; sub.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS; sub.colorAttachmentCount=1; sub.pColorAttachments=&ref;
+        VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO}; rp.attachmentCount=1;rp.pAttachments=&att;rp.subpassCount=1;rp.pSubpasses=&sub;
+        if(vkCreateRenderPass(g.device,&rp,nullptr,&scene.post_render_pass)!=VK_SUCCESS)return false;
+    }
+    if (!scene.post_framebuffer_a)
+    {
+        VkImageView v=scene.post_a.view; VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};fb.renderPass=scene.post_render_pass;fb.attachmentCount=1;fb.pAttachments=&v;fb.width=scene.width;fb.height=scene.height;fb.layers=1;
+        if(vkCreateFramebuffer(g.device,&fb,nullptr,&scene.post_framebuffer_a)!=VK_SUCCESS)return false;
+    }
+    if (!scene.post_framebuffer_b)
+    {
+        VkImageView v=scene.post_b.view; VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};fb.renderPass=scene.post_render_pass;fb.attachmentCount=1;fb.pAttachments=&v;fb.width=scene.width;fb.height=scene.height;fb.layers=1;
+        if(vkCreateFramebuffer(g.device,&fb,nullptr,&scene.post_framebuffer_b)!=VK_SUCCESS)return false;
+    }
     return true;
+}
+
+static bool CreateSceneTargets(SceneGPU& scene)
+{
+    const VkImageUsageFlags colorUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
+    const VkImageUsageFlags pickUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (scene.samples == VK_SAMPLE_COUNT_1_BIT)
+    {
+        if(!CreateImage(scene.width,scene.height,scene.color_format,colorUsage,VK_SAMPLE_COUNT_1_BIT,VK_IMAGE_ASPECT_COLOR_BIT,scene.color))return false;
+        if(!CreateImage(scene.width,scene.height,scene.color_format,colorUsage,VK_SAMPLE_COUNT_1_BIT,VK_IMAGE_ASPECT_COLOR_BIT,scene.bright))return false;
+        if(!CreateImage(scene.width,scene.height,scene.picking_format,pickUsage,VK_SAMPLE_COUNT_1_BIT,VK_IMAGE_ASPECT_COLOR_BIT,scene.picking_image))return false;
+        if(!CreateImage(scene.width,scene.height,scene.depth_format,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_SAMPLE_COUNT_1_BIT,VK_IMAGE_ASPECT_DEPTH_BIT,scene.depth))return false;
+    }
+    else
+    {
+        if(!CreateImage(scene.width,scene.height,scene.color_format,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,VK_SAMPLE_COUNT_1_BIT==VK_SAMPLE_COUNT_1_BIT?scene.samples:scene.samples,VK_IMAGE_ASPECT_COLOR_BIT,scene.color_msaa))return false;
+        if(!CreateImage(scene.width,scene.height,scene.color_format,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,scene.samples,VK_IMAGE_ASPECT_COLOR_BIT,scene.bright_msaa))return false;
+        if(!CreateImage(scene.width,scene.height,scene.picking_format,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,scene.samples,VK_IMAGE_ASPECT_COLOR_BIT,scene.picking_msaa))return false;
+        if(!CreateImage(scene.width,scene.height,scene.depth_format,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,scene.samples,VK_IMAGE_ASPECT_DEPTH_BIT,scene.depth_msaa))return false;
+        if(!CreateImage(scene.width,scene.height,scene.color_format,colorUsage,VK_SAMPLE_COUNT_1_BIT,VK_IMAGE_ASPECT_COLOR_BIT,scene.color))return false;
+        if(!CreateImage(scene.width,scene.height,scene.color_format,colorUsage,VK_SAMPLE_COUNT_1_BIT,VK_IMAGE_ASPECT_COLOR_BIT,scene.bright))return false;
+        if(!CreateImage(scene.width,scene.height,scene.picking_format,pickUsage,VK_SAMPLE_COUNT_1_BIT,VK_IMAGE_ASPECT_COLOR_BIT,scene.picking_image))return false;
+        if(!CreateImage(scene.width,scene.height,scene.depth_format,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,VK_SAMPLE_COUNT_1_BIT,VK_IMAGE_ASPECT_DEPTH_BIT,scene.depth_resolve))return false;
+    }
+    std::array<VkAttachmentDescription,7> at{};uint32_t n=4;
+    at[0]={0,scene.color_format,scene.samples,VK_ATTACHMENT_LOAD_OP_CLEAR,VK_ATTACHMENT_STORE_OP_STORE,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    at[1]={0,scene.color_format,scene.samples,VK_ATTACHMENT_LOAD_OP_CLEAR,VK_ATTACHMENT_STORE_OP_STORE,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    at[2]={0,scene.picking_format,scene.samples,VK_ATTACHMENT_LOAD_OP_CLEAR,VK_ATTACHMENT_STORE_OP_STORE,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    at[3]={0,scene.depth_format,scene.samples,VK_ATTACHMENT_LOAD_OP_CLEAR,VK_ATTACHMENT_STORE_OP_STORE,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference colors[3]={{0,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},{1,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},{2,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};VkAttachmentReference depth{3,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};VkAttachmentReference resolves[3]={{VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},{VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},{VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
+    if(scene.samples>VK_SAMPLE_COUNT_1_BIT){at[4]={0,scene.color_format,VK_SAMPLE_COUNT_1_BIT,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_STORE,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};at[5]={0,scene.color_format,VK_SAMPLE_COUNT_1_BIT,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_STORE,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};at[6]={0,scene.picking_format,VK_SAMPLE_COUNT_1_BIT,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_STORE,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_ATTACHMENT_STORE_OP_DONT_CARE,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};resolves[0]={4,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};resolves[1]={5,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};resolves[2]={6,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};n=7;}
+    VkSubpassDescription sub{};sub.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS;sub.colorAttachmentCount=3;sub.pColorAttachments=colors;sub.pResolveAttachments=scene.samples>VK_SAMPLE_COUNT_1_BIT?resolves:nullptr;sub.pDepthStencilAttachment=&depth;VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};rp.attachmentCount=n;rp.pAttachments=at.data();rp.subpassCount=1;rp.pSubpasses=&sub;if(vkCreateRenderPass(g.device,&rp,nullptr,&scene.render_pass)!=VK_SUCCESS)return false;
+    std::array<VkImageView,7> views{};if(scene.samples>VK_SAMPLE_COUNT_1_BIT){views[0]=scene.color_msaa.view;views[1]=scene.bright_msaa.view;views[2]=scene.picking_msaa.view;views[3]=scene.depth_msaa.view;views[4]=scene.color.view;views[5]=scene.bright.view;views[6]=scene.picking_image.view;}else{views[0]=scene.color.view;views[1]=scene.bright.view;views[2]=scene.picking_image.view;views[3]=scene.depth.view;}
+    VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};fb.renderPass=scene.render_pass;fb.attachmentCount=n;fb.pAttachments=views.data();fb.width=scene.width;fb.height=scene.height;fb.layers=1;if(vkCreateFramebuffer(g.device,&fb,nullptr,&scene.framebuffer)!=VK_SUCCESS)return false;
+    scene.color_layout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;scene.depth_resolve_layout=VK_IMAGE_LAYOUT_UNDEFINED;scene.post_a_layout=VK_IMAGE_LAYOUT_UNDEFINED;scene.post_b_layout=VK_IMAGE_LAYOUT_UNDEFINED;
+    return EnsurePostResources(scene);
 }
 
 static void DestroySceneResources(SceneGPU& scene)
 {
-    if (scene.framebuffer) vkDestroyFramebuffer(g.device, scene.framebuffer, nullptr);
-    if (scene.render_pass) vkDestroyRenderPass(g.device, scene.render_pass, nullptr);
-    scene.framebuffer = VK_NULL_HANDLE;
-    scene.render_pass = VK_NULL_HANDLE;
-    DestroyImage(scene.color); DestroyImage(scene.bright); DestroyImage(scene.picking_image); DestroyImage(scene.depth);
-    DestroyImage(scene.color_msaa); DestroyImage(scene.bright_msaa); DestroyImage(scene.picking_msaa); DestroyImage(scene.depth_msaa);
-    DestroyImage(scene.post_a); DestroyImage(scene.post_b);
-    scene.color_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if(scene.post_framebuffer_a)vkDestroyFramebuffer(g.device,scene.post_framebuffer_a,nullptr);
+    if(scene.post_framebuffer_b)vkDestroyFramebuffer(g.device,scene.post_framebuffer_b,nullptr);
+    if(scene.post_render_pass)vkDestroyRenderPass(g.device,scene.post_render_pass,nullptr);
+    if(scene.framebuffer)vkDestroyFramebuffer(g.device,scene.framebuffer,nullptr);
+    if(scene.render_pass)vkDestroyRenderPass(g.device,scene.render_pass,nullptr);
+    scene.post_framebuffer_a=scene.post_framebuffer_b=VK_NULL_HANDLE;scene.post_render_pass=VK_NULL_HANDLE;scene.framebuffer=VK_NULL_HANDLE;scene.render_pass=VK_NULL_HANDLE;
+    DestroyImage(scene.color);DestroyImage(scene.bright);DestroyImage(scene.picking_image);DestroyImage(scene.depth);DestroyImage(scene.color_msaa);DestroyImage(scene.bright_msaa);DestroyImage(scene.picking_msaa);DestroyImage(scene.depth_msaa);DestroyImage(scene.depth_resolve);DestroyImage(scene.post_a);DestroyImage(scene.post_b);
+    scene.color_layout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;scene.depth_resolve_layout=VK_IMAGE_LAYOUT_UNDEFINED;scene.post_a_layout=VK_IMAGE_LAYOUT_UNDEFINED;scene.post_b_layout=VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 static bool RecreateScene(SceneGPU& scene)
@@ -1743,7 +2299,7 @@ static void DrawBuiltinSky(VkCommandBuffer cmd, const SceneDrawState& state, con
     SetUniformVec3(data, shader, "SkyTopColor", scene->sky_top_color);
     SetUniformVec3(data, shader, "SkyHorizonColor", scene->sky_horizon_color);
     SetUniformVec3(data, shader, "SkyBottomColor", scene->sky_bottom_color);
-    int tex = scene->sky_texture != HRL_INVALID_ID ? 1 : 0;
+    int tex = (scene->sky_texture != HRL_INVALID_ID && GetTexture(scene->sky_texture)) ? 1 : 0;
     SetUniformRaw(data, shader, "SkyUseTexture", tex);
     const size_t offset = AllocateUniform(data.size(), data.data());
     if (offset == std::numeric_limits<size_t>::max()) return;
@@ -1782,6 +2338,8 @@ static HRL_id ResolveBuiltinMeshShader(const HRL_Mesh* mesh, HRL_id requestedSha
         return HRL_SKINNED_3D_MESH_SHADER;
     return requestedShader;
 }
+
+static void UpdateMeshShadowDescriptors(VkDescriptorSet ds, const VulkanShader* shader, HRL_id sceneId);
 
 static void DrawOneMesh(VkCommandBuffer cmd, const SceneDrawState& state, HRL_id meshId, HRL_Mesh* mesh, int lodLevel)
 {
@@ -1834,6 +2392,23 @@ static void DrawOneMesh(VkCommandBuffer cmd, const SceneDrawState& state, HRL_id
     if (offset == std::numeric_limits<size_t>::max()) return;
     VkDescriptorSet ds = BindResources(material, shader, nullptr, uniform.size());
     if (!ds) return;
+    if (state.scene)
+    {
+        HRL_id envId = state.scene->environment_texture != HRL_INVALID_ID
+            ? state.scene->environment_texture
+            : state.scene->sky_texture;
+        const uint32_t envBinding = ShaderSamplerBinding(shader, "EnvironmentMap", 15);
+        if (state.scene->environment_mapping_enabled && envId != HRL_INVALID_ID)
+            if (const VulkanTexture* env = GetTexture(envId))
+            {
+                VkDescriptorImageInfo ii{}; ii.sampler=env->sampler; ii.imageView=env->view; ii.imageLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                w.dstSet=ds; w.dstBinding=envBinding; w.descriptorCount=1;
+                w.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w.pImageInfo=&ii;
+                vkUpdateDescriptorSets(g.device,1,&w,0,nullptr);
+            }
+        UpdateMeshShadowDescriptors(ds, shader, state.scene_id);
+    }
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     const uint32_t dynamicOffset = static_cast<uint32_t>(offset);
@@ -2348,6 +2923,354 @@ static bool ProcessScreenshot(HRL_id sceneId, const std::string& path)
     return ok;
 }
 
+
+static void UpdateDescriptorTexture(VkDescriptorSet set, uint32_t binding, const VulkanTexture& texture)
+{
+    if (!set || !texture.view || !texture.sampler || binding >= kMaxSamplers) return;
+    VkDescriptorImageInfo ii{};
+    ii.sampler = texture.sampler;
+    ii.imageView = texture.view;
+    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = set;
+    w.dstBinding = binding;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &ii;
+    vkUpdateDescriptorSets(g.device, 1, &w, 0, nullptr);
+}
+
+static void UpdateMeshShadowDescriptors(VkDescriptorSet ds, const VulkanShader* shader, HRL_id sceneId)
+{
+    const auto sit = g.active_shadow_slots_by_scene.find(sceneId);
+    if (sit == g.active_shadow_slots_by_scene.end()) return;
+
+    const uint32_t tex2DBase = ShaderSamplerBinding(shader, "ShadowMap2D_0", 7);
+    const uint32_t texCubeBase = ShaderSamplerBinding(shader, "ShadowMapCube_0", 11);
+    for (const auto& [lightId, slot] : sit->second)
+    {
+        auto it = g.shadow_maps.find(lightId);
+        if (it == g.shadow_maps.end()) continue;
+        if (slot < 0 || slot >= 4) continue;
+        if (it->second.cube)
+        {
+            if (texCubeBase + static_cast<uint32_t>(slot) < kMaxSamplers)
+                UpdateDescriptorImage(ds, texCubeBase + static_cast<uint32_t>(slot), it->second.depth);
+        }
+        else
+        {
+            if (tex2DBase + static_cast<uint32_t>(slot) < kMaxSamplers)
+                UpdateDescriptorImage(ds, tex2DBase + static_cast<uint32_t>(slot), it->second.depth);
+        }
+    }
+}
+
+static void SetUniformVec4ArrayElement(std::vector<unsigned char>& data, const VulkanShader* shader,
+                                       const char* name, uint32_t index, const glm::vec4& value)
+{
+    const VulkanUniformField* f = FindUniform(shader, name);
+    if (!f || index >= f->array_count) return;
+    const size_t offset = f->offset + static_cast<size_t>(index) * 16u;
+    if (offset + sizeof(value) > data.size()) return;
+    std::memcpy(data.data() + offset, &value, sizeof(value));
+}
+
+static void UpdateSceneLightBuffer(hrl_scene_t* scene, HRL_id sceneId)
+{
+    g.lights = LightBlockGPU{};
+    if (!scene) return;
+
+    const auto sit = g.active_shadow_slots_by_scene.find(sceneId);
+    for (const auto& [id, light] : scene->lights)
+    {
+        if (!light || g.lights.count >= kMaxLights) break;
+        LightGPU& d = g.lights.lights[g.lights.count++];
+        d.type = light->type_;
+        d.intensity = light->intensity_;
+        d.attenuation = std::max(0.0f, light->attenuation_);
+        d.innerCutoff = std::cos(glm::radians(glm::clamp(light->innerCutoff, 0.0f, 89.9f)));
+        d.position_outer = glm::vec4(light->position_,
+                                     std::cos(glm::radians(glm::clamp(light->outerCutoff, 0.0f, 89.9f))));
+        d.rotation_padding = glm::vec4(GetLightDirection(light), 0.0f);
+        d.color_shadow = glm::vec4(glm::max(light->color_, glm::vec3(0.0f)),
+                                   glm::clamp(light->shadow_strength_, 0.0f, 1.0f));
+        d.shadowMatrix = glm::mat4(1.0f);
+        d.shadowParams = glm::vec4(light->shadow_bias_, 0.0f, -1.0f, 0.0f);
+
+        if (sit != g.active_shadow_slots_by_scene.end())
+        {
+            const auto st = sit->second.find(id);
+            if (st != sit->second.end())
+            {
+                const float farPlane = light->type_ == HRL_POINT_LIGHT ? 100.0f :
+                                       (light->type_ == HRL_SPOT_LIGHT ? 100.0f : 200.0f);
+                const float kind = light->type_ == HRL_POINT_LIGHT ? 2.0f : 1.0f;
+                d.shadowParams = glm::vec4(light->shadow_bias_, farPlane, static_cast<float>(st->second), kind);
+                if (light->type_ != HRL_POINT_LIGHT)
+                    d.shadowMatrix = ShadowMatrixForLight(light, SceneShadowCenter(scene));
+            }
+        }
+    }
+    if (g.light_mapped)
+        std::memcpy(g.light_mapped, &g.lights, sizeof(g.lights));
+}
+
+static void FillPostProcessUniforms(std::vector<unsigned char>& u, const VulkanShader* shader,
+                                    const SceneGPU& scene, const HRL_Viewport* viewport,
+                                    const glm::mat4& invPV)
+{
+    SetUniformMat(u, shader, "uInvViewProjection", invPV);
+    static const auto postStartTime = std::chrono::steady_clock::now();
+    const float postTimeSeconds = static_cast<float>(std::chrono::duration<double>(std::chrono::steady_clock::now() - postStartTime).count());
+    SetUniformRaw(u, shader, "uTime", postTimeSeconds);
+
+    // Match the defaults of the public OpenGL default post-process shader.
+    SetUniformRaw(u, shader, "brightness", 1.0f);
+    SetUniformRaw(u, shader, "contrast", 1.0f);
+    SetUniformRaw(u, shader, "saturation", 1.0f);
+    SetUniformRaw(u, shader, "gamma", 1.0f);
+    SetUniformRaw(u, shader, "exposure", 0.0f);
+    SetUniformRaw(u, shader, "hueShift", 0.0f);
+    SetUniformVec3(u, shader, "tintColor", glm::vec3(1.0f));
+    SetUniformRaw(u, shader, "invertColor", 0);
+    SetUniformRaw(u, shader, "bloomStrength", 1.0f);
+    SetUniformRaw(u, shader, "sharpenStrength", 0.0f);
+    SetUniformRaw(u, shader, "chromaticAberration", 0.0f);
+    SetUniformRaw(u, shader, "filmGrainStrength", 0.0f);
+    SetUniformRaw(u, shader, "filmGrainScale", 1.0f);
+    SetUniformRaw(u, shader, "vignetteStrength", 0.0f);
+    SetUniformRaw(u, shader, "vignetteRadius", 0.75f);
+    SetUniformRaw(u, shader, "vignetteSoftness", 0.25f);
+    SetUniformVec3(u, shader, "vignetteColor", glm::vec3(0.0f));
+    SetUniformRaw(u, shader, "fadeAmount", 0.0f);
+    SetUniformVec3(u, shader, "fadeColor", glm::vec3(0.0f));
+
+    if (viewport && viewport->camera_)
+        SetUniformVec3(u, shader, "uCameraPos", viewport->camera_->position_);
+    const float viewportPixelWidth = viewport ? std::max(1.0f, viewport->width_ * static_cast<float>(scene.width)) : static_cast<float>(scene.width);
+    const float viewportPixelHeight = viewport ? std::max(1.0f, viewport->height_ * static_cast<float>(scene.height)) : static_cast<float>(scene.height);
+    SetUniformRaw(u, shader, "uScreenSize", glm::vec2(viewportPixelWidth, viewportPixelHeight));
+    if (viewport)
+    {
+        const glm::vec2 origin(viewport->x_, 1.0f - viewport->y_ - viewport->height_);
+        const glm::vec2 size(viewport->width_, viewport->height_);
+        SetUniformRaw(u, shader, "uViewportOrigin", origin);
+        SetUniformRaw(u, shader, "uViewportSize", size);
+    }
+}
+
+static bool ParseUniformArrayIndex(const std::string& name, std::string& baseName, uint32_t& index)
+{
+    const size_t open = name.find_last_of('[');
+    if (open == std::string::npos || name.empty() || name.back() != ']') return false;
+    baseName = name.substr(0, open);
+    if (baseName.empty()) return false;
+    const std::string number = name.substr(open + 1, name.size() - open - 2);
+    if (number.empty()) return false;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(number.c_str(), &end, 10);
+    if (!end || *end != '\0' || parsed > UINT32_MAX) return false;
+    index = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+static void SetUniformFloatArrayElement(std::vector<unsigned char>& data, const VulkanShader* shader,
+                                        const std::string& name, float value)
+{
+    std::string base; uint32_t index = 0;
+    if (!ParseUniformArrayIndex(name, base, index)) return;
+    const VulkanUniformField* f = FindUniform(shader, base.c_str());
+    if (!f || index >= f->array_count) return;
+    const size_t offset = f->offset + static_cast<size_t>(index) * 16u;
+    if (offset + sizeof(float) > data.size()) return;
+    std::memcpy(data.data() + offset, &value, sizeof(float));
+}
+
+static void SetUniformVec3ArrayElement(std::vector<unsigned char>& data, const VulkanShader* shader,
+                                       const std::string& name, const glm::vec3& value)
+{
+    std::string base; uint32_t index = 0;
+    if (!ParseUniformArrayIndex(name, base, index)) return;
+    const VulkanUniformField* f = FindUniform(shader, base.c_str());
+    if (!f || index >= f->array_count) return;
+    const size_t offset = f->offset + static_cast<size_t>(index) * 16u;
+    if (offset + 12 > data.size()) return;
+    std::memcpy(data.data() + offset, &value, 12);
+}
+
+static void SetMaterialUniforms(std::vector<unsigned char>& data, const VulkanShader* shader, const HRL_Material* material)
+{
+    if (!material) return;
+    for (const auto& [n,v] : material->intParams_)
+    {
+        if (FindUniform(shader, n.c_str())) SetUniformRaw(data,shader,n.c_str(),v);
+    }
+    for (const auto& [n,v] : material->floatParams_)
+    {
+        if (FindUniform(shader, n.c_str())) SetUniformRaw(data,shader,n.c_str(),v);
+        else SetUniformFloatArrayElement(data,shader,n,v);
+    }
+    for (const auto& [n,v] : material->vec2Params_)
+    {
+        if (FindUniform(shader, n.c_str())) SetUniformRaw(data,shader,n.c_str(),v);
+    }
+    for (const auto& [n,v] : material->vec3Params_)
+    {
+        if (FindUniform(shader, n.c_str())) SetUniformVec3(data,shader,n.c_str(),v);
+        else SetUniformVec3ArrayElement(data,shader,n,v);
+    }
+    for (const auto& [n,v] : material->vec4Params_)
+    {
+        if (FindUniform(shader, n.c_str())) SetUniformRaw(data,shader,n.c_str(),v);
+        else
+        {
+            std::string base; uint32_t index = 0;
+            if (ParseUniformArrayIndex(n,base,index))
+                SetUniformVec4ArrayElement(data,shader,base.c_str(),index,v);
+        }
+    }
+}
+
+static bool RunFullscreenPass(SceneGPU& scene, HRL_id shaderId,
+                              const ImageResource& source, const ImageResource* brightSource,
+                              const ImageResource* depthImage,
+                              const HRL_Viewport* viewport, const glm::mat4& invPV,
+                              HRL_Material* material, ImageResource& dst, VkImageLayout& dstLayout)
+{
+    const VulkanShader* shader = GetShader(shaderId);
+    if (!shader || !EnsurePostResources(scene) || !source.image || !dst.image || source.image == dst.image)
+        return false;
+
+    if (dstLayout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+        TransitionImage(g.frame_command, dst.image, dstLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    dstLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    TransitionImage(g.frame_command, source.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkImageCopy copy{};
+    copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy.srcSubresource.layerCount = 1;
+    copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy.dstSubresource.layerCount = 1;
+    copy.extent = {static_cast<uint32_t>(scene.width), static_cast<uint32_t>(scene.height), 1};
+    vkCmdCopyImage(g.frame_command, source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   dst.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    TransitionImage(g.frame_command, source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    TransitionImage(g.frame_command, dst.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    dstLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    bi.renderPass = scene.post_render_pass;
+    bi.framebuffer = (dst.image == scene.post_a.image) ? scene.post_framebuffer_a : scene.post_framebuffer_b;
+    bi.renderArea.extent = {(uint32_t)scene.width, (uint32_t)scene.height};
+    vkCmdBeginRenderPass(g.frame_command, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    if (viewport)
+        SetViewportAndScissor(g.frame_command, viewport, scene.width, scene.height);
+    else
+    {
+        VkViewport vp{0,0,(float)scene.width,(float)scene.height,0,1};
+        VkRect2D sc{{0,0},{(uint32_t)scene.width,(uint32_t)scene.height}};
+        vkCmdSetViewport(g.frame_command,0,1,&vp);
+        vkCmdSetScissor(g.frame_command,0,1,&sc);
+    }
+
+    std::vector<unsigned char> u(std::max<size_t>(16, shader->uniform_block_size), 0);
+    FillPostProcessUniforms(u, shader, scene, viewport, invPV);
+    SetMaterialUniforms(u, shader, material);
+
+    const size_t off = AllocateUniform(u.size(), u.data());
+    if (off == std::numeric_limits<size_t>::max())
+    {
+        vkCmdEndRenderPass(g.frame_command);
+        return false;
+    }
+    VkDescriptorSet ds = BindResources(material, shader, nullptr, u.size());
+    if (!ds)
+    {
+        vkCmdEndRenderPass(g.frame_command);
+        return false;
+    }
+    const uint32_t sceneBinding = ShaderSamplerBinding(shader, "uScene", 0);
+    UpdateDescriptorImage(ds, sceneBinding, source);
+    if (brightSource)
+        UpdateDescriptorImage(ds, ShaderSamplerBinding(shader, "uBrightScene", 1), *brightSource);
+    if (depthImage && depthImage->image)
+        UpdateDescriptorImage(ds, ShaderSamplerBinding(shader, "uDepth", 2), *depthImage);
+
+    VkPipeline pipeline = GetPipeline(PipelineKey{shaderId,5,0,0,scene.post_render_pass}, scene.post_render_pass);
+    if (!pipeline)
+    {
+        vkCmdEndRenderPass(g.frame_command);
+        return false;
+    }
+    vkCmdBindPipeline(g.frame_command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    const uint32_t dyn = static_cast<uint32_t>(off);
+    vkCmdBindDescriptorSets(g.frame_command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            g.pipeline_layout, 0, 1, &ds, 1, &dyn);
+    vkCmdDraw(g.frame_command, 3, 1, 0, 0);
+    vkCmdEndRenderPass(g.frame_command);
+    dstLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return true;
+}
+
+static bool RenderSceneEffectsForViewport(SceneGPU& scene, const hrl_scene_t* hrlScene,
+                                          const HRL_Viewport* viewport, const glm::mat4& invPV,
+                                          const ImageResource& source, const ImageResource& brightSource,
+                                          const ImageResource& depth, ImageResource& dst, VkImageLayout& dstLayout)
+{
+    const auto it = g.builtin_shader_ids.find("scene_effects");
+    if (it == g.builtin_shader_ids.end() || !hrlScene || !viewport) return false;
+    const VulkanShader* shader = GetShader(it->second);
+    if (!shader) return false;
+
+    HRL_Material effect{};
+    effect.shader_ = it->second;
+    effect.intParams_["uAOEnabled"] = hrlScene->ambient_occlusion_enabled ? 1 : 0;
+    effect.floatParams_["uAOStrength"] = hrlScene->ambient_occlusion_strength;
+    effect.floatParams_["uAORadius"] = hrlScene->ambient_occlusion_radius;
+    effect.floatParams_["uAOBias"] = hrlScene->ambient_occlusion_bias;
+    effect.floatParams_["uAOPower"] = hrlScene->ambient_occlusion_power;
+
+    const auto& globalFog = hrlScene->global_volumetric_fog;
+    effect.intParams_["uGlobalVolumetricFogEnabled"] = globalFog.enabled ? 1 : 0;
+    effect.vec3Params_["uGlobalFogColor"] = globalFog.color;
+    effect.floatParams_["uGlobalFogDensity"] = globalFog.density;
+    effect.intParams_["uGlobalFogSteps"] = static_cast<int>(globalFog.steps);
+
+    int fogCount = 0;
+    HRL_uint fogSteps = std::max<HRL_uint>(4u, globalFog.steps);
+    for (const auto& [fogId, fog] : hrlScene->volumetric_fogs)
+    {
+        (void)fogId;
+        if (!fog || !fog->enabled || fog->radius <= 0.0f || fog->density <= 0.0f || fogCount >= 64) continue;
+        effect.vec4Params_["uFogPosRadius[" + std::to_string(fogCount) + "]"] = glm::vec4(fog->position, fog->radius);
+        effect.vec4Params_["uFogColorDensity[" + std::to_string(fogCount) + "]"] = glm::vec4(fog->color, fog->density);
+        fogSteps = std::max(fogSteps, fog->steps);
+        ++fogCount;
+    }
+    effect.intParams_["uVolumetricFogCount"] = fogCount;
+    effect.intParams_["uVolumetricFogSteps"] = static_cast<int>(fogSteps);
+
+    const auto& rays = hrlScene->god_rays;
+    effect.intParams_["uGodRaysEnabled"] = rays.enabled ? 1 : 0;
+    effect.vec2Params_["uGodRaysLightUV"] = glm::vec2(0.5f);
+    effect.vec3Params_["uGodRaysColor"] = rays.color;
+    effect.floatParams_["uGodRaysDensity"] = rays.density;
+    effect.floatParams_["uGodRaysDecay"] = rays.decay;
+    effect.floatParams_["uGodRaysWeight"] = rays.weight;
+    effect.intParams_["uGodRaysSamples"] = static_cast<int>(rays.samples);
+    const glm::vec4 rayClip = Projection(viewport) * View(viewport) * glm::vec4(rays.position, 1.0f);
+    if (std::abs(rayClip.w) > 1e-5f)
+        effect.vec2Params_["uGodRaysLightUV"] = glm::vec2(rayClip.x, rayClip.y) / rayClip.w * 0.5f + 0.5f;
+
+    return RunFullscreenPass(scene, it->second, source, &brightSource, &depth,
+                             viewport, invPV, &effect, dst, dstLayout);
+}
+
+
+
 // --- backend entry points ---
 void VK_Shutdown();
 
@@ -2380,6 +3303,10 @@ void VK_InitContext(HRL_uint width, HRL_uint height, void* loader)
         CreateBuiltinShaderFromFiles("sky", "vulkan_sky_sphere.vert.glsl", "vulkan_sky_sphere.frag.glsl") == HRL_INVALID_ID ||
         CreateBuiltinShaderFromFiles("ui", "vulkan_ui.vert.glsl", "vulkan_ui.frag.glsl") == HRL_INVALID_ID ||
         CreateBuiltinShaderFromFiles("vfx", "vulkan_vfx.vert.glsl", "vulkan_vfx.frag.glsl") == HRL_INVALID_ID ||
+        CreateBuiltinShaderFromFiles("default_post", "vulkan_post.vert.glsl", "vulkan_post.frag.glsl", HRL_DEFAULT_POST_PROCESS_SHADER) == HRL_INVALID_ID ||
+        CreateBuiltinShaderFromFiles("scene_effects", "vulkan_post.vert.glsl", "vulkan_scene_effects.frag.glsl") == HRL_INVALID_ID ||
+        CreateBuiltinShaderFromFiles("shadow_static", "vulkan_shadow_static.vert.glsl", "vulkan_shadow.frag.glsl") == HRL_INVALID_ID ||
+        CreateBuiltinShaderFromFiles("shadow_skinned", "vulkan_shadow_skinned.vert.glsl", "vulkan_shadow.frag.glsl") == HRL_INVALID_ID ||
         !CreateFallbackTexture())
     {
         VK_Shutdown();
@@ -2405,6 +3332,9 @@ void VK_Shutdown()
         DestroySceneResources(scene);
     }
     g.scenes.clear();
+    while (!g.shadow_maps.empty())
+        DestroyShadowResource(g.shadow_maps.begin()->first);
+    g.active_shadow_slots_by_scene.clear();
     for (auto& [id, mesh] : g.meshes){for(auto& l:mesh.levels){DestroyBuffer(l.vertex);DestroyBuffer(l.index);}DestroyBuffer(mesh.skeletal_vertex);DestroyBuffer(mesh.skeletal_index);}g.meshes.clear();
     for (auto& [id, shader] : g.shaders) shader.Destroy(g.device); g.shaders.clear();
     for (auto& [id, texture] : g.textures) texture.Destroy(g.device); g.textures.clear();
@@ -2507,61 +3437,199 @@ void VK_TakeScreenshot(HRL_id scene,const char* path)
 
 void VK_RenderScene(hrl_scene_t* scene, HRL_id sceneId)
 {
-    if (!g.initialized || !g.device || !g.frame_open) return;
-    auto it=g.scenes.find(sceneId);if(it==g.scenes.end()||!scene||scene->viewports.empty())return; // empty viewport is legal; nothing to draw.
-    SceneGPU& target=it->second;
-    if(!g.frame_open)return;
-    if(target.framebuffer==VK_NULL_HANDLE)RecreateScene(target);
-    // Update light UBO.
-    g.lights.count=0;
-    for(const auto& [id,light]:scene->lights){(void)id;if(g.lights.count>=kMaxLights)break;LightGPU& dst=g.lights.lights[g.lights.count++];dst.position=glm::vec4(light->position_,1);dst.rotation=glm::vec4(light->rotation_,1);dst.color=glm::vec4(light->color_,1);dst.params=glm::vec4(static_cast<float>(light->type_),light->intensity_,light->innerCutoff,light->outerCutoff);}    
-    std::memcpy(g.light_mapped,&g.lights,sizeof(g.lights));
+    if (!g.initialized || !g.device || !g.frame_open || !scene) return;
+    auto it = g.scenes.find(sceneId);
+    if (it == g.scenes.end() || scene->viewports.empty()) return;
+    SceneGPU& target = it->second;
+    if (!target.framebuffer) RecreateScene(target);
 
-    VkClearValue clears[4]{};clears[0].color={{0,0,0,1}};clears[1].color={{0,0,0,1}};clears[2].color={{0,0,0,1}};clears[3].depthStencil={1.0f,0};
-    VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};bi.renderPass=target.render_pass;bi.framebuffer=target.framebuffer;bi.renderArea.extent={static_cast<uint32_t>(target.width),static_cast<uint32_t>(target.height)};bi.clearValueCount=4;bi.pClearValues=clears;
-    vkCmdBeginRenderPass(g.frame_command,&bi,VK_SUBPASS_CONTENTS_INLINE);
+    if (scene->shadows_dirty)
+    {
+        PrepareSceneShadows(scene, sceneId);
+        scene->shadows_dirty = false;
+    }
+    UpdateSceneLightBuffer(scene, sceneId);
 
-    for(const auto& [vpId,viewport]:scene->viewports)
+    VkClearValue clears[4]{};
+    clears[0].color = {{0,0,0,1}};
+    clears[1].color = {{0,0,0,1}};
+    clears[2].color = {{0,0,0,1}};
+    clears[3].depthStencil = {1.0f,0};
+    VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    bi.renderPass = target.render_pass;
+    bi.framebuffer = target.framebuffer;
+    bi.renderArea.extent = {(uint32_t)target.width,(uint32_t)target.height};
+    bi.clearValueCount = 4;
+    bi.pClearValues = clears;
+    vkCmdBeginRenderPass(g.frame_command, &bi, VK_SUBPASS_CONTENTS_INLINE);
+
+    for (const auto& [vpId, viewport] : scene->viewports)
     {
         (void)vpId;
-        if(!viewport||!viewport->camera_)continue;
-        SceneDrawState state;state.scene=scene;state.scene_id=sceneId;state.viewport=viewport;state.projection=Projection(viewport);state.view=View(viewport);
-        SetViewportAndScissor(g.frame_command,viewport,target.width,target.height);
-        ClearViewport(g.frame_command,viewport,target.width,target.height);
-        DrawBuiltinSky(g.frame_command,state,scene);
+        if (!viewport || !viewport->camera_) continue;
+        SceneDrawState state;
+        state.scene = scene;
+        state.scene_id = sceneId;
+        state.viewport = viewport;
+        state.projection = Projection(viewport);
+        state.view = View(viewport);
 
-        // Opaque meshes first, sprites after 3D.
-        for(const auto& [meshId,mesh]:scene->meshes)
+        SetViewportAndScissor(g.frame_command, viewport, target.width, target.height);
+        ClearViewport(g.frame_command, viewport, target.width, target.height);
+        DrawBuiltinSky(g.frame_command, state, scene);
+
+        for (const auto& [meshId, mesh] : scene->meshes)
         {
-            if(!mesh || mesh->type_==HRL_SPRITE)continue;
-            const int lod=SelectLOD(mesh,ModelMatrix(mesh),state.view,state.projection,viewport);mesh->last_lod_level_=lod;
-            DrawOneMesh(g.frame_command,state,meshId,mesh,lod);
+            if (!mesh || mesh->type_ == HRL_SPRITE) continue;
+            const int lod = SelectLOD(mesh, ModelMatrix(mesh), state.view, state.projection, viewport);
+            mesh->last_lod_level_ = lod;
+            DrawOneMesh(g.frame_command, state, meshId, mesh, lod);
         }
-        std::vector<std::pair<HRL_id,HRL_Mesh*>> sprites;
-        for(const auto& [meshId,mesh]:scene->meshes)if(mesh&&mesh->type_==HRL_SPRITE)sprites.push_back({meshId,mesh});
-        std::sort(sprites.begin(),sprites.end(),[](auto&a,auto&b){return a.second->draw_order_<b.second->draw_order_;});
-        for(auto [meshId,mesh]:sprites)DrawOneMesh(g.frame_command,state,meshId,mesh,0);
-        DrawVFX(g.frame_command,state,scene);
-        DrawVFXMeshParticles(g.frame_command,state,scene);
 
-        auto priv=GetPrivateContext();auto dit=priv->debug_renderers.find(sceneId);if(dit!=priv->debug_renderers.end())DrawDebug(g.frame_command,state,dit->second,priv->debug_line_thickness);
-        DrawWidgets(g.frame_command,state,viewport);
+        std::vector<std::pair<HRL_id,HRL_Mesh*>> sprites;
+        sprites.reserve(scene->meshes.size());
+        for (const auto& [meshId, mesh] : scene->meshes)
+            if (mesh && mesh->type_ == HRL_SPRITE) sprites.emplace_back(meshId,mesh);
+        std::sort(sprites.begin(),sprites.end(),[](const auto& a,const auto& b){return a.second->draw_order_ < b.second->draw_order_;});
+        for (const auto& [meshId, mesh] : sprites) DrawOneMesh(g.frame_command, state, meshId, mesh, 0);
+
+        DrawVFX(g.frame_command, state, scene);
+        DrawVFXMeshParticles(g.frame_command, state, scene);
+
+        auto priv = GetPrivateContext();
+        auto dit = priv->debug_renderers.find(sceneId);
+        if (dit != priv->debug_renderers.end())
+            DrawDebug(g.frame_command, state, dit->second, priv->debug_line_thickness);
+        DrawWidgets(g.frame_command, state, viewport);
     }
     vkCmdEndRenderPass(g.frame_command);
     target.color_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    if(target.render_on_screen && g.swapchain)
+    bool hasPost = false;
+    for (const auto& [vpId, viewport] : scene->viewports)
     {
-        TransitionImage(g.frame_command,target.color.image,target.color_layout,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        (void)vpId;
+        if (viewport && !viewport->post_processes.empty()) { hasPost = true; break; }
+    }
+    const bool hasSceneEffects = scene->ambient_occlusion_enabled || scene->global_volumetric_fog.enabled ||
+                                 !scene->volumetric_fogs.empty() || scene->god_rays.enabled;
+    const bool canSampleDepth = target.samples == VK_SAMPLE_COUNT_1_BIT && target.depth.image;
+
+    if (hasPost || (hasSceneEffects && canSampleDepth))
+    {
+        if (target.color_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        {
+            TransitionImage(g.frame_command, target.color.image, target.color_layout,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            target.color_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        TransitionImage(g.frame_command, target.bright.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (canSampleDepth)
+            TransitionImage(g.frame_command, target.depth.image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+        TransitionImage(g.frame_command, target.post_a.image, target.post_a_layout,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        target.post_a_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        VkImageCopy seed{};
+        seed.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        seed.srcSubresource.layerCount = 1;
+        seed.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        seed.dstSubresource.layerCount = 1;
+        seed.extent = {(uint32_t)target.width,(uint32_t)target.height,1};
+        vkCmdCopyImage(g.frame_command, target.color.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       target.post_a.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &seed);
+        TransitionImage(g.frame_command, target.post_a.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        target.post_a_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        ImageResource* current = &target.post_a;
+        VkImageLayout* currentLayout = &target.post_a_layout;
+        ImageResource* other = &target.post_b;
+        VkImageLayout* otherLayout = &target.post_b_layout;
+
+        for (const auto& [vpId, viewport] : scene->viewports)
+        {
+            (void)vpId;
+            if (!viewport || !viewport->camera_) continue;
+            const glm::mat4 invPV = glm::inverse(Projection(viewport) * View(viewport));
+
+            if (hasSceneEffects && canSampleDepth)
+            {
+                if (RenderSceneEffectsForViewport(target, scene, viewport, invPV, *current,
+                                                  target.bright, target.depth, *other, *otherLayout))
+                {
+                    std::swap(current, other);
+                    std::swap(currentLayout, otherLayout);
+                }
+            }
+
+            std::vector<HRL_PostProcess*> postProcesses;
+            postProcesses.reserve(viewport->post_processes.size());
+            for (const auto& [postId, pp] : viewport->post_processes)
+            {
+                (void)postId;
+                if (pp) postProcesses.push_back(pp);
+            }
+            std::stable_sort(postProcesses.begin(), postProcesses.end(), [](const HRL_PostProcess* a, const HRL_PostProcess* b)
+            {
+                if (a->priority_ != b->priority_) return a->priority_ < b->priority_;
+                return a->id_ < b->id_;
+            });
+
+            for (const HRL_PostProcess* pp : postProcesses)
+            {
+                auto mit = GetPrivateContext()->materials.find(pp->material_);
+                if (mit == GetPrivateContext()->materials.end() || !mit->second) continue;
+                HRL_Material* material = mit->second;
+                const ImageResource* depth = canSampleDepth ? &target.depth : nullptr;
+                if (RunFullscreenPass(target, material->shader_, *current, &target.bright, depth,
+                                       viewport, invPV, material, *other, *otherLayout))
+                {
+                    std::swap(current, other);
+                    std::swap(currentLayout, otherLayout);
+                }
+            }
+        }
+
+        TransitionImage(g.frame_command, current->image, *currentLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        *currentLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        TransitionImage(g.frame_command, target.color.image, target.color_layout,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        target.color_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        VkImageCopy finalCopy{};
+        finalCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        finalCopy.srcSubresource.layerCount = 1;
+        finalCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        finalCopy.dstSubresource.layerCount = 1;
+        finalCopy.extent = {(uint32_t)target.width,(uint32_t)target.height,1};
+        vkCmdCopyImage(g.frame_command, current->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       target.color.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &finalCopy);
+    }
+
+    if (target.render_on_screen && g.swapchain)
+    {
+        TransitionImage(g.frame_command, target.color.image, target.color_layout,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         target.color_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         if (g.swapchain_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-            TransitionImage(g.frame_command,g.swapchain_images[g.swapchain_index],g.swapchain_layout,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            TransitionImage(g.frame_command, g.swapchain_images[g.swapchain_index],
+                            g.swapchain_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         g.swapchain_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        VkImageCopy copy{};copy.srcSubresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;copy.srcSubresource.layerCount=1;copy.dstSubresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;copy.dstSubresource.layerCount=1;copy.extent={static_cast<uint32_t>(std::min(target.width,(int)g.swapchain_extent.width)),static_cast<uint32_t>(std::min(target.height,(int)g.swapchain_extent.height)),1};
-        vkCmdCopyImage(g.frame_command,target.color.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,g.swapchain_images[g.swapchain_index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
-        TransitionImage(g.frame_command,g.swapchain_images[g.swapchain_index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        VkImageCopy copy{};
+        copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.srcSubresource.layerCount = 1;
+        copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.dstSubresource.layerCount = 1;
+        copy.extent = {static_cast<uint32_t>(std::min(target.width,(int)g.swapchain_extent.width)),
+                       static_cast<uint32_t>(std::min(target.height,(int)g.swapchain_extent.height)),1};
+        vkCmdCopyImage(g.frame_command, target.color.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       g.swapchain_images[g.swapchain_index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        TransitionImage(g.frame_command, g.swapchain_images[g.swapchain_index],
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         g.swapchain_layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        g.present_requested=true;
+        g.present_requested = true;
     }
 }
 
@@ -2620,8 +3688,27 @@ void VK_DeleteMeshLODs(HRL_id id){auto it=g.meshes.find(id);if(it==g.meshes.end(
 int VK_CreateSpriteMesh(HRL_id id){const HRL_Vertex3D v[4]={{ {-0.5f,-0.5f,0},{0,0,1},{0,0},{1,0,0},{0,1,0}},{{0.5f,-0.5f,0},{0,0,1},{1,0},{1,0,0},{0,1,0}},{{0.5f,0.5f,0},{0,0,1},{1,1},{1,0,0},{0,1,0}},{{-0.5f,0.5f,0},{0,0,1},{0,1},{1,0,0},{0,1,0}}};const HRL_uint ind[6]={0,1,2,2,3,0};return VK_CreateMesh(id,v,4,ind,6);}
 void VK_DeleteMesh(HRL_id id){auto it=g.meshes.find(id);if(it==g.meshes.end())return;if(g.device)vkDeviceWaitIdle(g.device);for(auto& l:it->second.levels){DestroyBuffer(l.vertex);DestroyBuffer(l.index);}DestroyBuffer(it->second.skeletal_vertex);DestroyBuffer(it->second.skeletal_index);g.meshes.erase(it);}
 
-void VK_UpdateLights(const std::vector<HRL_Light*>& lights){g.lights.count=0;for(auto*l:lights){if(!l||g.lights.count>=kMaxLights)break;LightGPU&d=g.lights.lights[g.lights.count++];d.position=glm::vec4(l->position_,1);d.rotation=glm::vec4(l->rotation_,1);d.color=glm::vec4(l->color_,1);d.params=glm::vec4(static_cast<float>(l->type_),l->intensity_,l->innerCutoff,l->outerCutoff);}if(g.light_mapped)std::memcpy(g.light_mapped,&g.lights,sizeof(g.lights));}
-void VK_DeleteLight(HRL_id){ }
+void VK_UpdateLights(const std::vector<HRL_Light*>& lights){
+    g.lights = LightBlockGPU{};
+    for (auto* l : lights) {
+        if (!l || g.lights.count >= kMaxLights) break;
+        LightGPU& d = g.lights.lights[g.lights.count++];
+        d.type = l->type_;
+        d.intensity = l->intensity_;
+        d.attenuation = std::max(0.0f, l->attenuation_);
+        d.innerCutoff = std::cos(glm::radians(glm::clamp(l->innerCutoff, 0.0f, 89.9f)));
+        d.position_outer = glm::vec4(l->position_,
+                                     std::cos(glm::radians(glm::clamp(l->outerCutoff, 0.0f, 89.9f))));
+        d.rotation_padding = glm::vec4(GetLightDirection(l), 0.0f);
+        d.color_shadow = glm::vec4(glm::max(l->color_, glm::vec3(0.0f)),
+                                   glm::clamp(l->shadow_strength_, 0.0f, 1.0f));
+        d.shadowMatrix = glm::mat4(1.0f);
+        d.shadowParams = glm::vec4(l->shadow_bias_, 0.0f, -1.0f, 0.0f);
+    }
+    if (g.light_mapped)
+        std::memcpy(g.light_mapped, &g.lights, sizeof(g.lights));
+}
+void VK_DeleteLight(HRL_id id){DestroyShadowResource(id);for(auto&[sid,slots]:g.active_shadow_slots_by_scene)slots.erase(id);}
 
 HRL_id VK_CreateTexture(const char* data,size_t size){const HRL_id id=GenerateHRL_ID();VulkanTexture tex;std::string err;if(!tex.CreateFromEncoded(g.physical,g.device,g.command_pool,g.graphics_queue,data,size,g.max_anisotropy,err)){SetErrorCode(HRL_INVALID_FILE_FORMAT,HRL_SEVERITY_ERROR,"Vulkan texture: "+err);return HRL_INVALID_ID;}g.textures.emplace(id,std::move(tex));return id;}
 HRL_id VK_CreateTextureFromBitmap(BitmapResult bmp){const HRL_id id=GenerateHRL_ID();VulkanTexture tex;std::string err;if(!tex.Create(g.physical,g.device,g.command_pool,g.graphics_queue,bmp,g.max_anisotropy,err)){SetErrorCode(HRL_OUT_OF_MEMORY,HRL_SEVERITY_ERROR,"Vulkan bitmap texture: "+err);return HRL_INVALID_ID;}g.textures.emplace(id,std::move(tex));return id;}
