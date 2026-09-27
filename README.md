@@ -14,7 +14,7 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 
 |Debug shape|Density|Gizmo|
 |-|-|-|
-|<img src="./docs/assets/screenshots/debug\\\_shape.png" alt="Debug shape" width="300">|<img src="./docs/assets/screenshots/density.png" alt="Density" width="300">|<img src="./docs/assets/screenshots/gizmo.png" alt="Gizmo" width="300">|
+|<img src="./docs/assets/screenshots/debugshape.png" alt="Debug shape" width="300">|<img src="./docs/assets/screenshots/density.png" alt="Density" width="300">|<img src="./docs/assets/screenshots/gizmo.png" alt="Gizmo" width="300">|
 
 |Lightning|Lit|Normal|
 |-|-|-|
