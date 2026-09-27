@@ -324,6 +324,7 @@ int main()
 {
 
     glfwInit();
+    /*
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
   GLFWwindow* win =
@@ -353,8 +354,8 @@ int main()
 
     HRL_Init(HRL_VULKAN);
     HRL_InitContext(1280, 720, nullptr);
+    */
 
-    /*
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -374,7 +375,6 @@ int main()
 
     HRL_Init(HRL_OPENGL_33);
     HRL_InitContext(1280, 720, (void*)glfwGetProcAddress);
-    */
 
 
   glfwSetFramebufferSizeCallback(win, framebuffer_size_callback);
@@ -470,12 +470,9 @@ int main()
 
     HRL_id post_mat = HRL_CreateMaterial(HRL_DEFAULT_POST_PROCESS_SHADER);
     HRL_id post_process = HRL_CreatePostProcess(viewport, post_mat, 1);
-    HRL_MaterialSetFloat(post_mat, "bloomStrength", 1.f);
+    HRL_MaterialSetFloat(post_mat, "bloomStrength", 0.f);
 
 
-    HRL_SetGlobalVolumetricFogEnabled(scene, HRL_TRUE);
-    HRL_SetGlobalVolumetricFogDensity(scene, 2.f);
-    HRL_SetGlobalVolumetricFogSteps(scene, 48);
 
 
   // ---------------------------------------------------------------------------
@@ -1044,7 +1041,7 @@ int main()
     HRL_id sky =
     HRL_CreateLight(scene, HRL_SKY_LIGHT);
     HRL_SetLightIntensity(sky, 0.15f);
-    HRL_SetLightColor(sky, 0.8f, 0.9f, 1.0f);
+    HRL_SetLightColor(sky, 1.f, 0.9f, 0.8f);
 
     HRL_SetAmbientOcclusionEnabled(scene, HRL_TRUE);
 
@@ -1070,14 +1067,14 @@ int main()
 
   HRL_SetLightIntensity(
       light,
-      15.f
+      5.f
   );
 
   HRL_SetLightColor(
       light,
       1.f,
-      0.95f,
-      0.85f
+      0.9f,
+      0.75f
   );
 
   HRL_SetLightLocation(
@@ -1500,12 +1497,7 @@ int main()
 
     modelYaw += 20.f * (float)dt;
 
-    HRL_SetMeshRotation(
-        model,
-        0.f,
-        modelYaw,
-        0.f
-    );
+
 
 
     HRL_UpdateSkeletalAnimations(
@@ -1630,7 +1622,7 @@ int main()
           0.f,
           20.f,
           0.f,
-          30.f,
+          5.f,
           16,
           1.f,
           0.f,

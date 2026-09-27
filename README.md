@@ -8,6 +8,22 @@ HRL is a C/C++ rendering library designed to sit on top of multiple graphics bac
 
 ---
 
+## Showcase
+
+A few screenshots showcasing HRL's rendering and debug capabilities:
+
+| Debug shape | Density | Gizmo |
+|---|---|---|
+| <img src="./docs/assets/screenshots/debug_shape.png" alt="Debug shape" width="300"> | <img src="./docs/assets/screenshots/density.png" alt="Density" width="300"> | <img src="./docs/assets/screenshots/gizmo.png" alt="Gizmo" width="300"> |
+
+| Lightning | Lit | Normal |
+|---|---|---|
+| <img src="./docs/assets/screenshots/lightning.png" alt="Lightning" width="300"> | <img src="./docs/assets/screenshots/lit.png" alt="Lit" width="300"> | <img src="./docs/assets/screenshots/normal.png" alt="Normal" width="300"> |
+
+| Screenshot | Unlit | VFX |
+|---|---|---|
+| <img src="./docs/assets/screenshots/screenshot.png" alt="Screenshot" width="300"> | <img src="./docs/assets/screenshots/unlit.png" alt="Unlit" width="300"> | <img src="./docs/assets/screenshots/vfx.png" alt="VFX" width="300"> |
+
 # Full Documentation
 [Official Site](https://oscar-soirey.github.io/Horizon-Rendering-Library)
 

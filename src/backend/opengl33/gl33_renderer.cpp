@@ -1419,7 +1419,13 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 
 		// PrepareSceneShadows()/UploadSceneLights() have already run once for this scene.
 		// ---- STEP 1 : sky sphere, géométrie 3D puis sprites ----
-		DrawSkySphere(scene);
+		// The wireframe debug view is intentionally a pure geometry view. Do not
+		// draw the filled sky or feed the result through scene/post-processing
+		// passes, otherwise the debug image can be obscured by a later fullscreen
+		// pass.
+		const bool wireframeDebug = scene->debug_view == HRL_DEBUG_VIEW_WIREFRAME;
+		if (!wireframeDebug)
+			DrawSkySphere(scene);
 
 		// ---- STEP 1b : rendu de la géométrie 3D puis des sprites ----
 		glBindFramebuffer(GL_FRAMEBUFFER, render_fbo);
@@ -1431,8 +1437,11 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		// is a second pass that re-samples this already-rendered image, so the
 		// displaced mesh must be present in the source image.
 		DrawOpaqueMeshes(scene_id, scene->meshes, scene->debug_view, cameraFrustum, false);
-		DrawSprites(scene->meshes, cameraFrustum);
-		DrawVFX(scene);
+		if (!wireframeDebug)
+		{
+			DrawSprites(scene->meshes, cameraFrustum);
+			DrawVFX(scene);
+		}
 
 		// Resolve once so displacement samples a stable scene-color snapshot.
 		ResolveSceneMSAA(gpu_scene);
@@ -1451,7 +1460,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		}
 
 		bool displacementRendered = false;
-		if (hasScreenSpaceDisplacement && scene->debug_view == HRL_DEBUG_VIEW_NONE &&
+		if (!wireframeDebug && hasScreenSpaceDisplacement && scene->debug_view == HRL_DEBUG_VIEW_NONE &&
 			CaptureSceneColorForDisplacement(gpu_scene, bck_->post_textures[0]))
 		{
 			// ResolveSceneMSAA() leaves the regular scene FBO bound. Re-bind the
@@ -1481,9 +1490,9 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		if (displacementRendered)
 			ResolveSceneMSAA(gpu_scene);
 
-		bool has_post_process = !v.second->post_processes.empty();
-		bool has_scene_effects = HasActiveVolumetricFog(scene) || scene->god_rays.enabled;
-		bool has_ambient_occlusion = scene->ambient_occlusion_enabled;
+		bool has_post_process = !wireframeDebug && !v.second->post_processes.empty();
+		bool has_scene_effects = !wireframeDebug && (HasActiveVolumetricFog(scene) || scene->god_rays.enabled);
+		bool has_ambient_occlusion = !wireframeDebug && scene->ambient_occlusion_enabled;
 
 		if (has_post_process || has_scene_effects || has_ambient_occlusion)
 		{
@@ -1995,15 +2004,28 @@ static void DrawScreenSpaceDisplacementMeshes(HRL_id scene_id, const hrl_scene_t
 static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum, bool skip_screen_space_displacement)
 {
 	glEnable(GL_DEPTH_TEST);
-	glDepthMask(GL_TRUE);
-	glEnable(GL_CULL_FACE);
-	glCullFace(GL_BACK);
+	glDepthMask(GL_TRUE);	glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND);
 
+	GLboolean previousCullEnabled = glIsEnabled(GL_CULL_FACE);
+	GLint previousCullFace = GL_BACK;
+	glGetIntegerv(GL_CULL_FACE_MODE, &previousCullFace);
 	GLint previousPolygonMode[2] = {GL_FILL, GL_FILL};
 	glGetIntegerv(GL_POLYGON_MODE, previousPolygonMode);
-	if (debug_view == HRL_DEBUG_VIEW_WIREFRAME)
+
+	const bool wireframe = debug_view == HRL_DEBUG_VIEW_WIREFRAME;
+	if (wireframe)
+	{
+		// Wireframe must show all triangle edges, regardless of imported winding.
+		glDisable(GL_CULL_FACE);
 		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+		glLineWidth(1.0f);
+	}
+	else
+	{
+		glEnable(GL_CULL_FACE);
+		glCullFace(GL_BACK);
+	}
 
 	struct DrawItem {
 		HRL_id id;
@@ -2084,12 +2106,20 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 
 	for (const DrawItem& item : visible)
 	{
-		if (MaterialIsTwoSided(item.material))
-			glDisable(GL_CULL_FACE);
+		if (!wireframe)
+		{
+			if (MaterialIsTwoSided(item.material))
+				glDisable(GL_CULL_FACE);
+			else
+			{
+				glEnable(GL_CULL_FACE);
+				glCullFace(GL_BACK);
+			}
+		}
 		else
 		{
-			glEnable(GL_CULL_FACE);
-			glCullFace(GL_BACK);
+			glDisable(GL_CULL_FACE);
+			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 		}
 		if (!BindMaterial(item.material, item.id, item.mesh, item.model))
 			continue;
@@ -2131,13 +2161,17 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 	}
 
 	glBindVertexArray(0);
-	if (debug_view == HRL_DEBUG_VIEW_WIREFRAME)
+	glPolygonMode(GL_FRONT, previousPolygonMode[0]);
+	glPolygonMode(GL_BACK, previousPolygonMode[1]);
+	if (previousCullEnabled)
 	{
-		glPolygonMode(GL_FRONT, previousPolygonMode[0]);
-		glPolygonMode(GL_BACK, previousPolygonMode[1]);
+		glEnable(GL_CULL_FACE);
+		glCullFace(previousCullFace);
 	}
-	glEnable(GL_CULL_FACE);
-	glCullFace(GL_BACK);
+	else
+	{
+		glDisable(GL_CULL_FACE);
+	}
 }
 
 

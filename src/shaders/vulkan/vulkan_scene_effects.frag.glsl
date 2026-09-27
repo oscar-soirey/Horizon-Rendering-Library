@@ -32,6 +32,7 @@ uniform int uGodRaysSamples;
 
 vec2 GlobalUV(vec2 localUV){return uViewportOrigin+localUV*uViewportSize;}
 vec3 ReconstructWorld(vec2 localUV,float depth){
+    // HRL's Vulkan projection maps OpenGL depth [-1,1] to Vulkan [0,1].
     vec4 clip=vec4(localUV*2.0-1.0,depth,1.0);
     vec4 w=uInvViewProjection*clip;
     return abs(w.w)<1e-6?uCameraPos:w.xyz/w.w;
@@ -91,6 +92,15 @@ vec4 ApplyGodRays(vec4 base,vec2 globalUV){
     base.rgb+=rays/float(samples)*uGodRaysColor*uGodRaysWeight;return base;
 }
 void main(){
-    vec2 globalUV=GlobalUV(vUV);vec4 color=texture(uScene,globalUV);float depth=texture(uDepth,globalUV).r;vec3 world=ReconstructWorld(vUV,depth);
-    float ao=DepthAO(globalUV,world,depth);color.rgb*=ao;color=ApplyFog(color,world);color=ApplyGodRays(color,globalUV);outColor=color;
+    vec2 globalUV=GlobalUV(vUV);
+    vec4 color=texture(uScene,globalUV);
+    float depth=texture(uDepth,globalUV).r;
+    vec3 world=ReconstructWorld(vUV,depth);
+    float ao=DepthAO(globalUV,world,depth);
+    color.rgb*=ao;
+    // Volumetric fog is evaluated along the camera ray for both geometry and
+    // background pixels, matching the OpenGL backend.
+    color=ApplyFog(color,world);
+    color=ApplyGodRays(color,globalUV);
+    outColor=color;
 }
