@@ -13,6 +13,7 @@ layout(location = 4) out vec4 GINormalBuffer;
 #define HRL_PointLight       (uint(0x0011))
 #define HRL_DirectionalLight (uint(0x0012))
 #define HRL_SpotLight        (uint(0x0013))
+#define HRL_SkyLight         (uint(0x0014))
 
 const int FOG_LINEAR = 0x0090;
 const int FOG_EXP    = 0x0091;
@@ -37,6 +38,7 @@ uniform sampler2D T_Normal;
 uniform sampler2D T_Specular;
 uniform sampler2D T_Roughness;
 uniform sampler2D T_Metallic;
+uniform sampler2D T_AO;
 uniform sampler2D T_Alpha;
 
 uniform sampler2D ShadowMap2D_0;
@@ -65,6 +67,7 @@ uniform int SpecularUseValue;
 uniform int OpacityUseValue;
 uniform int RoughnessInvert;
 uniform int AlphaInvert;
+uniform int TwoSided;
 uniform vec3 CamPos;
 uniform float BrightThreshold;
 uniform int DebugView;
@@ -441,6 +444,12 @@ void main()
     vec3 B = normalize(cross(N, T));
     if (dot(B, worldBitangent) < 0.0)
         B = -B;
+    if (TwoSided != 0 && !gl_FrontFacing)
+    {
+        N = -N;
+        T = -T;
+        B = -B;
+    }
     vec3 normalWorld = normalize(T * normalTex.x + B * normalTex.y + N * normalTex.z);
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
@@ -458,6 +467,12 @@ void main()
         vec3 lightColor = light.color * light.intensity;
         float shadow = 1.0;
         vec3 lightDir;
+
+        if (light.type == HRL_SkyLight)
+        {
+            lighting += (1.0 - metallic) * lightColor;
+            continue;
+        }
 
         if (light.type == HRL_PointLight)
         {
@@ -489,7 +504,8 @@ void main()
         }
     }
 
-    vec3 litResult = lighting * albedo * TintColor;
+    float ao = clamp(texture(T_AO, uv).r, 0.0, 1.0);
+    vec3 litResult = lighting * albedo * TintColor * ao;
 
     // Diffuse world-space GI is evaluated directly in the material shader.
     // This keeps GI independent of the camera and avoids any framebuffer copy or
@@ -498,7 +514,7 @@ void main()
     if (DDGIEnabled != 0)
     {
         vec3 diffuseAlbedo = albedo * TintColor * (1.0 - metallic);
-        litResult += SampleDDGI(fragPos, normalWorld) * diffuseAlbedo * DDGIStrength;
+        litResult += SampleDDGI(fragPos, normalWorld) * diffuseAlbedo * DDGIStrength * ao;
     }
     if (EnvironmentEnabled != 0 && EnvironmentStrength > 0.0)
     {

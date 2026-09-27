@@ -498,6 +498,12 @@ typedef struct {
   hrl_global_volumetric_fog_t global_volumetric_fog;
   hrl_god_rays_t god_rays;
 
+  bool ambient_occlusion_enabled = false;
+  float ambient_occlusion_strength = 0.65f;
+  float ambient_occlusion_radius = 1.0f;
+  float ambient_occlusion_bias = 0.03f;
+  float ambient_occlusion_power = 1.4f;
+
   // Global illumination. Opt-in only; default keeps the existing renderer untouched.
   bool global_illumination_enabled = false;
   HRL_EGlobalIlluminationMethod global_illumination_method = HRL_GI_DDGI;

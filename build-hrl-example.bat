@@ -6,6 +6,7 @@ robocopy "." "../example/build/" "libhrldll.dll"
 
 robocopy "../src/" "../example/third_party/hrl/" "hrl.h"
 robocopy "../src/" "../example/third_party/hrl/" "hrl_gl.h"
+robocopy "../src/" "../example/third_party/hrl/" "hrl_vulkan.h"
 
 cd ..
 cd example/build

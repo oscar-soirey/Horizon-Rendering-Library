@@ -6,6 +6,11 @@ set(CMAKE_CXX_STANDARD 20)
 include_directories(src)
 include_directories(third_party)
 
+#find VulkanSDK
+set(VULKAN_SDK "S:/Programs/VulkanSDK")
+find_package(Vulkan REQUIRED)
+include_directories("${VULKAN_SDK}/Include")
+
 #Crée l'exécutable
 add_executable(example
         main.cpp

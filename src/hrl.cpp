@@ -5,6 +5,7 @@
 
 #include "hrl.h"
 #include "hrl_gl.h"
+#include "hrl_vulkan.h"
 
 #include "core/backend_vtable.h"
 #include "core/object_types.h"
@@ -12,6 +13,8 @@
 #include "core/widgets.h"
 
 #include "backend/opengl33/gl33_backend.h"
+#include "backend/vulkan/vulkan_backend.h"
+#include <vulkan/vulkan.h>
 
 #include <unordered_map>
 #include <unordered_set>
@@ -219,6 +222,45 @@ struct HRL_FBXResources
 HRL_Context* GetPrivateContext()
 {
 	return &ctx_;
+}
+
+void HRL_Vulkan_SetSurfaceCallback(HRL_VulkanCreateSurfaceCallback callback, void* user_data)
+{
+	VulkanSetSurfaceCallback(callback, user_data);
+}
+
+void HRL_Vulkan_SetInstanceExtensions(const char* const* extensions, HRL_uint extension_count)
+{
+	VulkanSetInstanceExtensions(extensions, extension_count);
+}
+
+void* HRL_Vulkan_GetInstance(void)
+{
+	return reinterpret_cast<void*>(VulkanGetInstance());
+}
+
+void* HRL_Vulkan_GetPhysicalDevice(void)
+{
+	return reinterpret_cast<void*>(VulkanGetPhysicalDevice());
+}
+
+void* HRL_Vulkan_GetDevice(void)
+{
+	return reinterpret_cast<void*>(VulkanGetDevice());
+}
+
+void* HRL_Vulkan_GetGraphicsQueue(void)
+{
+	return reinterpret_cast<void*>(VulkanGetGraphicsQueue());
+}
+
+uint64_t HRL_Vulkan_GetSurface(void)
+{
+#if defined(VK_USE_64_BIT_PTR_DEFINES) && VK_USE_64_BIT_PTR_DEFINES
+	return reinterpret_cast<uint64_t>(VulkanGetSurface());
+#else
+	return static_cast<uint64_t>(VulkanGetSurface());
+#endif
 }
 
 
@@ -671,7 +713,7 @@ static void SimulateVFXSystem(HRL_VFXSystem* system, float dt)
 void HRL_Init(HRL_E_APIs _api)
 {
 	g_AsyncResourceLoader.Start();
-	if (_api != HRL_OPENGL_33)
+	if (_api != HRL_OPENGL_33 && _api != HRL_VULKAN)
 	{
 		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
 			"HRL_Init: selected backend is not implemented");
@@ -692,6 +734,8 @@ void HRL_Init(HRL_E_APIs _api)
 	}
 	case HRL_VULKAN :
 	{
+		g_Backend = GetVulkanBackend();
+		g_Backend.RHI_Init();
 		break;
 	}
 	case HRL_D3D11 :
@@ -726,7 +770,13 @@ void HRL_InitContext(HRL_uint _width, HRL_uint _height, void* _loader)
 {
 	ctx_.window_width  = _width;
 	ctx_.window_height = _height;
-	g_Backend.RHI_InitContext(_width, _height, _loader);
+	// The third parameter is still the OpenGL loader for the OpenGL backend.
+	// Vulkan presentation is configured through hrl_vulkan.h and never casts the
+	// loader argument to a Vulkan-specific private structure.
+	if (g_Backend.RHI_InitContext)
+	{
+		g_Backend.RHI_InitContext(_width, _height, _loader);
+	}
 }
 
 void HRL_Shutdown()
@@ -866,6 +916,8 @@ void HRL_BeginFrame()
 {
 	// Completed CPU-side loads are uploaded to the active OpenGL context here.
 	ProcessAsyncResourceUploads();
+	if (g_Backend.RHI_BeginFrame)
+		g_Backend.RHI_BeginFrame();
 	const auto now = std::chrono::steady_clock::now();
 	const double seconds = std::chrono::duration<double>(now.time_since_epoch()).count();
 	if (ctx_.vfx_has_frame_time)
@@ -962,7 +1014,8 @@ void HRL_EndFrame()
 		ctx_.mouseCaptureWidget = HRL_INVALID_ID;
 	if (!ctx_.mouseLeftDown && ctx_.mouseCaptureGizmo == HRL_INVALID_ID)
 		ctx_.mouseCaptureGizmoPart = HRL_GIZMO_PART_NONE;
-	//g_Backend.RHI_ResetFramebuffer();
+	if (g_Backend.RHI_ResetFramebuffer)
+		g_Backend.RHI_ResetFramebuffer();
 }
 
 void HRL_WindowResizeCallback(int _width, int _height)
@@ -1545,6 +1598,8 @@ HRL_id HRL_CreateLight(HRL_id _sceneid, HRL_ELightType _type)
 	auto* l = new HRL_Light();
 	l->scene_ = _sceneid;
 	l->type_ = _type;
+	if (_type == HRL_SKY_LIGHT)
+		l->intensity_ = 0.15f;
 
 	HRL_id newId = GenerateHRL_ID();
 	l->id_ = newId;
@@ -3812,6 +3867,46 @@ void HRL_SetGodRaysSamples(HRL_id scene, HRL_uint samples)
 
 
 
+
+
+void HRL_SetAmbientOcclusionEnabled(HRL_id scene, int enable)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetAmbientOcclusionEnabled: invalid scene ID"); return; }
+	it->second->ambient_occlusion_enabled = enable != 0;
+}
+
+void HRL_SetAmbientOcclusionStrength(HRL_id scene, float strength)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetAmbientOcclusionStrength: invalid scene ID"); return; }
+	if (!std::isfinite(strength) || strength < 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetAmbientOcclusionStrength: strength must be finite and >= 0"); return; }
+	it->second->ambient_occlusion_strength = std::min(strength, 1.0f);
+}
+
+void HRL_SetAmbientOcclusionRadius(HRL_id scene, float radius)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetAmbientOcclusionRadius: invalid scene ID"); return; }
+	if (!std::isfinite(radius) || radius <= 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetAmbientOcclusionRadius: radius must be finite and > 0"); return; }
+	it->second->ambient_occlusion_radius = radius;
+}
+
+void HRL_SetAmbientOcclusionBias(HRL_id scene, float bias)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetAmbientOcclusionBias: invalid scene ID"); return; }
+	if (!std::isfinite(bias) || bias < 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetAmbientOcclusionBias: bias must be finite and >= 0"); return; }
+	it->second->ambient_occlusion_bias = bias;
+}
+
+void HRL_SetAmbientOcclusionPower(HRL_id scene, float power)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it == ctx_.scenes.end()) { SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetAmbientOcclusionPower: invalid scene ID"); return; }
+	if (!std::isfinite(power) || power <= 0.0f) { SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetAmbientOcclusionPower: power must be finite and > 0"); return; }
+	it->second->ambient_occlusion_power = power;
+}
 
 
 

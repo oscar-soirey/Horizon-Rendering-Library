@@ -1,10 +1,12 @@
 // HRL single header
 #include <hrl/hrl.h>
 #include <hrl/hrl_gl.h>
+#include <hrl/hrl_vulkan.h>
 
 // Window
 #include <iosfwd>
-#include <glfw/glfw3.h>
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
 #include <fstream>
 
 #include <iostream>
@@ -295,22 +297,60 @@ static void MouseButton(GLFWwindow* win, int button, int action, int)
 }
 
 
+static int CreateSurface(
+    void* instance_ptr,
+    void* surface_out_ptr,
+    void* user_data)
+{
+    VkInstance instance =
+        reinterpret_cast<VkInstance>(instance_ptr);
+
+    VkSurfaceKHR* surface =
+        reinterpret_cast<VkSurfaceKHR*>(surface_out_ptr);
+
+    GLFWwindow* window =
+        static_cast<GLFWwindow*>(user_data);
+
+    return static_cast<int>(
+        glfwCreateWindowSurface(
+            instance,
+            window,
+            nullptr,
+            surface));
+}
+
+
 int main()
 {
-  // on init HRL avec l'api cible
-  HRL_Init(HRL_OPENGL_33);
 
-  // GLFW WINDOW //
-  glfwInit();
+    glfwInit();
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
   GLFWwindow* win =
       glfwCreateWindow(
           1280,
           720,
-          "HRL 3D Example",
+          "HRL Vulkan",
           nullptr,
           nullptr
       );
+
+
+    uint32_t extension_count = 0;
+    const char** extensions =
+        glfwGetRequiredInstanceExtensions(&extension_count);
+
+    HRL_Vulkan_SetInstanceExtensions(
+        extensions,
+        extension_count);
+
+    HRL_Vulkan_SetSurfaceCallback(
+        CreateSurface,
+        win);
+
+    HRL_Init(HRL_VULKAN);
+    HRL_InitContext(1280, 720, nullptr);
+
 
   // important! : le contexte doit etre actif avant HRL_InitContext
   glfwMakeContextCurrent(win);
@@ -329,12 +369,7 @@ int main()
 
   HRL_RegisterErrorCallback(ErrorCallback);
 
-  // initcontext avec le loader GLFW
-  HRL_InitContext(
-      1280,
-      720,
-      (void*)glfwGetProcAddress
-  );
+
   // ---------------------------------------------------------------------------
   // Launch all resource reads in parallel.
   // ---------------------------------------------------------------------------
@@ -908,6 +943,7 @@ int main()
         HRL_TRUE
         );
 
+
     HRL_MaterialSetFloat(
         floorMaterial,
         HRL_MATERIAL_PARAM_SS_DISPLACEMENT_STRENGTH,
@@ -970,6 +1006,19 @@ int main()
       0.f
   );
 
+
+
+    HRL_id sky =
+    HRL_CreateLight(scene, HRL_SKY_LIGHT);
+    HRL_SetLightIntensity(sky, 0.15f);
+    HRL_SetLightColor(sky, 0.8f, 0.9f, 1.0f);
+
+    HRL_SetAmbientOcclusionEnabled(scene, HRL_TRUE);
+
+    HRL_SetAmbientOcclusionStrength(scene, 0.65f);
+    HRL_SetAmbientOcclusionRadius(scene, 1.0f);
+    HRL_SetAmbientOcclusionBias(scene, 0.03f);
+    HRL_SetAmbientOcclusionPower(scene, 1.4f);
 
   // ---------------------------------------------------------------------------
   // Point light + shadow map cubemap.

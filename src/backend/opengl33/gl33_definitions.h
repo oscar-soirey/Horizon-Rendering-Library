@@ -79,6 +79,8 @@ static const float fullscreen_quad_verts[16] = {
 
 
 
+#define AO_TEXTURE_UNIT (15)
+
 #define ALBEDO_INT (0)
 #define NORMAL_INT (1)
 #define SPECULAR_INT (2)

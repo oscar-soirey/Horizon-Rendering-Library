@@ -67,34 +67,6 @@ extern size_t res_post_frag_glsl_len;
 extern unsigned char res_post_vert_glsl[];
 extern size_t res_post_vert_glsl_len;
 
-//res_sprite_frag_glsl
-extern unsigned char res_sprite_frag_glsl[];
-extern size_t res_sprite_frag_glsl_len;
-
-//res_sprite_vert_glsl
-extern unsigned char res_sprite_vert_glsl[];
-extern size_t res_sprite_vert_glsl_len;
-
-//res_static_3dmesh_frag_glsl
-extern unsigned char res_static_3dmesh_frag_glsl[];
-extern size_t res_static_3dmesh_frag_glsl_len;
-
-//res_static_3dmesh_vert_glsl
-extern unsigned char res_static_3dmesh_vert_glsl[];
-extern size_t res_static_3dmesh_vert_glsl_len;
-
-//res_skinned_3dmesh_vert_glsl
-extern unsigned char res_skinned_3dmesh_vert_glsl[];
-extern size_t res_skinned_3dmesh_vert_glsl_len;
-
-//res_sky_sphere_frag_glsl
-extern unsigned char res_sky_sphere_frag_glsl[];
-extern size_t res_sky_sphere_frag_glsl_len;
-
-//res_sky_sphere_vert_glsl
-extern unsigned char res_sky_sphere_vert_glsl[];
-extern size_t res_sky_sphere_vert_glsl_len;
-
 //res_shadow_2d_frag_glsl
 extern unsigned char res_shadow_2d_frag_glsl[];
 extern size_t res_shadow_2d_frag_glsl_len;
@@ -118,6 +90,34 @@ extern size_t res_shadow_skeletal_2d_vert_glsl_len;
 //res_shadow_skeletal_point_vert_glsl
 extern unsigned char res_shadow_skeletal_point_vert_glsl[];
 extern size_t res_shadow_skeletal_point_vert_glsl_len;
+
+//res_skinned_3dmesh_vert_glsl
+extern unsigned char res_skinned_3dmesh_vert_glsl[];
+extern size_t res_skinned_3dmesh_vert_glsl_len;
+
+//res_sky_sphere_frag_glsl
+extern unsigned char res_sky_sphere_frag_glsl[];
+extern size_t res_sky_sphere_frag_glsl_len;
+
+//res_sky_sphere_vert_glsl
+extern unsigned char res_sky_sphere_vert_glsl[];
+extern size_t res_sky_sphere_vert_glsl_len;
+
+//res_sprite_frag_glsl
+extern unsigned char res_sprite_frag_glsl[];
+extern size_t res_sprite_frag_glsl_len;
+
+//res_sprite_vert_glsl
+extern unsigned char res_sprite_vert_glsl[];
+extern size_t res_sprite_vert_glsl_len;
+
+//res_static_3dmesh_frag_glsl
+extern unsigned char res_static_3dmesh_frag_glsl[];
+extern size_t res_static_3dmesh_frag_glsl_len;
+
+//res_static_3dmesh_vert_glsl
+extern unsigned char res_static_3dmesh_vert_glsl[];
+extern size_t res_static_3dmesh_vert_glsl_len;
 
 //res_ui_frag_glsl
 extern unsigned char res_ui_frag_glsl[];

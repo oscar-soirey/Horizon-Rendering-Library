@@ -11,6 +11,11 @@ include_directories(third_party)
 
 find_package(Python REQUIRED)
 
+#find VulkanSDK
+set(VULKAN_SDK "S:/Programs/VulkanSDK")
+find_package(Vulkan REQUIRED)
+
+
 #creer le fichier generated dans le fichier cmake
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 
@@ -108,6 +113,11 @@ add_library(hrl STATIC
         src/backend/opengl33/gl33_shader.cpp
         src/backend/opengl33/gl33_texture.cpp
         src/backend/opengl33/gi.cpp
+
+	#vulkan
+	src/backend/vulkan/vulkan_backend.cpp
+        src/backend/vulkan/vulkan_shader.cpp
+        src/backend/vulkan/vulkan_texture.cpp
 )
 endif()
 
@@ -131,6 +141,11 @@ add_library(hrldll SHARED
         src/backend/opengl33/gl33_shader.cpp
         src/backend/opengl33/gl33_texture.cpp
 	src/backend/opengl33/gi.cpp
+
+	#vulkan
+	src/backend/vulkan/vulkan_backend.cpp
+        src/backend/vulkan/vulkan_shader.cpp
+        src/backend/vulkan/vulkan_texture.cpp
 )
 
 #compile dll declspec export
@@ -142,3 +157,11 @@ target_compile_definitions(hrldll PRIVATE HRL_BUILD_DLL)
 find_package(OpenGL REQUIRED)
 #target_link_libraries(hrl PRIVATE OpenGL::GL)
 target_link_libraries(hrldll PRIVATE OpenGL::GL)
+
+#include Vulkan
+#target_include_directories(hrl PRIVATE "${VULKAN_SDK}/Include")
+target_include_directories(hrldll PRIVATE "${VULKAN_SDK}/Include")
+
+#link Vulkan
+#target_link_libraries(hrl PRIVATE Vulkan::Vulkan)
+target_link_libraries(hrldll PRIVATE Vulkan::Vulkan)

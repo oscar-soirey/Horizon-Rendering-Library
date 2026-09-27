@@ -147,6 +147,11 @@ typedef struct HRL_SkeletalMeshData {
 #define HRL_T_SHADOW_MAP							"T_ShadowMap"
 #define HRL_T_CUBE_MAP								"T_CubeMap"
 
+/** Material parameter: back-face culling is enabled by default; set to HRL_TRUE for a two-sided material. */
+#ifndef HRL_MATERIAL_PARAM_TWO_SIDED
+#define HRL_MATERIAL_PARAM_TWO_SIDED "TwoSided"
+#endif
+
 typedef enum HRL_E_APIs{
 	HRL_OPENGL_33 = 0x0001,
 	HRL_OPENGL_45,
@@ -161,7 +166,9 @@ typedef enum HRL_E_APIs{
 typedef enum HRL_ELightType{
 	HRL_POINT_LIGHT = 0x0011,
 	HRL_DIRECTIONAL_LIGHT,
-	HRL_SPOT_LIGHT
+	HRL_SPOT_LIGHT,
+	/** Low-intensity ambient light coming uniformly from all directions. Does not cast shadows. */
+	HRL_SKY_LIGHT
 }HRL_ELightType;
 
 typedef enum HRL_EMeshType{
@@ -1535,6 +1542,13 @@ extern "C" {
 	/** @brief Sets the radial sample count for god rays (8..96). */
 	HRL_API void HRL_SetGodRaysSamples(HRL_id scene, HRL_uint samples);
 
+
+	/** Screen-space ambient occlusion. Disabled by default. */
+	HRL_API void HRL_SetAmbientOcclusionEnabled(HRL_id scene, int enable);
+	HRL_API void HRL_SetAmbientOcclusionStrength(HRL_id scene, float strength);
+	HRL_API void HRL_SetAmbientOcclusionRadius(HRL_id scene, float radius);
+	HRL_API void HRL_SetAmbientOcclusionBias(HRL_id scene, float bias);
+	HRL_API void HRL_SetAmbientOcclusionPower(HRL_id scene, float power);
 
 	/* ============================================================================
 	 *  MATRICES

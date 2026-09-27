@@ -39,6 +39,13 @@ struct FrustumPlaneSet;
 static void InitTextureAndBindToFBO(GLuint _texture, GLuint _fbo, int width, int height);
 
 static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* mesh, const glm::mat4& model);
+static bool MaterialIsTwoSided(const HRL_Material* material)
+{
+	if (!material) return false;
+	auto it = material->intParams_.find(HRL_MATERIAL_PARAM_TWO_SIDED);
+	return it != material->intParams_.end() && it->second != 0;
+}
+
 static bool MaterialUsesScreenSpaceDisplacement(const HRL_Material* material);
 static bool CaptureSceneColorForDisplacement(const GL_Scene* scene, GLuint destinationTexture);
 static void DrawScreenSpaceDisplacementMeshes(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum);
@@ -75,6 +82,7 @@ static bool HasActiveVolumetricFog(const hrl_scene_t* scene)
     return false;
 }
 
+static void ApplyAmbientOcclusion(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view, const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex);
 static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view, const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex);
 static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id);
 static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id);
@@ -194,6 +202,7 @@ struct GL33_Backend {
 	GLuint post_textures[2];
 
 	GL33_Shader* scene_effect_shader = nullptr;
+	GL33_Shader* ambient_occlusion_shader = nullptr;
 
 	//Widgets
 	GL33_Shader* ui_shader=nullptr;
@@ -323,6 +332,68 @@ void main()
         float(id & 255u) / 255.0,
         1.0
     );
+}
+)GLSL";
+
+static const char* kAmbientOcclusionFragmentShader = R"GLSL(
+#version 330 core
+in vec2 uv;
+out vec4 frag_color;
+uniform sampler2D uScene;
+uniform sampler2D uDepth;
+uniform sampler2D uNormal;
+uniform mat4 uInvViewProjection;
+uniform vec3 uCameraPos;
+uniform vec2 uViewportOrigin;
+uniform vec2 uViewportSize;
+uniform vec2 uScreenSize;
+uniform float uRadius;
+uniform float uBias;
+uniform float uStrength;
+uniform float uPower;
+vec2 GlobalUV(vec2 localUV) { return uViewportOrigin + localUV * uViewportSize; }
+vec3 ReconstructWorld(vec2 globalUV, float depth)
+{
+    vec2 localUV = (globalUV - uViewportOrigin) / max(uViewportSize, vec2(1e-6));
+    vec4 clip = vec4(localUV * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 world = uInvViewProjection * clip;
+    return abs(world.w) < 1e-6 ? vec3(0.0) : world.xyz / world.w;
+}
+void main()
+{
+    vec2 globalUV = GlobalUV(uv);
+    vec4 base = texture(uScene, globalUV);
+    float depth = texture(uDepth, globalUV).r;
+    vec3 normal = texture(uNormal, globalUV).xyz;
+    if (depth >= 0.99999 || dot(normal, normal) < 0.01 || uStrength <= 0.0 || uRadius <= 0.0) { frag_color = base; return; }
+    normal = normalize(normal);
+    vec3 worldPos = ReconstructWorld(globalUV, depth);
+    const vec2 kernel[16] = vec2[](
+        vec2(1.0,0.0), vec2(-1.0,0.0), vec2(0.0,1.0), vec2(0.0,-1.0),
+        vec2(0.707,0.707), vec2(-0.707,0.707), vec2(0.707,-0.707), vec2(-0.707,-0.707),
+        vec2(0.382,0.924), vec2(-0.382,0.924), vec2(0.382,-0.924), vec2(-0.382,-0.924),
+        vec2(0.924,0.382), vec2(-0.924,0.382), vec2(0.924,-0.382), vec2(-0.924,-0.382));
+    float distanceToCamera = max(length(worldPos - uCameraPos), 1.0);
+    float radiusPixels = clamp(uRadius * 0.5 * min(uScreenSize.x, uScreenSize.y) / distanceToCamera, 1.0, 32.0);
+    float occlusion = 0.0;
+    for (int i=0; i<16; ++i)
+    {
+        float scale = mix(0.35, 1.0, float(i)/15.0);
+        vec2 suv = globalUV + kernel[i] * (radiusPixels*scale) / uScreenSize;
+        if (any(lessThan(suv,uViewportOrigin)) || any(greaterThan(suv,uViewportOrigin+uViewportSize))) continue;
+        float sd = texture(uDepth,suv).r;
+        if (sd >= 0.99999) continue;
+        vec3 sp = ReconstructWorld(suv,sd);
+        vec3 d = sp-worldPos;
+        float dist = length(d);
+        if (dist <= 1e-5 || dist > uRadius) continue;
+        float farther = smoothstep(uBias, uBias + max(0.01,uRadius*0.08), length(sp - uCameraPos)-length(worldPos - uCameraPos));
+        float facing = max(dot(normal, normalize(-d)),0.0);
+        float rangeWeight = 1.0-smoothstep(0.0,uRadius,dist);
+        occlusion += farther*facing*rangeWeight;
+    }
+    float ao = 1.0-uStrength*pow(clamp(occlusion/16.0,0.0,1.0),uPower);
+    frag_color=vec4(base.rgb*ao,base.a);
 }
 )GLSL";
 
@@ -910,6 +981,15 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		bck_->scene_effect_shader = nullptr;
 	}
 
+	bck_->ambient_occlusion_shader = new GL33_Shader();
+	if (bck_->ambient_occlusion_shader->GL33_Create(
+		(const char*)res_post_vert_glsl, res_post_vert_glsl_len,
+		kAmbientOcclusionFragmentShader, std::strlen(kAmbientOcclusionFragmentShader)) != 0)
+	{
+		delete bck_->ambient_occlusion_shader;
+		bck_->ambient_occlusion_shader = nullptr;
+	}
+
 	//SPRITE SHADER
 	auto* sprite_shader = new GL33_Shader();
 	sprite_shader->GL33_Create(
@@ -1403,8 +1483,9 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 
 		bool has_post_process = !v.second->post_processes.empty();
 		bool has_scene_effects = HasActiveVolumetricFog(scene) || scene->god_rays.enabled;
+		bool has_ambient_occlusion = scene->ambient_occlusion_enabled;
 
-		if (has_post_process || has_scene_effects)
+		if (has_post_process || has_scene_effects || has_ambient_occlusion)
 		{
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
 			glReadBuffer(GL_COLOR_ATTACHMENT0);
@@ -1413,6 +1494,15 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 
 			GLuint currentTexture = bck_->post_textures[0];
 			int src = 0;
+			if (has_ambient_occlusion && bck_->ambient_occlusion_shader)
+			{
+				const int vx = (int)(v.second->x_ * winW);
+				const int vy = (int)(v.second->y_ * winH);
+				const int vw = std::max(1, (int)(v.second->width_ * winW));
+				const int vh = std::max(1, (int)(v.second->height_ * winH));
+				ApplyAmbientOcclusion(gpu_scene, scene, ctx_->view_mat, ctx_->proj_mat, vx, vy, vw, vh, currentTexture);
+				src = (currentTexture == bck_->post_textures[0]) ? 0 : 1;
+			}
 			if (has_scene_effects && bck_->scene_effect_shader)
 			{
 				const int vx = (int)(v.second->x_ * winW);
@@ -1504,13 +1594,19 @@ static void InitTextureAndBindToFBO(GLuint _texture, GLuint _fbo, int width, int
 
 
 //MATERIALS
+static void ApplyFallbackToUnit(int textureUnit, int fallbackIndex)
+{
+	if (!bck_ || fallbackIndex < 0 || fallbackIndex >= 6) return;
+	glActiveTexture(GL_TEXTURE0 + textureUnit);
+	HRL_id fallback_hrl_id = bck_->fallback_textures[fallbackIndex];
+	auto fallback = bck_->textures.find(fallback_hrl_id);
+	if (fallback != bck_->textures.end() && fallback->second)
+		glBindTexture(GL_TEXTURE_2D, fallback->second->GetGL_ID());
+}
+
 static void ApplyFallback(int index)
 {
-	glActiveTexture(GL_TEXTURE0 + index);
-	HRL_id fallback_hrl_id = bck_->fallback_textures[index];
-	auto fallback = bck_->textures.find(fallback_hrl_id);
-	if (fallback != bck_->textures.end())
-		glBindTexture(GL_TEXTURE_2D, fallback->second->GetGL_ID());
+	ApplyFallbackToUnit(index, index);
 }
 
 static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* mesh, const glm::mat4& model)
@@ -1605,11 +1701,9 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* me
 
 	if (materialChanged)
 	{
-		// SS displacement is an explicit opt-in material feature. Reset the
-		// built-in shader uniform for every material so a previous material's
-		// enabled state can never leak into a material that did not set it.
 		if (mat->shader_ == HRL_MESH_3D_SHADER || mat->shader_ == HRL_SKINNED_3D_MESH_SHADER)
 			s->SetInt("ss_displacement_enabled", 0);
+		s->SetInt(HRL_MATERIAL_PARAM_TWO_SIDED, 0);
 
 		for (const auto& [name, value] : mat->intParams_) s->SetInt(name, value);
 		for (int i = 0; i < 6; ++i)
@@ -1622,6 +1716,19 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* me
 			glActiveTexture(GL_TEXTURE0 + i);
 			glBindTexture(GL_TEXTURE_2D, itTexture->second->GetGL_ID());
 		}
+		s->SetInt(HRL_T_AMBIENT_OCCLUSION, AO_TEXTURE_UNIT);
+		glActiveTexture(GL_TEXTURE0 + AO_TEXTURE_UNIT);
+		auto aoParam = mat->textureParams_.find(std::string(HRL_T_AMBIENT_OCCLUSION));
+		if (aoParam != mat->textureParams_.end())
+		{
+			auto aoTexture = bck_->textures.find(aoParam->second);
+			if (aoTexture != bck_->textures.end() && aoTexture->second)
+				glBindTexture(GL_TEXTURE_2D, aoTexture->second->GetGL_ID());
+			else
+				ApplyFallbackToUnit(AO_TEXTURE_UNIT, ROUGHNESS_INT);
+		}
+		else
+			ApplyFallbackToUnit(AO_TEXTURE_UNIT, ROUGHNESS_INT);
 		for (const auto& [name, value] : mat->floatParams_) s->SetFloat(name, value);
 		for (const auto& [name, value] : mat->vec2Params_) s->SetVec2(name, value);
 		for (const auto& [name, value] : mat->vec3Params_) s->SetVec3(name, value);
@@ -1889,7 +1996,8 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 {
 	glEnable(GL_DEPTH_TEST);
 	glDepthMask(GL_TRUE);
-	glDisable(GL_CULL_FACE);
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
 	glDisable(GL_BLEND);
 
 	GLint previousPolygonMode[2] = {GL_FILL, GL_FILL};
@@ -1976,6 +2084,13 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 
 	for (const DrawItem& item : visible)
 	{
+		if (MaterialIsTwoSided(item.material))
+			glDisable(GL_CULL_FACE);
+		else
+		{
+			glEnable(GL_CULL_FACE);
+			glCullFace(GL_BACK);
+		}
 		if (!BindMaterial(item.material, item.id, item.mesh, item.model))
 			continue;
 
@@ -2021,6 +2136,8 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 		glPolygonMode(GL_FRONT, previousPolygonMode[0]);
 		glPolygonMode(GL_BACK, previousPolygonMode[1]);
 	}
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
 }
 
 
@@ -2835,6 +2952,38 @@ static bool WritePNG_RGBA8(const char* path, int width, int height, const std::v
     return (bool)file;
 }
 
+static void ApplyAmbientOcclusion(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view,
+    const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex)
+{
+    if (!scene || !hrlScene || !hrlScene->ambient_occlusion_enabled || !bck_->ambient_occlusion_shader || !scene->depth_texture)
+        return;
+    const int src = (srcIndex == bck_->post_textures[0]) ? 0 : 1;
+    const int dst = 1 - src;
+    glBindFramebuffer(GL_FRAMEBUFFER, bck_->post_fbo[dst]);
+    glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
+    bck_->ambient_occlusion_shader->Use();
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, bck_->post_textures[src]);
+    bck_->ambient_occlusion_shader->SetInt("uScene", 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, scene->depth_texture);
+    bck_->ambient_occlusion_shader->SetInt("uDepth", 1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, scene->textures[4]);
+    bck_->ambient_occlusion_shader->SetInt("uNormal", 2);
+    bck_->ambient_occlusion_shader->SetMat4("uInvViewProjection", glm::inverse(projection * view));
+    bck_->ambient_occlusion_shader->SetVec3("uCameraPos", ctx_->viewport->camera_->position_);
+    bck_->ambient_occlusion_shader->SetVec2("uViewportOrigin", glm::vec2((float)viewportX/(float)scene->width,(float)viewportY/(float)scene->height));
+    bck_->ambient_occlusion_shader->SetVec2("uViewportSize", glm::vec2((float)viewportWidth/(float)scene->width,(float)viewportHeight/(float)scene->height));
+    bck_->ambient_occlusion_shader->SetVec2("uScreenSize", glm::vec2((float)scene->width,(float)scene->height));
+    bck_->ambient_occlusion_shader->SetFloat("uRadius", hrlScene->ambient_occlusion_radius);
+    bck_->ambient_occlusion_shader->SetFloat("uBias", hrlScene->ambient_occlusion_bias);
+    bck_->ambient_occlusion_shader->SetFloat("uStrength", hrlScene->ambient_occlusion_strength);
+    bck_->ambient_occlusion_shader->SetFloat("uPower", hrlScene->ambient_occlusion_power);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND);
+    glBindVertexArray(bck_->vao[BUFFER_QUAD]);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+    glBindVertexArray(0);
+    srcIndex = bck_->post_textures[dst];
+}
+
 static void ApplySceneEffects(GL_Scene* scene, const hrl_scene_t* hrlScene, const glm::mat4& view,
     const glm::mat4& projection, int viewportX, int viewportY, int viewportWidth, int viewportHeight, GLuint& srcIndex)
 {
@@ -3300,6 +3449,15 @@ static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewPr
 			activeShader = meshShader;
 		}
 		meshShader->SetMat4("model", model);
+		const auto shadowMaterialIt = GetPrivateContext()->materials.find(mesh->material_);
+		const bool shadowTwoSided = shadowMaterialIt != GetPrivateContext()->materials.end() && MaterialIsTwoSided(shadowMaterialIt->second);
+		if (shadowTwoSided)
+			glDisable(GL_CULL_FACE);
+		else
+		{
+			glEnable(GL_CULL_FACE);
+			glCullFace(GL_FRONT);
+		}
 
 		if (skeletal)
 		{
@@ -3337,7 +3495,7 @@ static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id)
 	int slot = 0;
 	for (const auto& [id, light] : scene->lights)
 	{
-		if (!light || !light->cast_shadows_ || slot >= MAX_SHADOW_SLOTS)
+		if (!light || light->type_ == HRL_SKY_LIGHT || !light->cast_shadows_ || slot >= MAX_SHADOW_SLOTS)
 			continue;
 		if (!EnsureShadowResource(light))
 			continue;

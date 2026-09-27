@@ -15,6 +15,9 @@
 
 void SetErrorCode(HRL_EError e, HRL_ESeverity severity, const std::string& detail);
 
+// Internal renderer access; never exposed through the public HRL API.
+HRL_Context* GetPrivateContext();
+
 HRL_id GenerateHRL_ID();
 
 unsigned int GetWindowWidth();
