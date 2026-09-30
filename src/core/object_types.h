@@ -6,7 +6,9 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+#include <cstdint>
 
 #include <glm/glm.hpp>
 #include <stb/stb_truetype.h>
@@ -36,6 +38,10 @@ struct HRL_Mesh {
   HRL_EMeshType type_;
 
   HRL_id material_=HRL_INVALID_ID;
+
+  // User-owned opaque pointer associated with this mesh.
+  // HRL never allocates, frees, or otherwise manages this pointer.
+  void* user_handle_=nullptr;
 
   float draw_order_=0.f;
 
@@ -192,6 +198,10 @@ typedef struct {
   // Textures created internally by HRL_CreateMaterialFromFBX*. Manual
   // HRL_MaterialSetTexture() bindings remain non-owning for compatibility.
   std::vector<HRL_id> owned_textures_;
+
+  // User-owned opaque pointer associated with this material.
+  // HRL never allocates, frees, or dereferences this pointer.
+  void* user_handle_ = nullptr;
 }HRL_Material;
 
 //CAMERA
@@ -206,6 +216,10 @@ typedef struct {
   float far_plane_;
 
   HRL_id scene_ = HRL_INVALID_ID;
+
+  // User-owned opaque pointer associated with this camera.
+  // HRL never allocates, frees, or dereferences this pointer.
+  void* user_handle_ = nullptr;
 }HRL_Camera;
 
 //VIEWPORT
@@ -500,6 +514,58 @@ typedef struct {
 }hrl_widget_t;
 
 
+// Screen-space debug messages (Unreal-style stacked on-screen messages).
+struct HRL_ScreenMessage
+{
+  HRL_id id = HRL_INVALID_ID;
+  std::string text;
+  float remaining_seconds = 0.0f;
+  float size = 16.0f;
+  glm::vec4 color = glm::vec4(1.0f);
+  HRL_id font = HRL_INVALID_ID;
+};
+
+// Internal 2D voxel-world storage. The complete voxel array stays on the CPU;
+// the OpenGL backend keeps GPU geometry only for visible chunks.
+struct HRL_VoxelWorld final {
+  int width_ = 0;
+  int height_ = 0;
+  int chunk_size_ = 32;
+  float voxel_size_ = 1.0f;
+
+  std::vector<HRL_Voxel> voxels_;
+  std::unordered_map<HRL_VoxelType, glm::vec4> type_colors_;
+
+  // Sparse user-defined flags associated with voxel types.
+  // A type has no flags by default; HRL does not assign any semantics to them.
+  std::unordered_map<HRL_VoxelType, uint32_t> type_collision_flags_;
+
+  // Sparse type-level emissive colors. Most voxel types have no entry, so
+  // ordinary voxels pay no per-voxel memory cost for emission.
+  std::unordered_map<HRL_VoxelType, glm::vec3> type_emissive_colors_;
+
+  // Chunks whose baked topology no longer matches the CPU data.
+  std::unordered_set<uint64_t> dirty_chunks_;
+
+  // Incremented whenever all chunk geometry must be regenerated (world load or
+  // a geometry-affecting configuration change).
+  uint64_t geometry_revision_ = 1;
+
+  // Incremented when voxel contents or voxel-space transforms change. Unlike
+  // geometry_revision_, this revision is only used to invalidate derived
+  // voxel-light data and therefore does not force every visible chunk to rebuild.
+  uint64_t voxel_revision_ = 1;
+
+  // Voxel edits can be grouped so a brush stroke invalidates derived lighting
+  // once instead of once per modified voxel.
+  uint32_t voxel_edit_depth_ = 0;
+  bool voxel_edit_dirty_ = false;
+
+  // Incremented when a voxel type color changes. The OpenGL backend compares
+  // this with each loaded chunk because colors are baked into chunk vertices.
+  uint64_t color_revision_ = 1;
+};
+
 //objects//
 typedef struct {
   int draw_on_screen;
@@ -509,6 +575,10 @@ typedef struct {
 
   //objects
   std::unordered_map<HRL_id, HRL_Mesh*> meshes;
+
+  // Optional 2D voxel world owned by this scene. The public API exposes only
+  // HRL_Voxel; chunking and GPU resources remain backend/internal details.
+  HRL_VoxelWorld* voxel_world = nullptr;
   std::unordered_map<HRL_id, HRL_Landscape*> landscapes;
   std::unordered_map<HRL_id, HRL_Light*> lights;
   std::unordered_map<HRL_id, HRL_VolumetricFog*> volumetric_fogs;
@@ -523,6 +593,14 @@ typedef struct {
   HRL_id debug_mesh_info_font = HRL_INVALID_ID;
   float debug_mesh_info_text_size = 14.0f;
   glm::vec4 debug_mesh_info_text_color = glm::vec4(1.0f, 0.95f, 0.25f, 1.0f);
+
+  // Unreal-style on-screen debug messages. Settings affect only messages
+  // created after the setting is changed.
+  float screen_message_text_size = 16.0f;
+  glm::vec4 screen_message_text_color = glm::vec4(1.0f);
+  HRL_id screen_message_font = HRL_INVALID_ID;
+  HRL_id next_screen_message_id = 1;
+  std::vector<HRL_ScreenMessage> screen_messages;
 
   // Procedural sky sphere. Disabled by default to preserve existing scenes.
   bool sky_sphere_enabled = false;

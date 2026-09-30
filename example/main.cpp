@@ -15,6 +15,7 @@
 #include <iterator>
 #include <cstdio>
 #include <vector>
+#include <random>
 
 #include "src/example.h"
 
@@ -57,6 +58,16 @@ static HRL_id QueueTextureFromFuture(std::future<std::string>& future, const cha
   return id;
 }
 
+
+
+float RandomFloat(float min, float max)
+{
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(min, max);
+
+    return dist(gen);
+}
 
 
 // frame time
@@ -516,9 +527,9 @@ int main()
 
     HRL_SetScreenSpaceReflectionsSteps(scene, 48);
 
-    HRL_SetFogEnabled(scene, 0);
+    HRL_SetFogEnabled(scene, 1);
 
-    HRL_SetGlobalVolumetricFogEnabled(scene, 0);
+    HRL_SetGlobalVolumetricFogEnabled(scene, 1);
 
     HRL_SetGlobalVolumetricFogDensity(scene, 0.01f);
     HRL_SetGlobalVolumetricFogColor(
@@ -1203,8 +1214,8 @@ int main()
     HRL_SetLandscapePosition(
         landscape,
         0.0f,
-        -10.0f,
-        0.0f
+        -100.0f,
+        0
     );
 
     HRL_SetLandscapeMaterial(
@@ -1703,7 +1714,7 @@ int main()
 
       double mouseX, mouseY;
       glfwGetCursorPos(win, &mouseX, &mouseY);
-      printf("Current hovered Object: %d\n", HRL_GL_GetHoveredObject(scene, (int)mouseX, (int)mouseY, nullptr));
+      //printf("Current hovered Object: %d\n", HRL_GL_GetHoveredObject(scene, (int)mouseX, (int)mouseY, nullptr));
 
 
     // Rotation lente du mesh FBX pour vérifier les normales, shadows et environment map.
@@ -1820,6 +1831,12 @@ int main()
           scene,
           "screenshot.png"
       );
+
+        HRL_SetScreenMessageFont(scene, font);
+        HRL_SetScreenMessageTextColor(scene, RandomFloat(0.f, 1.f), RandomFloat(0.f, 1.f), RandomFloat(0.f, 1.f), 1);
+        HRL_SetScreenMessageTextSize(scene, 32.f);
+
+        HRL_AddScreenMessage(scene, 3.f, "Screenshot taken!%d", scene);
 
       float proj[16];
 

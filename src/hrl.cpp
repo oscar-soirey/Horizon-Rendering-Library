@@ -20,10 +20,12 @@
 #include <unordered_set>
 #include <string>
 #include <algorithm>
+#include <array>
 #include <vector>
 #include <cmath>
 #include <new>
 #include <cstdio>
+#include <cstdarg>
 #include <limits>
 #include <set>
 #include <tuple>
@@ -938,6 +940,18 @@ void HRL_BeginFrame()
 	if (ctx_.vfx_has_frame_time)
 	{
 		const float dt = static_cast<float>(glm::clamp(seconds - ctx_.vfx_last_frame_time, 0.0, 0.1));
+		for (auto& [scene_id, scene] : ctx_.scenes)
+		{
+			(void)scene_id;
+			if (!scene || scene->screen_messages.empty())
+				continue;
+			for (auto& message : scene->screen_messages)
+				message.remaining_seconds -= dt;
+			scene->screen_messages.erase(
+				std::remove_if(scene->screen_messages.begin(), scene->screen_messages.end(),
+					[](const HRL_ScreenMessage& message) { return message.remaining_seconds <= 0.0f; }),
+				scene->screen_messages.end());
+		}
 		for (const auto& [id, system] : ctx_.vfx_systems)
 		{
 			(void)id;
@@ -1215,6 +1229,30 @@ void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid)
 		MarkSceneGILightingDirty(scene_it->second);
 }
 
+void HRL_SetMeshUserHandle(HRL_id _meshid, void* _handle)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshUserHandle: invalid ID");
+		return;
+	}
+
+	it->second->user_handle_ = _handle;
+}
+
+void* HRL_GetMeshUserHandle(HRL_id _meshid)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetMeshUserHandle: invalid ID");
+		return nullptr;
+	}
+
+	return it->second->user_handle_;
+}
+
 void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
 {
 	auto it = ctx_.meshes.find(_meshid);
@@ -1227,6 +1265,20 @@ void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
 		MarkSceneGIGeometryDirty(scene_it->second);
+}
+
+void HRL_GetMeshLocation(HRL_id _meshid, float* x, float* y, float* z)
+{
+	auto it = ctx_.meshes.find(_meshid);
+	if (it == ctx_.meshes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetMeshLocation: invalid ID");
+		return;
+	}
+
+	if (x) *x = it->second->position_.x;
+	if (y) *y = it->second->position_.y;
+	if (z) *z = it->second->position_.z;
 }
 
 void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll)
@@ -2023,6 +2075,8 @@ void HRL_DeleteScene(HRL_id _sceneid)
 	for (auto id : viewport_ids)  HRL_DeleteViewport(id);
 	for (auto id : camera_ids)    HRL_DeleteCamera(id);
 
+	delete it->second->voxel_world;
+	it->second->voxel_world = nullptr;
 	delete it->second;
 
 	ctx_.pending_screenshots.erase(_sceneid);
@@ -2031,6 +2085,1491 @@ void HRL_DeleteScene(HRL_id _sceneid)
 	ctx_.scenes.erase(it);
 }
 
+
+namespace
+{
+static HRL_VoxelWorld* FindVoxelWorld(HRL_id sceneid)
+{
+	auto it = ctx_.scenes.find(sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+		return nullptr;
+	return it->second->voxel_world;
+}
+
+static bool VoxelWorldElementCount(int width, int height, size_t& outCount)
+{
+	if (width <= 0 || height <= 0)
+		return false;
+	const size_t w = static_cast<size_t>(width);
+	const size_t h = static_cast<size_t>(height);
+	if (h != 0 && w > std::numeric_limits<size_t>::max() / h)
+		return false;
+	outCount = w * h;
+	return true;
+}
+
+static void EnsureVoxelWorld(HRL_id sceneid)
+{
+	auto it = ctx_.scenes.find(sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+		return;
+	if (!it->second->voxel_world)
+		it->second->voxel_world = new HRL_VoxelWorld();
+}
+
+static uint64_t VoxelChunkKey(int chunkX, int chunkY)
+{
+	return (static_cast<uint64_t>(static_cast<uint32_t>(chunkX)) << 32u) |
+		static_cast<uint32_t>(chunkY);
+}
+
+static void MarkVoxelChunkDirty(HRL_VoxelWorld* world, int voxelX, int voxelY)
+{
+	if (!world || world->chunk_size_ <= 0 || voxelX < 0 || voxelY < 0)
+		return;
+
+	const int chunkX = voxelX / world->chunk_size_;
+	const int chunkY = voxelY / world->chunk_size_;
+	world->dirty_chunks_.insert(VoxelChunkKey(chunkX, chunkY));
+
+	// Keep local voxel edits separate from the global geometry revision.
+	// Otherwise changing one voxel makes every visible chunk look stale.
+	world->voxel_edit_dirty_ = true;
+	if (world->voxel_edit_depth_ == 0)
+	{
+		++world->voxel_revision_;
+		world->voxel_edit_dirty_ = false;
+	}
+}
+
+static constexpr uint32_t kVoxelWorldSaveMagic = 0x31564C48u; // "HLV1" on little-endian files.
+static constexpr uint16_t kVoxelWorldSaveVersion = 1u;
+static constexpr size_t kVoxelWorldSaveHeaderSize = 28u;
+
+enum class VoxelSaveEncoding : uint8_t
+{
+	Constant = 0,
+	Palette = 1,
+	Raw = 2,
+	Rle = 3
+};
+
+class VoxelSaveWriter
+{
+public:
+	void WriteU8(uint8_t v) { data_.push_back(v); }
+	void WriteU16(uint16_t v)
+	{
+		data_.push_back(static_cast<uint8_t>(v & 0xffu));
+		data_.push_back(static_cast<uint8_t>((v >> 8u) & 0xffu));
+	}
+	void WriteU32(uint32_t v)
+	{
+		for (unsigned i = 0; i < 4; ++i)
+			data_.push_back(static_cast<uint8_t>((v >> (8u * i)) & 0xffu));
+	}
+	void WriteF32(float v)
+	{
+		uint32_t bits = 0;
+		static_assert(sizeof(bits) == sizeof(v), "float must be 32-bit");
+		std::memcpy(&bits, &v, sizeof(bits));
+		WriteU32(bits);
+	}
+	void WriteBytes(const uint8_t* bytes, size_t count)
+	{
+		if (count == 0) return;
+		data_.insert(data_.end(), bytes, bytes + count);
+	}
+	void WriteVarUInt(uint32_t value)
+	{
+		while (value >= 0x80u)
+		{
+			WriteU8(static_cast<uint8_t>(value) | 0x80u);
+			value >>= 7u;
+		}
+		WriteU8(static_cast<uint8_t>(value));
+	}
+	const std::vector<uint8_t>& Data() const { return data_; }
+private:
+	std::vector<uint8_t> data_;
+};
+
+class VoxelSaveReader
+{
+public:
+	VoxelSaveReader(const uint8_t* data, size_t size) : data_(data), size_(size) {}
+
+	bool ReadU8(uint8_t& out)
+	{
+		if (pos_ >= size_) return false;
+		out = data_[pos_++];
+		return true;
+	}
+	bool ReadU16(uint16_t& out)
+	{
+		uint8_t b0 = 0, b1 = 0;
+		if (!ReadU8(b0) || !ReadU8(b1)) return false;
+		out = static_cast<uint16_t>(b0 | (static_cast<uint16_t>(b1) << 8u));
+		return true;
+	}
+	bool ReadU32(uint32_t& out)
+	{
+		uint8_t b[4] = {};
+		for (unsigned i = 0; i < 4; ++i)
+			if (!ReadU8(b[i])) return false;
+		out = static_cast<uint32_t>(b[0]) |
+			(static_cast<uint32_t>(b[1]) << 8u) |
+			(static_cast<uint32_t>(b[2]) << 16u) |
+			(static_cast<uint32_t>(b[3]) << 24u);
+		return true;
+	}
+	bool ReadF32(float& out)
+	{
+		uint32_t bits = 0;
+		if (!ReadU32(bits)) return false;
+		std::memcpy(&out, &bits, sizeof(out));
+		return true;
+	}
+	bool ReadBytes(const uint8_t*& out, size_t count)
+	{
+		if (count > Remaining()) return false;
+		out = data_ + pos_;
+		pos_ += count;
+		return true;
+	}
+	bool ReadVarUInt(uint32_t& out)
+	{
+		out = 0;
+		unsigned shift = 0;
+		for (unsigned i = 0; i < 5; ++i)
+		{
+			uint8_t b = 0;
+			if (!ReadU8(b)) return false;
+			if (i == 4 && (b & 0xF0u) != 0) return false;
+			out |= static_cast<uint32_t>(b & 0x7Fu) << shift;
+			if ((b & 0x80u) == 0) return true;
+			shift += 7u;
+		}
+		return false;
+	}
+	size_t Position() const { return pos_; }
+	size_t Remaining() const { return size_ - pos_; }
+private:
+	const uint8_t* data_ = nullptr;
+	size_t size_ = 0;
+	size_t pos_ = 0;
+};
+
+static unsigned VoxelSaveBitsForPalette(size_t count)
+{
+	unsigned bits = 0;
+	size_t v = count > 1 ? count - 1 : 0;
+	while (v != 0)
+	{
+		++bits;
+		v >>= 1u;
+	}
+	return std::max(1u, bits);
+}
+
+static void VoxelSaveAppendPackedIndices(
+	const HRL_VoxelWorld* world,
+	int chunkX, int chunkY,
+	const std::array<int16_t, 256>& paletteIndex,
+	unsigned bits,
+	std::vector<uint8_t>& out)
+{
+	const int chunkSize = world->chunk_size_;
+	const int minX = chunkX * chunkSize;
+	const int minY = chunkY * chunkSize;
+	const int maxX = std::min(minX + chunkSize, world->width_);
+	const int maxY = std::min(minY + chunkSize, world->height_);
+
+	uint32_t accumulator = 0;
+	unsigned accumulatorBits = 0;
+	for (int y = minY; y < maxY; ++y)
+	{
+		for (int x = minX; x < maxX; ++x)
+		{
+			const HRL_VoxelType type = world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x)].type;
+			const int16_t palette = paletteIndex[type];
+			if (palette < 0) return;
+			accumulator |= static_cast<uint32_t>(palette) << accumulatorBits;
+			accumulatorBits += bits;
+			while (accumulatorBits >= 8u)
+			{
+				out.push_back(static_cast<uint8_t>(accumulator & 0xffu));
+				accumulator >>= 8u;
+				accumulatorBits -= 8u;
+			}
+		}
+	}
+	if (accumulatorBits != 0)
+		out.push_back(static_cast<uint8_t>(accumulator & 0xffu));
+}
+
+static void VoxelSaveBuildRle(
+	const HRL_VoxelWorld* world,
+	int chunkX, int chunkY,
+	std::vector<uint8_t>& out)
+{
+	const int chunkSize = world->chunk_size_;
+	const int minX = chunkX * chunkSize;
+	const int minY = chunkY * chunkSize;
+	const int maxX = std::min(minX + chunkSize, world->width_);
+	const int maxY = std::min(minY + chunkSize, world->height_);
+
+	for (int y = minY; y < maxY; ++y)
+	{
+		int x = minX;
+		while (x < maxX)
+		{
+			const HRL_VoxelType type = world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x)].type;
+			int run = 1;
+			while (x + run < maxX &&
+				world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x + run)].type == type)
+				++run;
+			out.push_back(type);
+			uint32_t remaining = static_cast<uint32_t>(run);
+			while (remaining >= 0x80u)
+			{
+				out.push_back(static_cast<uint8_t>(remaining) | 0x80u);
+				remaining >>= 7u;
+			}
+			out.push_back(static_cast<uint8_t>(remaining));
+			x += run;
+		}
+	}
+}
+
+static bool VoxelSaveBuildChunk(
+	const HRL_VoxelWorld* world,
+	int chunkX, int chunkY,
+	VoxelSaveEncoding& outEncoding,
+	uint8_t& outBits,
+	std::vector<uint8_t>& outPalette,
+	std::vector<uint8_t>& outPayload)
+{
+	outEncoding = VoxelSaveEncoding::Raw;
+	outBits = 0;
+	outPalette.clear();
+	outPayload.clear();
+
+	std::array<bool, 256> seen{};
+	std::vector<HRL_VoxelType> palette;
+	palette.reserve(16);
+	HRL_VoxelType first = 0;
+	bool firstSet = false;
+	bool uniform = true;
+
+	const int chunkSize = world->chunk_size_;
+	const int minX = chunkX * chunkSize;
+	const int minY = chunkY * chunkSize;
+	const int maxX = std::min(minX + chunkSize, world->width_);
+	const int maxY = std::min(minY + chunkSize, world->height_);
+	for (int y = minY; y < maxY; ++y)
+	{
+		for (int x = minX; x < maxX; ++x)
+		{
+			const HRL_VoxelType type = world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x)].type;
+			if (!firstSet) { first = type; firstSet = true; }
+			else if (type != first) uniform = false;
+			if (!seen[type])
+			{
+				seen[type] = true;
+				palette.push_back(type);
+			}
+		}
+	}
+	if (!firstSet) return false;
+	if (uniform)
+	{
+		if (first == 0) return false;
+		outEncoding = VoxelSaveEncoding::Constant;
+		outPalette.push_back(first);
+		return true;
+	}
+
+	std::array<int16_t, 256> paletteIndex{};
+	paletteIndex.fill(-1);
+	for (size_t i = 0; i < palette.size(); ++i)
+		paletteIndex[palette[i]] = static_cast<int16_t>(i);
+
+	std::vector<uint8_t> palettePayload;
+	const unsigned bits = VoxelSaveBitsForPalette(palette.size());
+	VoxelSaveAppendPackedIndices(world, chunkX, chunkY, paletteIndex, bits, palettePayload);
+
+	std::vector<uint8_t> rawPayload;
+	rawPayload.reserve(static_cast<size_t>(maxX - minX) * static_cast<size_t>(maxY - minY));
+	for (int y = minY; y < maxY; ++y)
+		for (int x = minX; x < maxX; ++x)
+			rawPayload.push_back(world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x)].type);
+
+	std::vector<uint8_t> rlePayload;
+	VoxelSaveBuildRle(world, chunkX, chunkY, rlePayload);
+
+	const size_t paletteTotal = palette.size() + palettePayload.size();
+	const size_t rawTotal = rawPayload.size();
+	const size_t rleTotal = rlePayload.size();
+	if (paletteTotal <= rawTotal && paletteTotal <= rleTotal)
+	{
+		outEncoding = VoxelSaveEncoding::Palette;
+		outBits = static_cast<uint8_t>(bits);
+		outPalette.assign(palette.begin(), palette.end());
+		outPayload = std::move(palettePayload);
+	}
+	else if (rleTotal <= rawTotal)
+	{
+		outEncoding = VoxelSaveEncoding::Rle;
+		outPayload = std::move(rlePayload);
+	}
+	else
+	{
+		outEncoding = VoxelSaveEncoding::Raw;
+		outPayload = std::move(rawPayload);
+	}
+	return true;
+}
+
+static bool VoxelSaveBuildAll(const HRL_VoxelWorld* world, std::vector<uint8_t>& out)
+{
+	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->chunk_size_ <= 0 ||
+		!std::isfinite(world->voxel_size_) || world->voxel_size_ <= 0.f)
+		return false;
+	if (world->voxels_.size() != static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_))
+		return false;
+
+	const uint64_t chunkColumns64 = (static_cast<uint64_t>(world->width_) + static_cast<uint64_t>(world->chunk_size_) - 1u) /
+		static_cast<uint64_t>(world->chunk_size_);
+	const uint64_t chunkRows64 = (static_cast<uint64_t>(world->height_) + static_cast<uint64_t>(world->chunk_size_) - 1u) /
+		static_cast<uint64_t>(world->chunk_size_);
+	if (chunkColumns64 == 0 || chunkRows64 == 0 || chunkColumns64 * chunkRows64 > std::numeric_limits<uint32_t>::max())
+		return false;
+
+	std::vector<uint8_t> bytes;
+	bytes.reserve(kVoxelWorldSaveHeaderSize);
+	VoxelSaveWriter writer;
+	writer.WriteU32(kVoxelWorldSaveMagic);
+	writer.WriteU16(kVoxelWorldSaveVersion);
+	writer.WriteU16(0u);
+	writer.WriteU32(static_cast<uint32_t>(world->width_));
+	writer.WriteU32(static_cast<uint32_t>(world->height_));
+	writer.WriteF32(world->voxel_size_);
+	writer.WriteU32(static_cast<uint32_t>(world->chunk_size_));
+
+	const size_t chunkCountOffset = 24u;
+	writer.WriteU32(0u); // patched after chunks are emitted
+
+	uint32_t nonEmptyChunks = 0;
+	for (uint64_t cy = 0; cy < chunkRows64; ++cy)
+	{
+		for (uint64_t cx = 0; cx < chunkColumns64; ++cx)
+		{
+			const int chunkX = static_cast<int>(cx);
+			const int chunkY = static_cast<int>(cy);
+			VoxelSaveEncoding encoding = VoxelSaveEncoding::Raw;
+			uint8_t bits = 0;
+			std::vector<uint8_t> palette;
+			std::vector<uint8_t> payload;
+			if (!VoxelSaveBuildChunk(world, chunkX, chunkY, encoding, bits, palette, payload))
+				continue; // empty chunk
+
+			if (payload.size() > std::numeric_limits<uint32_t>::max())
+				return false;
+			writer.WriteU32(static_cast<uint32_t>(cy * chunkColumns64 + cx));
+			writer.WriteU8(static_cast<uint8_t>(encoding));
+			writer.WriteU8(bits);
+			writer.WriteU8(static_cast<uint8_t>(palette.size()));
+			writer.WriteU8(0u);
+			writer.WriteU32(static_cast<uint32_t>(payload.size()));
+			writer.WriteBytes(palette.data(), palette.size());
+			writer.WriteBytes(payload.data(), payload.size());
+			++nonEmptyChunks;
+		}
+	}
+
+	if (nonEmptyChunks > std::numeric_limits<uint32_t>::max())
+		return false;
+	std::vector<uint8_t> result = writer.Data();
+	if (result.size() < kVoxelWorldSaveHeaderSize)
+		return false;
+	const uint32_t count = nonEmptyChunks;
+	result[chunkCountOffset + 0] = static_cast<uint8_t>(count & 0xffu);
+	result[chunkCountOffset + 1] = static_cast<uint8_t>((count >> 8u) & 0xffu);
+	result[chunkCountOffset + 2] = static_cast<uint8_t>((count >> 16u) & 0xffu);
+	result[chunkCountOffset + 3] = static_cast<uint8_t>((count >> 24u) & 0xffu);
+	out = std::move(result);
+	return true;
+}
+
+static bool VoxelSaveDecodeChunk(
+	const uint8_t* payload, size_t payloadSize,
+	VoxelSaveEncoding encoding, uint8_t bits,
+	const std::vector<HRL_VoxelType>& palette,
+	int chunkW, int chunkH,
+	std::vector<HRL_VoxelType>& destination)
+{
+	const size_t voxelCount = static_cast<size_t>(chunkW) * static_cast<size_t>(chunkH);
+	destination.assign(voxelCount, 0);
+	if (encoding == VoxelSaveEncoding::Constant)
+	{
+		if (palette.size() != 1 || payloadSize != 0) return false;
+		std::fill(destination.begin(), destination.end(), palette[0]);
+		return true;
+	}
+	if (encoding == VoxelSaveEncoding::Raw)
+	{
+		if (!palette.empty() || payloadSize != voxelCount) return false;
+		std::memcpy(destination.data(), payload, voxelCount);
+		return true;
+	}
+	if (encoding == VoxelSaveEncoding::Palette)
+	{
+		if (palette.empty() || palette.size() > 255u || bits == 0 || bits > 8) return false;
+		const size_t expectedBytes = (voxelCount * static_cast<size_t>(bits) + 7u) / 8u;
+		if (payloadSize != expectedBytes) return false;
+		uint32_t accumulator = 0;
+		unsigned accumulatorBits = 0;
+		size_t input = 0;
+		for (size_t i = 0; i < voxelCount; ++i)
+		{
+			while (accumulatorBits < bits)
+			{
+				if (input >= payloadSize) return false;
+				accumulator |= static_cast<uint32_t>(payload[input++]) << accumulatorBits;
+				accumulatorBits += 8u;
+			}
+			const uint32_t index = accumulator & ((1u << bits) - 1u);
+			accumulator >>= bits;
+			accumulatorBits -= bits;
+			if (index >= palette.size()) return false;
+			destination[i] = palette[index];
+		}
+		return true;
+	}
+	if (encoding == VoxelSaveEncoding::Rle)
+	{
+		VoxelSaveReader reader(payload, payloadSize);
+		size_t dst = 0;
+		for (int y = 0; y < chunkH; ++y)
+		{
+			size_t row = 0;
+			while (row < static_cast<size_t>(chunkW))
+			{
+				uint8_t type = 0;
+				uint32_t run = 0;
+				if (!reader.ReadU8(type) || !reader.ReadVarUInt(run) || run == 0)
+					return false;
+				if (run > static_cast<uint32_t>(chunkW) - row)
+					return false;
+				std::fill(destination.begin() + static_cast<std::ptrdiff_t>(dst),
+					destination.begin() + static_cast<std::ptrdiff_t>(dst + run), type);
+				row += run;
+				dst += run;
+			}
+		}
+		return reader.Remaining() == 0;
+	}
+	return false;
+}
+}
+
+void HRL_SetVoxelSize(HRL_id _sceneid, int _width, int _height)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVoxelSize: invalid scene ID");
+		return;
+	}
+
+	size_t elementCount = 0;
+	if (!VoxelWorldElementCount(_width, _height, elementCount))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVoxelSize: width and height must be positive and their product must fit in size_t");
+		return;
+	}
+
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	world->width_ = _width;
+	world->height_ = _height;
+	world->voxels_.assign(elementCount, HRL_Voxel{ 0 });
+	world->dirty_chunks_.clear();
+	++world->geometry_revision_;
+	++world->voxel_revision_;
+}
+
+int HRL_CreateVoxelWorld(HRL_id _sceneid, int _width, int _height)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_CreateVoxelWorld: invalid scene ID");
+		return HRL_FALSE;
+	}
+
+	size_t elementCount = 0;
+	if (!VoxelWorldElementCount(_width, _height, elementCount))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateVoxelWorld: width and height must be positive and their product must fit in size_t");
+		return HRL_FALSE;
+	}
+
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+
+	world->width_ = _width;
+	world->height_ = _height;
+	world->voxels_.assign(elementCount, HRL_Voxel{ 0 });
+	world->dirty_chunks_.clear();
+	++world->geometry_revision_;
+	++world->voxel_revision_;
+
+	return HRL_TRUE;
+}
+
+void HRL_SetVoxelPhysicalSize(HRL_id _sceneid, float _size)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVoxelPhysicalSize: invalid scene ID");
+		return;
+	}
+	if (!std::isfinite(_size) || _size <= 0.0f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVoxelPhysicalSize: size must be finite and greater than zero");
+		return;
+	}
+
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	world->voxel_size_ = _size;
+	++world->geometry_revision_;
+	++world->voxel_revision_;
+}
+
+int HRL_WorldToVoxelCoordinates(
+	HRL_id _sceneid,
+	float _world_x, float _world_y,
+	float* _voxel_x, float* _voxel_y)
+{
+	if (_voxel_x) *_voxel_x = 0.f;
+	if (_voxel_y) *_voxel_y = 0.f;
+
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR,
+			"HRL_WorldToVoxelCoordinates: invalid scene ID");
+		return HRL_FALSE;
+	}
+
+	const HRL_VoxelWorld* world = it->second->voxel_world;
+	if (!world || !std::isfinite(world->voxel_size_) || world->voxel_size_ <= 0.f)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_WARNING,
+			"HRL_WorldToVoxelCoordinates: voxel physical size is not configured");
+		return HRL_FALSE;
+	}
+	if (!_voxel_x || !_voxel_y)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_WorldToVoxelCoordinates: output pointer is null");
+		return HRL_FALSE;
+	}
+	if (!std::isfinite(_world_x) || !std::isfinite(_world_y))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_WorldToVoxelCoordinates: input coordinates must be finite");
+		return HRL_FALSE;
+	}
+
+	const float invVoxelSize = 1.f / world->voxel_size_;
+	*_voxel_x = _world_x * invVoxelSize;
+	*_voxel_y = _world_y * invVoxelSize;
+	return HRL_TRUE;
+}
+
+int HRL_VoxelToWorldCoordinates(
+	HRL_id _sceneid,
+	float _voxel_x, float _voxel_y,
+	float* _world_x, float* _world_y)
+{
+	if (_world_x) *_world_x = 0.f;
+	if (_world_y) *_world_y = 0.f;
+
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR,
+			"HRL_VoxelToWorldCoordinates: invalid scene ID");
+		return HRL_FALSE;
+	}
+
+	const HRL_VoxelWorld* world = it->second->voxel_world;
+	if (!world || !std::isfinite(world->voxel_size_) || world->voxel_size_ <= 0.f)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_WARNING,
+			"HRL_VoxelToWorldCoordinates: voxel physical size is not configured");
+		return HRL_FALSE;
+	}
+	if (!_world_x || !_world_y)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_VoxelToWorldCoordinates: output pointer is null");
+		return HRL_FALSE;
+	}
+	if (!std::isfinite(_voxel_x) || !std::isfinite(_voxel_y))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_VoxelToWorldCoordinates: input coordinates must be finite");
+		return HRL_FALSE;
+	}
+
+	*_world_x = _voxel_x * world->voxel_size_;
+	*_world_y = _voxel_y * world->voxel_size_;
+	return HRL_TRUE;
+}
+
+void HRL_SetVoxelChunkSize(HRL_id _sceneid, int _chunkSize)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVoxelChunkSize: invalid scene ID");
+		return;
+	}
+	if (_chunkSize <= 0)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVoxelChunkSize: chunk size must be greater than zero");
+		return;
+	}
+
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	if (world->chunk_size_ == _chunkSize)
+		return;
+	world->chunk_size_ = _chunkSize;
+	world->dirty_chunks_.clear();
+	++world->geometry_revision_;
+	++world->voxel_revision_;
+}
+
+void HRL_SetVoxelTypeColor(HRL_id _sceneid, uint32_t _type, float _r, float _g, float _b, float _a)
+{
+	if (_type > HRL_VOXEL_TYPE_MAX)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_SetVoxelTypeColor: voxel type must be in range 0..255");
+		return;
+	}
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVoxelTypeColor: invalid scene ID");
+		return;
+	}
+	if (!std::isfinite(_r) || !std::isfinite(_g) || !std::isfinite(_b) || !std::isfinite(_a))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVoxelTypeColor: color contains NaN or infinity");
+		return;
+	}
+
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	// Base color is display color only. Values above 1 are intentionally ignored
+	// instead of implicitly turning the voxel into an emitter. Emission is
+	// configured independently with HRL_SetVoxelTypeEmissiveColor().
+	world->type_colors_[_type] = glm::vec4(
+		glm::clamp(_r, 0.0f, 1.0f),
+		glm::clamp(_g, 0.0f, 1.0f),
+		glm::clamp(_b, 0.0f, 1.0f),
+		glm::clamp(_a, 0.0f, 1.0f)
+	);
+	++world->color_revision_;
+}
+
+void HRL_SetVoxelTypeEmissiveColor(HRL_id _sceneid, uint32_t _type, float _r, float _g, float _b)
+{
+	if (_type > HRL_VOXEL_TYPE_MAX)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_SetVoxelTypeEmissiveColor: voxel type must be in range 0..255");
+		return;
+	}
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVoxelTypeEmissiveColor: invalid scene ID");
+		return;
+	}
+	if (!std::isfinite(_r) || !std::isfinite(_g) || !std::isfinite(_b))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVoxelTypeEmissiveColor: color contains NaN or infinity");
+		return;
+	}
+
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	const glm::vec3 emissive(
+		std::max(_r, 0.0f),
+		std::max(_g, 0.0f),
+		std::max(_b, 0.0f)
+	);
+
+	if (std::max(emissive.r, std::max(emissive.g, emissive.b)) <= 0.0f)
+		world->type_emissive_colors_.erase(_type);
+	else
+		world->type_emissive_colors_[_type] = emissive;
+
+	// Emissive geometry and global emitter lists are rebuilt with the same
+	// revision used by the baked voxel colors.
+	++world->color_revision_;
+}
+
+int HRL_LoadVoxelWorld(HRL_id _sceneid, const HRL_Voxel* _voxels, size_t _count)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorld: invalid scene ID");
+		return HRL_FALSE;
+	}
+
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	if (!world || world->width_ <= 0 || world->height_ <= 0)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorld: call HRL_SetVoxelSize before loading voxel data");
+		return HRL_FALSE;
+	}
+
+	size_t expectedCount = 0;
+	if (!VoxelWorldElementCount(world->width_, world->height_, expectedCount) || expectedCount != _count)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorld: count must equal voxel world width * height");
+		return HRL_FALSE;
+	}
+	if (expectedCount > 0 && !_voxels)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorld: voxel array is null");
+		return HRL_FALSE;
+	}
+
+	world->voxels_.assign(_voxels, _voxels + _count);
+	world->dirty_chunks_.clear();
+	++world->geometry_revision_;
+	++world->voxel_revision_;
+	return HRL_TRUE;
+}
+
+size_t HRL_GetVoxelWorldSaveAllSize(HRL_id _sceneid)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetVoxelWorldSaveAllSize: invalid scene ID");
+		return 0;
+	}
+	const HRL_VoxelWorld* world = it->second->voxel_world;
+	std::vector<uint8_t> data;
+	if (!VoxelSaveBuildAll(world, data))
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_WARNING,
+			"HRL_GetVoxelWorldSaveAllSize: voxel world is not valid for serialization");
+		return 0;
+	}
+	return data.size();
+}
+
+size_t HRL_SaveVoxelWorldAll(HRL_id _sceneid, void* _buffer, size_t _capacity)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SaveVoxelWorldAll: invalid scene ID");
+		return 0;
+	}
+	const HRL_VoxelWorld* world = it->second->voxel_world;
+	std::vector<uint8_t> data;
+	if (!VoxelSaveBuildAll(world, data))
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_WARNING,
+			"HRL_SaveVoxelWorldAll: voxel world is not valid for serialization");
+		return 0;
+	}
+	if (!_buffer || _capacity < data.size())
+		return data.size();
+	std::memcpy(_buffer, data.data(), data.size());
+	return data.size();
+}
+
+int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid scene ID");
+		return HRL_FALSE;
+	}
+	if (!_buffer || _size < kVoxelWorldSaveHeaderSize)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid or empty buffer");
+		return HRL_FALSE;
+	}
+
+	VoxelSaveReader reader(static_cast<const uint8_t*>(_buffer), _size);
+	uint32_t magic = 0, width = 0, height = 0, chunkSize = 0, chunkCount = 0;
+	uint16_t version = 0, flags = 0;
+	float voxelSize = 0.f;
+	if (!reader.ReadU32(magic) || !reader.ReadU16(version) || !reader.ReadU16(flags) ||
+		!reader.ReadU32(width) || !reader.ReadU32(height) || !reader.ReadF32(voxelSize) ||
+		!reader.ReadU32(chunkSize) || !reader.ReadU32(chunkCount))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: truncated header");
+		return HRL_FALSE;
+	}
+	if (magic != kVoxelWorldSaveMagic || version != kVoxelWorldSaveVersion || flags != 0u)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: unsupported voxel world format");
+		return HRL_FALSE;
+	}
+	if (width == 0 || height == 0 || chunkSize == 0 || !std::isfinite(voxelSize) || voxelSize <= 0.f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid world dimensions or voxel size");
+		return HRL_FALSE;
+	}
+	if (width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+		height > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+		chunkSize > static_cast<uint32_t>(std::numeric_limits<int>::max()))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: world dimensions exceed HRL limits");
+		return HRL_FALSE;
+	}
+
+	size_t expectedCount = 0;
+	if (!VoxelWorldElementCount(static_cast<int>(width), static_cast<int>(height), expectedCount))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: world is too large");
+		return HRL_FALSE;
+	}
+	const uint64_t chunkColumns = (static_cast<uint64_t>(width) + chunkSize - 1u) / chunkSize;
+	const uint64_t chunkRows = (static_cast<uint64_t>(height) + chunkSize - 1u) / chunkSize;
+	const uint64_t totalChunks = chunkColumns * chunkRows;
+	if (totalChunks == 0 || totalChunks > std::numeric_limits<uint32_t>::max() || chunkCount > totalChunks)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid chunk count");
+		return HRL_FALSE;
+	}
+
+	std::vector<HRL_Voxel> newVoxels(expectedCount);
+	std::vector<uint8_t> seenChunks(static_cast<size_t>(totalChunks), 0u);
+	for (uint32_t record = 0; record < chunkCount; ++record)
+	{
+		uint32_t chunkIndex = 0;
+		uint8_t encodingByte = 0, bits = 0, paletteCount = 0, reserved = 0;
+		uint32_t payloadSize = 0;
+		if (!reader.ReadU32(chunkIndex) || !reader.ReadU8(encodingByte) || !reader.ReadU8(bits) ||
+			!reader.ReadU8(paletteCount) || !reader.ReadU8(reserved) || !reader.ReadU32(payloadSize))
+		{
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: truncated chunk record");
+			return HRL_FALSE;
+		}
+		if (reserved != 0u || chunkIndex >= totalChunks || seenChunks[chunkIndex] != 0u)
+		{
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid or duplicate chunk");
+			return HRL_FALSE;
+		}
+		seenChunks[chunkIndex] = 1u;
+		if (paletteCount == 0 && encodingByte == static_cast<uint8_t>(VoxelSaveEncoding::Constant))
+		{
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: constant chunk has no palette");
+			return HRL_FALSE;
+		}
+		if (encodingByte > static_cast<uint8_t>(VoxelSaveEncoding::Rle))
+		{
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: unknown chunk encoding");
+			return HRL_FALSE;
+		}
+
+		std::vector<HRL_VoxelType> palette(paletteCount);
+		for (uint8_t& value : palette)
+		{
+			if (!reader.ReadU8(value))
+			{
+				SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: truncated palette");
+				return HRL_FALSE;
+			}
+		}
+		const uint8_t* payload = nullptr;
+		if (!reader.ReadBytes(payload, payloadSize))
+		{
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: truncated chunk payload");
+			return HRL_FALSE;
+		}
+
+		const uint32_t chunkX = chunkIndex % static_cast<uint32_t>(chunkColumns);
+		const uint32_t chunkY = chunkIndex / static_cast<uint32_t>(chunkColumns);
+		const int minX = static_cast<int>(chunkX * chunkSize);
+		const int minY = static_cast<int>(chunkY * chunkSize);
+		const int chunkW = std::min(static_cast<int>(chunkSize), static_cast<int>(width) - minX);
+		const int chunkH = std::min(static_cast<int>(chunkSize), static_cast<int>(height) - minY);
+		std::vector<HRL_VoxelType> decoded;
+		if (!VoxelSaveDecodeChunk(payload, payloadSize,
+			static_cast<VoxelSaveEncoding>(encodingByte), bits, palette, chunkW, chunkH, decoded))
+		{
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid chunk encoding");
+			return HRL_FALSE;
+		}
+		for (int y = 0; y < chunkH; ++y)
+		{
+			const size_t dst = (static_cast<size_t>(minY + y) * static_cast<size_t>(width)) + static_cast<size_t>(minX);
+			const size_t src = static_cast<size_t>(y) * static_cast<size_t>(chunkW);
+			for (int x = 0; x < chunkW; ++x)
+				newVoxels[dst + static_cast<size_t>(x)].type = decoded[src + static_cast<size_t>(x)];
+		}
+	}
+	if (reader.Remaining() != 0)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: trailing bytes after chunk data");
+		return HRL_FALSE;
+	}
+
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	world->width_ = static_cast<int>(width);
+	world->height_ = static_cast<int>(height);
+	world->voxel_size_ = voxelSize;
+	world->chunk_size_ = static_cast<int>(chunkSize);
+	world->voxels_ = std::move(newVoxels);
+	world->dirty_chunks_.clear();
+	++world->geometry_revision_;
+	++world->voxel_revision_;
+	return HRL_TRUE;
+}
+
+
+int HRL_SaveVoxelWorldAllFile(HRL_id _sceneid, const char* _path)
+{
+	if (!_path || _path[0] == '\0')
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR,
+			"HRL_SaveVoxelWorldAllFile: file path is null or empty");
+		return HRL_FALSE;
+	}
+
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR,
+			"HRL_SaveVoxelWorldAllFile: invalid scene ID");
+		return HRL_FALSE;
+	}
+
+	const HRL_VoxelWorld* world = it->second->voxel_world;
+	std::vector<uint8_t> data;
+	if (!VoxelSaveBuildAll(world, data))
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_WARNING,
+			"HRL_SaveVoxelWorldAllFile: voxel world is not valid for serialization");
+		return HRL_FALSE;
+	}
+
+	FILE* file = std::fopen(_path, "wb");
+	if (!file)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR,
+			"HRL_SaveVoxelWorldAllFile: could not open destination file");
+		return HRL_FALSE;
+	}
+
+	bool ok = true;
+	if (!data.empty())
+		ok = (std::fwrite(data.data(), 1, data.size(), file) == data.size());
+	if (std::fclose(file) != 0)
+		ok = false;
+
+	if (!ok)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR,
+			"HRL_SaveVoxelWorldAllFile: file write failed");
+		return HRL_FALSE;
+	}
+
+	return HRL_TRUE;
+}
+
+
+void HRL_BeginVoxelEdit(HRL_id _sceneid)
+{
+	HRL_VoxelWorld* world = FindVoxelWorld(_sceneid);
+	if (!world)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR,
+			"HRL_BeginVoxelEdit: invalid scene or voxel world");
+		return;
+	}
+	++world->voxel_edit_depth_;
+}
+
+void HRL_EndVoxelEdit(HRL_id _sceneid)
+{
+	HRL_VoxelWorld* world = FindVoxelWorld(_sceneid);
+	if (!world)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR,
+			"HRL_EndVoxelEdit: invalid scene or voxel world");
+		return;
+	}
+	if (world->voxel_edit_depth_ == 0)
+		return;
+
+	--world->voxel_edit_depth_;
+	if (world->voxel_edit_depth_ == 0 && world->voxel_edit_dirty_)
+	{
+		++world->voxel_revision_;
+		world->voxel_edit_dirty_ = false;
+	}
+}
+
+void HRL_SetVoxelType(HRL_id _sceneid, int _pos_x, int _pos_y, uint32_t _type)
+{
+	if (_type > HRL_VOXEL_TYPE_MAX)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_SetVoxelType: voxel type must be in range 0..255");
+		return;
+	}
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVoxelType: invalid scene ID");
+		return;
+	}
+	HRL_VoxelWorld* world = FindVoxelWorld(_sceneid);
+	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->voxels_.empty())
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetVoxelType: voxel world is not loaded");
+		return;
+	}
+	if (_pos_x < 0 || _pos_y < 0 || _pos_x >= world->width_ || _pos_y >= world->height_)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING, "HRL_SetVoxelType: position is outside the voxel world");
+		return;
+	}
+
+	const size_t index = static_cast<size_t>(_pos_y) * static_cast<size_t>(world->width_) + static_cast<size_t>(_pos_x);
+	if (world->voxels_[index].type == _type)
+		return;
+	world->voxels_[index].type = static_cast<HRL_VoxelType>(_type);
+	MarkVoxelChunkDirty(world, _pos_x, _pos_y);
+}
+
+uint32_t HRL_GetVoxelType(HRL_id _sceneid, int _pos_x, int _pos_y)
+{
+	const HRL_VoxelWorld* world = nullptr;
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetVoxelType: invalid scene ID");
+		return 0;
+	}
+	world = it->second->voxel_world;
+	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->voxels_.empty())
+		return 0;
+	if (_pos_x < 0 || _pos_y < 0 || _pos_x >= world->width_ || _pos_y >= world->height_)
+		return 0;
+	const size_t index = static_cast<size_t>(_pos_y) * static_cast<size_t>(world->width_) + static_cast<size_t>(_pos_x);
+	return world->voxels_[index].type;
+}
+
+void HRL_SetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type, uint32_t _flags)
+{
+	if (_type > HRL_VOXEL_TYPE_MAX)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_SetVoxelTypeCollisionFlags: voxel type must be in range 0..255");
+		return;
+	}
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR,
+			"HRL_SetVoxelTypeCollisionFlags: invalid scene ID");
+		return;
+	}
+
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	if (_flags == 0u)
+		world->type_collision_flags_.erase(_type);
+	else
+		world->type_collision_flags_[_type] = _flags;
+}
+
+uint32_t HRL_GetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type)
+{
+	if (_type > HRL_VOXEL_TYPE_MAX)
+		return 0u;
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR,
+			"HRL_GetVoxelTypeCollisionFlags: invalid scene ID");
+		return 0u;
+	}
+
+	const HRL_VoxelWorld* world = it->second->voxel_world;
+	if (!world)
+		return 0u;
+
+	auto flagsIt = world->type_collision_flags_.find(_type);
+	return flagsIt != world->type_collision_flags_.end() ? flagsIt->second : 0u;
+}
+
+namespace
+{
+	static uint32_t HRL_GetVoxelCollisionFlags(const HRL_VoxelWorld* _world, HRL_VoxelType _type)
+	{
+		if (!_world || _type == 0)
+			return 0u;
+		auto it = _world->type_collision_flags_.find(_type);
+		return it != _world->type_collision_flags_.end() ? it->second : 0u;
+	}
+
+	static void HRL_RecordVoxelCollisionType(
+		uint32_t& _slot, float& _bestMetric, uint32_t _type, float _metric)
+	{
+		if (_type == 0)
+			return;
+		if (_slot == 0 || _metric < _bestMetric)
+		{
+			_slot = _type;
+			_bestMetric = _metric;
+		}
+	}
+}
+
+int HRL_VoxelCheckCollision(
+	HRL_id _sceneid,
+	float _x, float _y,
+	float _width, float _height,
+	uint32_t _mask,
+	HRL_VoxelCollision* _out_collision)
+{
+	if (_out_collision)
+	{
+		*_out_collision = HRL_VoxelCollision{};
+	}
+
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR,
+			"HRL_VoxelCheckCollision: invalid scene ID");
+		return HRL_FALSE;
+	}
+
+	const HRL_VoxelWorld* world = it->second->voxel_world;
+	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->voxels_.empty())
+		return HRL_FALSE;
+	if (!std::isfinite(_x) || !std::isfinite(_y) ||
+		!std::isfinite(_width) || !std::isfinite(_height) ||
+		_width <= 0.f || _height <= 0.f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_VoxelCheckCollision: position and size must be finite; size must be greater than zero");
+		return HRL_FALSE;
+	}
+	if (!_out_collision)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_VoxelCheckCollision: output collision pointer is null");
+		return HRL_FALSE;
+	}
+
+	// Coordinates are expressed in voxel-space units, independent of the
+	// physical render size of a voxel. The shape is centered on (_x, _y).
+	const float halfWidth = _width * 0.5f;
+	const float halfHeight = _height * 0.5f;
+	const float minX = _x - halfWidth;
+	const float maxX = _x + halfWidth;
+	const float minY = _y - halfHeight;
+	const float maxY = _y + halfHeight;
+
+	constexpr float kEpsilon = 1e-5f;
+
+	// Expand the integer search range by one epsilon so exact face contact is
+	// reported as a collision rather than being lost to floor/ceil rounding.
+	int minVX = static_cast<int>(std::floor(minX - kEpsilon));
+	int maxVX = static_cast<int>(std::floor(maxX + kEpsilon));
+	int minVY = static_cast<int>(std::floor(minY - kEpsilon));
+	int maxVY = static_cast<int>(std::floor(maxY + kEpsilon));
+
+	minVX = std::max(0, minVX);
+	minVY = std::max(0, minVY);
+	maxVX = std::min(world->width_ - 1, maxVX);
+	maxVY = std::min(world->height_ - 1, maxVY);
+	if (minVX > maxVX || minVY > maxVY)
+		return HRL_FALSE;
+
+	float bestLeft = std::numeric_limits<float>::max();
+	float bestRight = std::numeric_limits<float>::max();
+	float bestTop = std::numeric_limits<float>::max();
+	float bestBottom = std::numeric_limits<float>::max();
+	float bestInside = std::numeric_limits<float>::max();
+
+	for (int vy = minVY; vy <= maxVY; ++vy)
+	{
+		for (int vx = minVX; vx <= maxVX; ++vx)
+		{
+			const size_t index = static_cast<size_t>(vy) * static_cast<size_t>(world->width_) +
+				static_cast<size_t>(vx);
+			const HRL_VoxelType type = world->voxels_[index].type;
+			const uint32_t voxelFlags = HRL_GetVoxelCollisionFlags(world, type);
+			if (_mask == 0u || (voxelFlags & _mask) == 0u)
+				continue;
+
+			const float voxelMinX = static_cast<float>(vx);
+			const float voxelMaxX = voxelMinX + 1.f;
+			const float voxelMinY = static_cast<float>(vy);
+			const float voxelMaxY = voxelMinY + 1.f;
+
+			const float overlapX = std::min(maxX, voxelMaxX) - std::max(minX, voxelMinX);
+			const float overlapY = std::min(maxY, voxelMaxY) - std::max(minY, voxelMinY);
+			if (overlapX < -kEpsilon || overlapY < -kEpsilon)
+				continue;
+
+			_out_collision->flags |= HRL_VOXEL_COLLISION_NONE;
+
+			const bool containsShape =
+				voxelMinX <= minX + kEpsilon && voxelMaxX >= maxX - kEpsilon &&
+				voxelMinY <= minY + kEpsilon && voxelMaxY >= maxY - kEpsilon;
+			if (containsShape)
+			{
+				_out_collision->flags |= HRL_VOXEL_COLLISION_INSIDE;
+				HRL_RecordVoxelCollisionType(_out_collision->inside_type, bestInside, type,
+					std::max(0.f, std::min(overlapX, overlapY)));
+				continue;
+			}
+
+			// Exact corner contact: report both axes. For real penetration, use
+			// the smaller overlap as the most plausible contact axis.
+			if (overlapX <= kEpsilon && overlapY <= kEpsilon)
+			{
+				const float centerX = voxelMinX + 0.5f;
+				const float centerY = voxelMinY + 0.5f;
+				if (centerX < _x)
+				{
+					_out_collision->flags |= HRL_VOXEL_COLLISION_LEFT;
+					HRL_RecordVoxelCollisionType(_out_collision->left_type, bestLeft, type, 0.f);
+				}
+				else if (centerX > _x)
+				{
+					_out_collision->flags |= HRL_VOXEL_COLLISION_RIGHT;
+					HRL_RecordVoxelCollisionType(_out_collision->right_type, bestRight, type, 0.f);
+				}
+				if (centerY < _y)
+				{
+					_out_collision->flags |= HRL_VOXEL_COLLISION_BOTTOM;
+					HRL_RecordVoxelCollisionType(_out_collision->bottom_type, bestBottom, type, 0.f);
+				}
+				else if (centerY > _y)
+				{
+					_out_collision->flags |= HRL_VOXEL_COLLISION_TOP;
+					HRL_RecordVoxelCollisionType(_out_collision->top_type, bestTop, type, 0.f);
+				}
+				continue;
+			}
+
+			const float centerX = voxelMinX + 0.5f;
+			const float centerY = voxelMinY + 0.5f;
+			if (overlapX <= overlapY)
+			{
+				if (centerX < _x)
+				{
+					_out_collision->flags |= HRL_VOXEL_COLLISION_LEFT;
+					HRL_RecordVoxelCollisionType(_out_collision->left_type, bestLeft, type, overlapX);
+				}
+				else
+				{
+					_out_collision->flags |= HRL_VOXEL_COLLISION_RIGHT;
+					HRL_RecordVoxelCollisionType(_out_collision->right_type, bestRight, type, overlapX);
+				}
+			}
+			else
+			{
+				if (centerY < _y)
+				{
+					_out_collision->flags |= HRL_VOXEL_COLLISION_BOTTOM;
+					HRL_RecordVoxelCollisionType(_out_collision->bottom_type, bestBottom, type, overlapY);
+				}
+				else
+				{
+					_out_collision->flags |= HRL_VOXEL_COLLISION_TOP;
+					HRL_RecordVoxelCollisionType(_out_collision->top_type, bestTop, type, overlapY);
+				}
+			}
+		}
+	}
+
+	return _out_collision->flags != HRL_VOXEL_COLLISION_NONE ? HRL_TRUE : HRL_FALSE;
+}
+
+namespace {
+
+static bool HRL_GetVoxelScreenRay(const HRL_Viewport* viewport, float mouseX, float mouseY,
+    glm::vec3& origin, glm::vec3& direction)
+{
+    if (!viewport || !viewport->camera_)
+        return false;
+
+    const float winW = static_cast<float>(GetWindowWidth());
+    const float winH = static_cast<float>(GetWindowHeight());
+    if (winW <= 0.f || winH <= 0.f)
+        return false;
+
+    // HRL mouse coordinates are top-left origin. OpenGL viewports use a
+    // bottom-left origin, so convert Y before testing the viewport and building
+    // NDC coordinates.
+    const float framebufferY = winH - mouseY;
+    const float viewportX = viewport->x_ * winW;
+    const float viewportY = viewport->y_ * winH;
+    const float viewportW = std::max(1.f, viewport->width_ * winW);
+    const float viewportH = std::max(1.f, viewport->height_ * winH);
+
+    if (mouseX < viewportX || mouseX >= viewportX + viewportW ||
+        framebufferY < viewportY || framebufferY >= viewportY + viewportH)
+        return false;
+
+    const float u = (mouseX - viewportX) / viewportW;
+    const float v = (framebufferY - viewportY) / viewportH;
+    const float ndcX = u * 2.f - 1.f;
+    const float ndcY = v * 2.f - 1.f;
+
+    const HRL_Camera* camera = viewport->camera_;
+    const float aspect = viewportW / viewportH;
+
+    glm::mat4 projection(1.f);
+    if (camera->type_ == HRL_PERSPECTIVE)
+    {
+        projection = glm::perspective(
+            glm::radians(camera->value_), aspect, camera->near_plane_, camera->far_plane_);
+    }
+    else
+    {
+        const float halfHeight = camera->value_ * 0.5f;
+        const float halfWidth = halfHeight * aspect;
+        projection = glm::ortho(
+            -halfWidth, halfWidth, -halfHeight, halfHeight,
+            camera->near_plane_, camera->far_plane_);
+    }
+
+    const glm::mat4 view = glm::lookAt(
+        camera->position_,
+        camera->position_ + GetForwardVector(camera->rotation_),
+        GetUpVector(camera->rotation_));
+
+    const glm::mat4 inverseVP = glm::inverse(projection * view);
+    glm::vec4 nearPoint = inverseVP * glm::vec4(ndcX, ndcY, -1.f, 1.f);
+    glm::vec4 farPoint  = inverseVP * glm::vec4(ndcX, ndcY,  1.f, 1.f);
+
+    if (std::abs(nearPoint.w) < 1e-6f || std::abs(farPoint.w) < 1e-6f)
+        return false;
+
+    nearPoint /= nearPoint.w;
+    farPoint /= farPoint.w;
+
+    origin = glm::vec3(nearPoint);
+    direction = glm::vec3(farPoint - nearPoint);
+    const float directionLength = glm::length(direction);
+    if (directionLength <= 1e-6f || !std::isfinite(directionLength))
+        return false;
+    direction /= directionLength;
+
+    return true;
+}
+
+} // namespace
+
+int HRL_GetVoxelAtScreenPosition(HRL_id _sceneid, int _loc_x, int _loc_y, int* _vx, int* _vy)
+{
+    if (_vx) *_vx = -1;
+    if (_vy) *_vy = -1;
+
+    auto sceneIt = ctx_.scenes.find(_sceneid);
+    if (sceneIt == ctx_.scenes.end() || !sceneIt->second)
+    {
+        SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR,
+            "HRL_GetVoxelAtScreenPosition: invalid scene ID");
+        return HRL_FALSE;
+    }
+
+    hrl_scene_t* scene = sceneIt->second;
+    HRL_VoxelWorld* world = scene->voxel_world;
+    if (!world || world->width_ <= 0 || world->height_ <= 0 ||
+        world->voxel_size_ <= 0.f ||
+        world->voxels_.size() != static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_))
+        return HRL_FALSE;
+
+    // A scene can have several viewports. Select the one containing the mouse.
+    const HRL_Viewport* viewport = nullptr;
+    const float winW = static_cast<float>(GetWindowWidth());
+    const float winH = static_cast<float>(GetWindowHeight());
+    for (const auto& [viewportId, candidate] : scene->viewports)
+    {
+        (void)viewportId;
+        if (!candidate || !candidate->camera_)
+            continue;
+
+        const float viewportX = candidate->x_ * winW;
+        const float viewportYTop = winH - (candidate->y_ + candidate->height_) * winH;
+        const float viewportW = candidate->width_ * winW;
+        const float viewportH = candidate->height_ * winH;
+        if (_loc_x >= viewportX && _loc_x < viewportX + viewportW &&
+            _loc_y >= viewportYTop && _loc_y < viewportYTop + viewportH)
+        {
+            viewport = candidate;
+            break;
+        }
+    }
+
+    if (!viewport)
+        return HRL_FALSE;
+
+    glm::vec3 rayOrigin(0.f);
+    glm::vec3 rayDirection(0.f);
+    if (!HRL_GetVoxelScreenRay(viewport, static_cast<float>(_loc_x), static_cast<float>(_loc_y),
+        rayOrigin, rayDirection))
+        return HRL_FALSE;
+
+    // The voxel world is a finite rectangle in the XY plane at Z = 0.
+    if (std::abs(rayDirection.z) <= 1e-6f)
+        return HRL_FALSE;
+
+    const float t = -rayOrigin.z / rayDirection.z;
+    if (t < 0.f || !std::isfinite(t))
+        return HRL_FALSE;
+
+    const glm::vec3 hit = rayOrigin + rayDirection * t;
+    if (!std::isfinite(hit.x) || !std::isfinite(hit.y))
+        return HRL_FALSE;
+
+    const float worldWidth = static_cast<float>(world->width_) * world->voxel_size_;
+    const float worldHeight = static_cast<float>(world->height_) * world->voxel_size_;
+    if (hit.x < 0.f || hit.y < 0.f || hit.x >= worldWidth || hit.y >= worldHeight)
+        return HRL_FALSE;
+
+    const int vx = static_cast<int>(std::floor(hit.x / world->voxel_size_));
+    const int vy = static_cast<int>(std::floor(hit.y / world->voxel_size_));
+    if (vx < 0 || vy < 0 || vx >= world->width_ || vy >= world->height_)
+        return HRL_FALSE;
+
+    if (_vx) *_vx = vx;
+    if (_vy) *_vy = vy;
+    return HRL_TRUE;
+}
 
 static bool IsValidGlobalIlluminationMethod(HRL_EGlobalIlluminationMethod method)
 {
@@ -2370,6 +3909,30 @@ void HRL_DeleteMaterial(HRL_id _matid)
 	MarkAllScenesGILightingDirty();
 }
 
+void HRL_SetMaterialUserHandle(HRL_id _matid, void* _handle)
+{
+	auto it = ctx_.materials.find(_matid);
+	if (it == ctx_.materials.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMaterialUserHandle: invalid ID");
+		return;
+	}
+
+	it->second->user_handle_ = _handle;
+}
+
+void* HRL_GetMaterialUserHandle(HRL_id _matid)
+{
+	auto it = ctx_.materials.find(_matid);
+	if (it == ctx_.materials.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetMaterialUserHandle: invalid ID");
+		return nullptr;
+	}
+
+	return it->second->user_handle_;
+}
+
 void HRL_MaterialSetInt(HRL_id _matid, const char* _uniformName, int a)
 {
 	auto it = ctx_.materials.find(_matid);
@@ -2642,6 +4205,30 @@ void HRL_DeleteCamera(HRL_id _camid)
 	ctx_.cameras.erase(it);
 }
 
+
+void HRL_SetCameraUserHandle(HRL_id _camid, void* _handle)
+{
+	auto it = ctx_.cameras.find(_camid);
+	if (it == ctx_.cameras.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetCameraUserHandle: invalid ID");
+		return;
+	}
+
+	it->second->user_handle_ = _handle;
+}
+
+void* HRL_GetCameraUserHandle(HRL_id _camid)
+{
+	auto it = ctx_.cameras.find(_camid);
+	if (it == ctx_.cameras.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetCameraUserHandle: invalid ID");
+		return nullptr;
+	}
+
+	return it->second->user_handle_;
+}
 
 void HRL_SetCameraType(HRL_id _camid, HRL_ECameraType _type)
 {
@@ -7444,6 +9031,108 @@ void HRL_SetDebugMeshInfoTextColor(HRL_id _sceneid, float r, float g, float b, f
 		return;
 	}
 	it->second->debug_mesh_info_text_color = glm::clamp(glm::vec4(r, g, b, a), glm::vec4(0.0f), glm::vec4(1.0f));
+}
+
+HRL_id HRL_AddScreenMessage(HRL_id _sceneid, float _duration_seconds, const char* _format, ...)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_AddScreenMessage: invalid scene ID");
+		return HRL_INVALID_ID;
+	}
+	if (!_format || !_format[0])
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_AddScreenMessage: format must not be empty");
+		return HRL_INVALID_ID;
+	}
+	if (!std::isfinite(_duration_seconds) || _duration_seconds <= 0.0f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_AddScreenMessage: duration must be finite and positive");
+		return HRL_INVALID_ID;
+	}
+
+	va_list args;
+	va_start(args, _format);
+	va_list args_copy;
+	va_copy(args_copy, args);
+	const int required = std::vsnprintf(nullptr, 0, _format, args_copy);
+	va_end(args_copy);
+
+	if (required < 0)
+	{
+		va_end(args);
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_AddScreenMessage: invalid format string");
+		return HRL_INVALID_ID;
+	}
+
+	std::string formatted(static_cast<size_t>(required) + 1, '\0');
+	std::vsnprintf(formatted.data(), formatted.size(), _format, args);
+	formatted.resize(static_cast<size_t>(required));
+	va_end(args);
+
+	HRL_ScreenMessage message;
+	message.id = it->second->next_screen_message_id++;
+	if (message.id == HRL_INVALID_ID)
+		message.id = it->second->next_screen_message_id++;
+	message.text = std::move(formatted);
+	message.remaining_seconds = _duration_seconds;
+	message.size = it->second->screen_message_text_size;
+	message.color = it->second->screen_message_text_color;
+	message.font = it->second->screen_message_font;
+	if (message.font == HRL_INVALID_ID)
+		message.font = it->second->debug_mesh_info_font;
+
+	it->second->screen_messages.push_back(std::move(message));
+	return it->second->screen_messages.back().id;
+}
+
+void HRL_SetScreenMessageTextSize(HRL_id _sceneid, float _size)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetScreenMessageTextSize: invalid scene ID");
+		return;
+	}
+	if (!std::isfinite(_size) || _size <= 0.0f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetScreenMessageTextSize: size must be finite and positive");
+		return;
+	}
+	it->second->screen_message_text_size = std::clamp(_size, 1.0f, 256.0f);
+}
+
+void HRL_SetScreenMessageTextColor(HRL_id _sceneid, float r, float g, float b, float a)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetScreenMessageTextColor: invalid scene ID");
+		return;
+	}
+	if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b) || !std::isfinite(a))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetScreenMessageTextColor: color values must be finite");
+		return;
+	}
+	it->second->screen_message_text_color = glm::clamp(glm::vec4(r, g, b, a), glm::vec4(0.0f), glm::vec4(1.0f));
+}
+
+void HRL_SetScreenMessageFont(HRL_id _sceneid, HRL_id _fontid)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetScreenMessageFont: invalid scene ID");
+		return;
+	}
+	if (_fontid != HRL_INVALID_ID && ctx_.fonts.find(_fontid) == ctx_.fonts.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetScreenMessageFont: invalid font ID");
+		return;
+	}
+	it->second->screen_message_font = _fontid;
 }
 
 static HRL_Widget* FindWidget(HRL_id widget)

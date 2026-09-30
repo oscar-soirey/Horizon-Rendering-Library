@@ -48,6 +48,7 @@
 	HRL_API unsigned int HRL_GL_GetSceneTextureGL_ID(HRL_id _sceneid);
 
   HRL_API unsigned int HRL_GL_GetSceneColorBufferGL_ID(HRL_id _sceneid);
+  HRL_API unsigned int HRL_GL_GetSceneColorPickingBufferGL_ID(HRL_id _sceneid);
   // GI G-buffer: diffuse albedo and world-space normal.
   HRL_API unsigned int HRL_GL_GetSceneAlbedoBufferGL_ID(HRL_id _sceneid);
   HRL_API unsigned int HRL_GL_GetSceneNormalBufferGL_ID(HRL_id _sceneid);

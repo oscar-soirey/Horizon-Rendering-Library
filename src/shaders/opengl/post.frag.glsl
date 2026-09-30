@@ -22,6 +22,8 @@ uniform vec3 tintColor = vec3(1.0);
 uniform bool invertColor = false;
 
 // Bloom
+// 1.0 means HDR bright pixels keep their natural energy in the bloom.
+// Set to 5.0, for example, to amplify the glow fivefold.
 uniform float bloomStrength = 1.0;
 
 // Screen-space effects
@@ -29,6 +31,18 @@ uniform float sharpenStrength = 0.0;   // 0 = disabled, 1 = full strength
 uniform float chromaticAberration = 0.0; // pixels
 uniform float filmGrainStrength = 0.0; // 0..1
 uniform float filmGrainScale = 1.0;
+
+// Optional tone mapping / display transform. Disabled by default so a post-process
+// with no explicit color controls preserves the scene color exactly.
+uniform int toneMappingEnabled = 0;
+uniform int gammaCorrectionEnabled = 0;
+
+// Global HDR display compression. Scene lighting stays HDR until after bloom;
+// this is the single place where values above the display range are compressed.
+// Values below the knee are untouched, while highlights approach 1 smoothly.
+uniform int hdrDisplayCompressionEnabled = 1;
+uniform float hdrDisplayKnee = 0.90;
+uniform float hdrDisplayCompression = 0.75;
 
 // Vignette
 uniform float vignetteStrength = 0.0;  // 0..1
@@ -115,6 +129,25 @@ float Hash12(vec2 p)
     return fract((p3.x + p3.y) * p3.z);
 }
 
+vec3 CompressHDRForDisplay(vec3 color)
+{
+    color = max(color, vec3(0.0));
+    float peak = max(color.r, max(color.g, color.b));
+    float knee = clamp(hdrDisplayKnee, 0.0, 0.999);
+    float compression = max(hdrDisplayCompression, 0.0001);
+
+    if (peak <= knee)
+        return color;
+
+    // Smooth asymptotic shoulder. Scaling the whole RGB vector together
+    // preserves the emissive/light color instead of independently clipping
+    // channels toward white. The long shoulder keeps spatial lighting
+    // gradients visible instead of producing a bright plateau around emitters.
+    float excess = peak - knee;
+    float limitedPeak = knee + (1.0 - knee) * (excess / (excess + compression));
+    return color * (limitedPeak / max(peak, 1e-6));
+}
+
 void main()
 {
     // Scene sample, optionally with radial chromatic aberration.
@@ -131,15 +164,23 @@ void main()
     vec3 bloom = ApplyGaussianBlur(uBrightScene).rgb * bloomStrength;
     color += bloom;
 
-    // ACES-fitted tone mapping. This is the key step that keeps strong HDR
-    // lights from hard-clipping large regions of the image to white.
-    vec3 x = max(color, vec3(0.0));
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
-    color = clamp((x * (a * x + b)) / max(x * (c * x + d) + e, vec3(1e-5)), 0.0, 1.0);
+    // Apply an optional tone mapper when explicitly requested. Otherwise use
+    // one global soft HDR shoulder so lighting gradients stay smooth instead
+    // of locally clipping every pixel above 1.0 into the same white value.
+    if (toneMappingEnabled != 0)
+    {
+        vec3 x = max(color, vec3(0.0));
+        const float a = 2.51;
+        const float b = 0.03;
+        const float c = 2.43;
+        const float d = 0.59;
+        const float e = 0.14;
+        color = clamp((x * (a * x + b)) / max(x * (c * x + d) + e, vec3(1e-5)), 0.0, 1.0);
+    }
+    else if (hdrDisplayCompressionEnabled != 0)
+    {
+        color = CompressHDRForDisplay(color);
+    }
 
     // Contrast.
     color = (color - 0.5) * contrast + 0.5;
@@ -151,8 +192,9 @@ void main()
     // Hue rotation.
     color = ApplyHueShift(color, hueShift);
 
-    // Display transfer. gamma=2.2 by default; callers can override it.
-    color = pow(max(color, vec3(0.0)), vec3(1.0 / max(gamma, 0.0001)));
+    // Gamma correction is also opt-in.
+    if (gammaCorrectionEnabled != 0)
+        color = pow(max(color, vec3(0.0)), vec3(1.0 / max(gamma, 0.0001)));
 
     // Tint.
     color *= tintColor;
@@ -163,15 +205,18 @@ void main()
     // Color inversion.
     color = mix(color, 1.0 - color, float(invertColor));
 
-    // Vignette.
+    // Vignette. Radius is normalized to the distance from the center to a screen edge.
+    // Strength accepts both the documented 0..1 range and percentage-style values
+    // such as 100.0 (which is clamped to full strength).
     if (vignetteStrength > 0.0001)
     {
-        vec2 centered = uv - vec2(0.5);
+        vec2 centered = (uv - vec2(0.5)) * 2.0;
         float dist = length(centered);
         float radius = max(vignetteRadius, 0.0001);
         float softness = max(vignetteSoftness, 0.0001);
         float mask = smoothstep(radius, radius + softness, dist);
-        color = mix(color, vignetteColor, mask * vignetteStrength);
+        float strength = clamp(vignetteStrength, 0.0, 1.0);
+        color = mix(color, vignetteColor, clamp(mask * strength, 0.0, 1.0));
     }
 
     // Animated film grain.

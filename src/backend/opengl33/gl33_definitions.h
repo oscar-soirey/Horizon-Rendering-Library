@@ -8,7 +8,7 @@ class GL33_Texture;
 class GL33_Shader;
 
 //light
-#define MAX_LIGHTS      32
+#define MAX_LIGHTS      256
 /**
  * La norme std 140 de opengl a respecter pour les ubo demande d'alligner les objets
  * sur des multiples de 16, donc on ajoute des paddings pour correspondre

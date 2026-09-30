@@ -20,10 +20,12 @@
 #include <limits>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <array>
 #include <cstdint>
 #include <fstream>
 #include <string>
+#include <iterator>
 #include <cstring>
 #include <chrono>
 #include <sstream>
@@ -65,6 +67,7 @@ static void DrawVFX(const hrl_scene_t* scene);
 
 void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport);
 static void DrawMeshDebugInfoTexts(const hrl_scene_t* scene, const HRL_Viewport* viewport);
+static void DrawScreenMessages(const hrl_scene_t* scene, const HRL_Viewport* viewport);
 static void DrawGizmos(const hrl_scene_t* scene, const HRL_Viewport* viewport, HRL_id viewport_id);
 static void GL33_DrawGizmoOverlay(const DebugRenderer& renderer, float line_thickness);
 static void DrawPostProcessQuad(GLuint src_texture, GLuint bright_texture, HRL_PostProcess* pp);
@@ -103,6 +106,476 @@ static bool EnsureShadowResource(HRL_Light* light);
 static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution, GL33_Shader* shader, bool pointLight, const glm::vec3& lightPosition, float farPlane, int face);
 static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum);
 static void DrawLandscapeShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution, bool pointLight, const glm::vec3& lightPosition, float farPlane, int face);
+
+static void DrawVoxelWorld(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum);
+static void SyncVoxelChunks(HRL_id scene_id, const hrl_scene_t* scene);
+static void DestroyAllVoxelChunks(HRL_id scene_id);
+
+static constexpr int VOXEL_CHUNK_STREAM_MARGIN = 1;
+
+static const char* kVoxel2DVertexShader = R"GLSL(#version 330 core
+layout(location = 0) in vec3 aPosition;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec4 aColor;
+
+uniform mat4 model;
+uniform mat4 view;
+uniform mat4 projection;
+
+out vec3 fragPos;
+out vec3 worldNormal;
+out vec4 voxelColor;
+
+void main()
+{
+    vec4 worldPos = model * vec4(aPosition, 1.0);
+    fragPos = worldPos.xyz;
+    worldNormal = normalize(mat3(model) * aNormal);
+    voxelColor = aColor;
+    gl_Position = projection * view * worldPos;
+}
+)GLSL";
+
+static const char* kVoxel2DFragmentShader = R"GLSL(#version 330 core
+layout(location = 0) out vec4 FragColor;
+layout(location = 1) out vec4 BrightColor;
+layout(location = 2) out vec4 ColorPickingBuffer;
+layout(location = 3) out vec4 GIAlbedoBuffer;
+layout(location = 4) out vec4 GINormalBuffer;
+
+#define MAX_LIGHTS 256
+#define MAX_SHADOW_SLOTS 4
+
+#define HRL_PointLight       uint(0x0011)
+#define HRL_DirectionalLight uint(0x0012)
+#define HRL_SpotLight        uint(0x0013)
+#define HRL_SkyLight         uint(0x0014)
+
+const int HRL_DEBUG_VIEW_NONE      = 0x0060;
+const int HRL_DEBUG_VIEW_UNLIT     = 0x0061;
+const int HRL_DEBUG_VIEW_NORMAL    = 0x0062;
+const int HRL_DEBUG_VIEW_LIGHTS    = 0x0063;
+
+const int FOG_LINEAR = 0x0090;
+const int FOG_EXP    = 0x0091;
+const int FOG_EXP2   = 0x0092;
+
+in vec3 fragPos;
+in vec3 worldNormal;
+in vec4 voxelColor;
+
+uniform vec3 CamPos;
+uniform float BrightThreshold;
+uniform float VoxelSize;
+uniform int VoxelEmissionPass;
+uniform int VoxelLightCount;
+uniform int VoxelShadowLightCount;
+uniform int DebugView;
+uniform int FogEnabled;
+uniform int FogMode;
+uniform vec4 FogColor;
+uniform float FogStart;
+uniform float FogEnd;
+uniform float FogDensity;
+
+uniform sampler2D ShadowMap2D_0;
+uniform sampler2D ShadowMap2D_1;
+uniform sampler2D ShadowMap2D_2;
+uniform sampler2D ShadowMap2D_3;
+uniform samplerCube ShadowMapCube_0;
+uniform samplerCube ShadowMapCube_1;
+uniform samplerCube ShadowMapCube_2;
+uniform samplerCube ShadowMapCube_3;
+
+struct Light
+{
+    uint type;
+    float intensity;
+    float attenuation;
+    float innerCutoff;
+
+    vec3 position;
+    float outerCutoff;
+
+    vec3 rotation;
+    float padding3;
+
+    vec3 color;
+    float shadowStrength;
+
+    mat4 shadowMatrix;
+    vec4 shadowParams; // x=bias, y=far plane, z=slot, w=type (1=2D, 2=cube)
+};
+
+layout(std140) uniform LightBlock
+{
+    Light lights[MAX_LIGHTS];
+};
+
+float computeFogFactor(float dist)
+{
+    float f;
+    if (FogMode == FOG_LINEAR)
+        f = (FogEnd - dist) / max(FogEnd - FogStart, 1e-6);
+    else if (FogMode == FOG_EXP)
+        f = exp(-FogDensity * dist);
+    else
+        f = exp(-FogDensity * FogDensity * dist * dist);
+    return clamp(f, 0.0, 1.0);
+}
+
+vec4 applyFog(vec4 color, float dist)
+{
+    if (FogEnabled == 0)
+        return color;
+    return mix(FogColor, color, computeFogFactor(dist));
+}
+
+float ShadowCompare2D_0(vec3 coord)
+{
+    vec2 texel = 1.0 / vec2(textureSize(ShadowMap2D_0, 0));
+    float result = 0.0;
+    for (int x = -1; x <= 1; ++x)
+        for (int y = -1; y <= 1; ++y)
+            result += texture(ShadowMap2D_0, coord.xy + vec2(x, y) * texel).r >= coord.z ? 1.0 : 0.0;
+    return result / 9.0;
+}
+
+float ShadowCompare2D_1(vec3 coord)
+{
+    vec2 texel = 1.0 / vec2(textureSize(ShadowMap2D_1, 0));
+    float result = 0.0;
+    for (int x = -1; x <= 1; ++x)
+        for (int y = -1; y <= 1; ++y)
+            result += texture(ShadowMap2D_1, coord.xy + vec2(x, y) * texel).r >= coord.z ? 1.0 : 0.0;
+    return result / 9.0;
+}
+
+float ShadowCompare2D_2(vec3 coord)
+{
+    vec2 texel = 1.0 / vec2(textureSize(ShadowMap2D_2, 0));
+    float result = 0.0;
+    for (int x = -1; x <= 1; ++x)
+        for (int y = -1; y <= 1; ++y)
+            result += texture(ShadowMap2D_2, coord.xy + vec2(x, y) * texel).r >= coord.z ? 1.0 : 0.0;
+    return result / 9.0;
+}
+
+float ShadowCompare2D_3(vec3 coord)
+{
+    vec2 texel = 1.0 / vec2(textureSize(ShadowMap2D_3, 0));
+    float result = 0.0;
+    for (int x = -1; x <= 1; ++x)
+        for (int y = -1; y <= 1; ++y)
+            result += texture(ShadowMap2D_3, coord.xy + vec2(x, y) * texel).r >= coord.z ? 1.0 : 0.0;
+    return result / 9.0;
+}
+
+float CubeShadowStoredDepth(int slot, vec3 direction)
+{
+    if (slot == 0) return texture(ShadowMapCube_0, direction).r;
+    if (slot == 1) return texture(ShadowMapCube_1, direction).r;
+    if (slot == 2) return texture(ShadowMapCube_2, direction).r;
+    return texture(ShadowMapCube_3, direction).r;
+}
+
+int CubeShadowResolution(int slot)
+{
+    if (slot == 0) return textureSize(ShadowMapCube_0, 0).x;
+    if (slot == 1) return textureSize(ShadowMapCube_1, 0).x;
+    if (slot == 2) return textureSize(ShadowMapCube_2, 0).x;
+    return textureSize(ShadowMapCube_3, 0).x;
+}
+
+float ShadowCompareCube(int slot, vec3 direction, float referenceDepth)
+{
+    vec3 d = normalize(direction);
+    const vec2 kernel[9] = vec2[](
+        vec2( 0.0,  0.0),
+        vec2( 1.0,  0.0), vec2(-1.0,  0.0),
+        vec2( 0.0,  1.0), vec2( 0.0, -1.0),
+        vec2( 0.7071,  0.7071), vec2(-0.7071,  0.7071),
+        vec2( 0.7071, -0.7071), vec2(-0.7071, -0.7071)
+    );
+
+    vec3 referenceUp = abs(d.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(referenceUp, d));
+    vec3 bitangent = normalize(cross(d, tangent));
+    float angularRadius = 1.5 / float(max(CubeShadowResolution(slot), 1));
+
+    float visible = 0.0;
+    for (int i = 0; i < 9; ++i)
+    {
+        vec2 offset = kernel[i] * angularRadius;
+        vec3 sampleDir = normalize(d + tangent * offset.x + bitangent * offset.y);
+        float storedDepth = CubeShadowStoredDepth(slot, sampleDir);
+        visible += storedDepth >= referenceDepth ? 1.0 : 0.0;
+    }
+    return visible / 9.0;
+}
+
+float ApplyShadowStrength(Light light, float shadow)
+{
+    return mix(1.0, shadow, clamp(light.shadowStrength, 0.0, 1.0));
+}
+
+float ComputeShadow(Light light, vec3 worldPos, vec3 normalWorld, vec3 lightDir)
+{
+    if (light.shadowParams.z < -0.5)
+        return 1.0;
+
+    float bias = light.shadowParams.x * (1.0 - max(dot(normalWorld, lightDir), 0.0));
+    bias = max(bias, light.shadowParams.x * 0.25);
+    int slot = int(light.shadowParams.z + 0.5);
+
+    if (light.shadowParams.w == 1.0)
+    {
+        vec4 shadowPos = light.shadowMatrix * vec4(worldPos, 1.0);
+        if (shadowPos.w <= 0.0)
+            return 1.0;
+
+        vec3 coord = shadowPos.xyz / shadowPos.w;
+        if (coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0 || coord.z > 1.0)
+            return 1.0;
+
+        coord.z -= bias;
+        float rawShadow;
+        if (slot == 0) rawShadow = ShadowCompare2D_0(coord);
+        else if (slot == 1) rawShadow = ShadowCompare2D_1(coord);
+        else if (slot == 2) rawShadow = ShadowCompare2D_2(coord);
+        else rawShadow = ShadowCompare2D_3(coord);
+        return ApplyShadowStrength(light, rawShadow);
+    }
+
+    float farPlane = max(light.shadowParams.y, 0.001);
+    vec3 toLight = worldPos - light.position;
+    float referenceDepth = length(toLight) / farPlane;
+    referenceDepth = max(referenceDepth - bias, 0.0);
+    return ApplyShadowStrength(light, ShadowCompareCube(slot, toLight, referenceDepth));
+}
+
+vec3 EvaluateVoxelLight(Light light, vec3 albedo, vec3 N)
+{
+    if (light.intensity <= 0.0)
+        return vec3(0.0);
+
+    vec3 lightColor = max(light.color, vec3(0.0)) * light.intensity;
+    vec3 L;
+    float attenuation = 1.0;
+
+    if (light.type == HRL_SkyLight)
+    {
+        // Sky light is an ambient diffuse term and intentionally does not use
+        // the BRDF's directional cosine twice.
+        return albedo * lightColor;
+    }
+
+    if (light.type == HRL_PointLight || light.type == HRL_SpotLight)
+    {
+        vec3 toLight = light.position - fragPos;
+
+        // A 2D voxel surface has zero thickness. For a point light exactly on
+        // the voxel plane, lift it slightly along the visible surface normal so
+        // coplanar voxel lights still produce useful radial lighting.
+        if (abs(toLight.z) < 1e-5)
+            toLight.z = (N.z >= 0.0 ? 1.0 : -1.0) * max(VoxelSize * 0.5, 1e-3);
+
+        float dist2 = dot(toLight, toLight);
+        if (dist2 <= 1e-10)
+            return vec3(0.0);
+
+        float invDist = inversesqrt(dist2);
+        float dist = dist2 * invDist;
+
+        // Point lights, including voxel emitters, use only smooth attenuation
+        // from the source position. There is deliberately no finite light radius
+        // or range fade here: the emitter is a point located on the emitting voxel
+        // and its influence falls off continuously with distance.
+        attenuation = 1.0 / (1.0 + max(light.attenuation, 0.0) * dist2);
+
+        // The CPU chunk culler uses the same conservative floor. Once a light
+        // is inside a chunk, reject individual fragments whose maximum possible
+        // RGB contribution is still below that floor. This avoids the expensive
+        // normalization/BRDF/shadow path without changing visible contributions.
+        const float contributionFloor = 1e-4;
+        if (max(lightColor.r, max(lightColor.g, lightColor.b)) * attenuation <= contributionFloor)
+            return vec3(0.0);
+
+        L = toLight * invDist;
+
+        if (light.type == HRL_SpotLight)
+        {
+            float cosTheta = dot(L, normalize(-light.rotation));
+            float spotFactor = smoothstep(light.outerCutoff, light.innerCutoff, cosTheta);
+            if (spotFactor <= 0.0)
+                return vec3(0.0);
+            attenuation *= spotFactor;
+        }
+    }
+    else if (light.type == HRL_DirectionalLight)
+    {
+        L = normalize(-light.rotation);
+    }
+    else
+    {
+        return vec3(0.0);
+    }
+
+    float NdotL = max(dot(N, L), 0.0);
+    if (NdotL <= 0.0)
+        return vec3(0.0);
+
+    float shadow = ComputeShadow(light, fragPos, N, L);
+    return albedo * lightColor * NdotL * attenuation * shadow;
+}
+vec3 EvaluateVoxelLightNoShadow(Light light, vec3 albedo, vec3 N)
+{
+    if (light.intensity <= 0.0)
+        return vec3(0.0);
+
+    vec3 lightColor = max(light.color, vec3(0.0)) * light.intensity;
+    vec3 L;
+    float attenuation = 1.0;
+
+    if (light.type == HRL_SkyLight)
+    {
+        // Sky light is an ambient diffuse term and intentionally does not use
+        // the BRDF's directional cosine twice.
+        return albedo * lightColor;
+    }
+
+    if (light.type == HRL_PointLight || light.type == HRL_SpotLight)
+    {
+        vec3 toLight = light.position - fragPos;
+
+        // A 2D voxel surface has zero thickness. For a point light exactly on
+        // the voxel plane, lift it slightly along the visible surface normal so
+        // coplanar voxel lights still produce useful radial lighting.
+        if (abs(toLight.z) < 1e-5)
+            toLight.z = (N.z >= 0.0 ? 1.0 : -1.0) * max(VoxelSize * 0.5, 1e-3);
+
+        float dist2 = dot(toLight, toLight);
+        if (dist2 <= 1e-10)
+            return vec3(0.0);
+
+        float invDist = inversesqrt(dist2);
+        float dist = dist2 * invDist;
+
+        // Point lights, including voxel emitters, use only smooth attenuation
+        // from the source position. There is deliberately no finite light radius
+        // or range fade here: the emitter is a point located on the emitting voxel
+        // and its influence falls off continuously with distance.
+        attenuation = 1.0 / (1.0 + max(light.attenuation, 0.0) * dist2);
+
+        // The CPU chunk culler uses the same conservative floor. Once a light
+        // is inside a chunk, reject individual fragments whose maximum possible
+        // RGB contribution is still below that floor. This avoids the expensive
+        // normalization/BRDF/shadow path without changing visible contributions.
+        const float contributionFloor = 1e-4;
+        if (max(lightColor.r, max(lightColor.g, lightColor.b)) * attenuation <= contributionFloor)
+            return vec3(0.0);
+
+        L = toLight * invDist;
+
+        if (light.type == HRL_SpotLight)
+        {
+            float cosTheta = dot(L, normalize(-light.rotation));
+            float spotFactor = smoothstep(light.outerCutoff, light.innerCutoff, cosTheta);
+            if (spotFactor <= 0.0)
+                return vec3(0.0);
+            attenuation *= spotFactor;
+        }
+    }
+    else if (light.type == HRL_DirectionalLight)
+    {
+        L = normalize(-light.rotation);
+    }
+    else
+    {
+        return vec3(0.0);
+    }
+
+    float NdotL = max(dot(N, L), 0.0);
+    if (NdotL <= 0.0)
+        return vec3(0.0);
+
+    return albedo * lightColor * NdotL * attenuation;
+}
+
+void main()
+{
+    float alpha = clamp(voxelColor.a, 0.0, 1.0);
+    if (alpha <= 0.001)
+        discard;
+
+    vec3 baseColor = clamp(voxelColor.rgb, vec3(0.0), vec3(1.0));
+
+    // Emissive voxels are rendered in a separate sparse geometry pass. This
+    // keeps the regular voxel vertices small and avoids storing an emissive
+    // color for non-emissive voxels.
+    if (VoxelEmissionPass != 0)
+    {
+        vec3 emission = max(voxelColor.rgb, vec3(0.0));
+        // Keep emissive color HDR all the way through the scene buffer.
+        // Display compression is performed once, globally, after bloom.
+        FragColor = vec4(emission, alpha);
+
+        float brightness = max(emission.r, max(emission.g, emission.b));
+        float bloomWidth = max(BrightThreshold * 0.75, 0.0001);
+        float bloomWeight = smoothstep(BrightThreshold, BrightThreshold + bloomWidth, brightness);
+        BrightColor = (bloomWeight > 0.0001)
+            ? vec4(emission * bloomWeight, alpha)
+            : vec4(0.0);
+        return;
+    }
+
+    vec3 N = normalize(gl_FrontFacing ? worldNormal : -worldNormal);
+
+    vec3 lighting = vec3(0.0);
+    if (VoxelShadowLightCount == 0)
+    {
+        for (int i = 0; i < VoxelLightCount; ++i)
+            lighting += EvaluateVoxelLightNoShadow(lights[i], baseColor, N);
+    }
+    else
+    {
+        for (int i = 0; i < VoxelLightCount; ++i)
+            lighting += EvaluateVoxelLight(lights[i], baseColor, N);
+    }
+
+    // Base color is the material/albedo. Its visible contribution comes only
+    // through the accumulated global lighting; do not add the unlit base on top,
+    // otherwise every voxel stays fully bright even when no light reaches it.
+    // The separately configured emissive color is rendered in its own sparse
+    // pass and is also injected as a global light source.
+    vec3 shadedColor = lighting;
+
+    if (DebugView == HRL_DEBUG_VIEW_UNLIT)
+        shadedColor = baseColor;
+    else if (DebugView == HRL_DEBUG_VIEW_NORMAL)
+        shadedColor = N * 0.5 + 0.5;
+    else if (DebugView == HRL_DEBUG_VIEW_LIGHTS)
+        shadedColor = lighting;
+    else if (FogEnabled != 0)
+        shadedColor = applyFog(vec4(shadedColor, alpha), length(CamPos - fragPos)).rgb;
+
+    // Keep the complete HDR lighting result in the scene buffer. The post-process
+    // applies one global display compression after bloom, so intermediate HDR
+    // values are not locally clipped into flat halos around lights.
+    FragColor = vec4(max(shadedColor, vec3(0.0)), alpha);
+
+    float brightness = max(shadedColor.r, max(shadedColor.g, shadedColor.b));
+    float bloomWidth = max(BrightThreshold * 0.75, 0.0001);
+    float bloomWeight = smoothstep(BrightThreshold, BrightThreshold + bloomWidth, brightness);
+    BrightColor = (bloomWeight > 0.0001)
+        ? vec4(max(shadedColor, vec3(0.0)) * bloomWeight, alpha)
+        : vec4(0.0);
+
+    GIAlbedoBuffer = vec4(baseColor, alpha);
+    GINormalBuffer = vec4(N, alpha);
+    ColorPickingBuffer = vec4(0.0);
+}
+)GLSL";
 
 
 
@@ -146,6 +619,53 @@ struct GL33_Backend {
 		std::vector<MeshLOD_GPU> levels;
 	};
 	std::unordered_map<HRL_id, MeshGPU> meshes;
+
+	struct VoxelChunkGPU {
+		GLuint vao = 0;
+		GLuint vbo = 0;
+		GLuint ebo = 0;
+		GLsizei vertex_count = 0;
+		GLsizei index_count = 0;
+
+		// Per-chunk light UBO. Its contents are uploaded only when the scene/world
+		// light set changes, instead of rewriting the UBO every frame.
+		GLuint light_ubo = 0;
+		uint64_t light_revision = 0;
+		int light_count = 0;
+		int shadow_light_count = 0;
+		std::vector<GL_Light> lights;
+
+		// Emissive geometry is kept in a second sparse mesh. Non-emissive voxels
+		// therefore do not carry an extra color attribute or GPU vertex storage.
+		GLuint emissive_vao = 0;
+		GLuint emissive_vbo = 0;
+		GLuint emissive_ebo = 0;
+		GLsizei emissive_vertex_count = 0;
+		GLsizei emissive_index_count = 0;
+
+		uint64_t geometry_revision = 0;
+		uint64_t color_revision = 0;
+	};
+	std::unordered_map<HRL_id, std::unordered_map<uint64_t, VoxelChunkGPU>> voxel_chunks;
+
+	// Voxel emitters are derived from the CPU voxel world, but they do not need
+	// to be rediscovered every frame. Rebuild this cache only when voxel data or
+	// voxel lighting configuration changes. This is critical for large worlds:
+	// a 4096x4096 empty world must not mean scanning 16.7M voxels every frame.
+	struct VoxelLightCache
+	{
+		uint64_t geometry_revision = 0;
+		uint64_t color_revision = 0;
+		uint64_t revision = 0;
+		uint64_t signature = 0;
+		bool valid = false;
+		int scene_light_count = 0;
+		std::array<GL_Light, 32> scene_lights{};
+		std::vector<GL_Light> lights;
+	};
+	std::unordered_map<HRL_id, VoxelLightCache> voxel_light_cache;
+
+	GL33_Shader* voxel_shader = nullptr;
 
 	struct SkeletalMeshGPU {
 		GLuint vao = 0;
@@ -239,6 +759,18 @@ struct GL33_Backend {
 		int height = 0;
 	};
 	std::unordered_map<HRL_id, DebugMeshInfoTextGPU> debug_mesh_info_textures;
+
+	// Cached SDF textures for immutable screen messages. Each message owns its
+	// font/size/color values, so later configuration changes never affect it.
+	struct ScreenMessageTextGPU {
+		HRL_id texture = HRL_INVALID_ID;
+		HRL_id font = HRL_INVALID_ID;
+		float size = 0.0f;
+		std::string text;
+		int width = 0;
+		int height = 0;
+	};
+	std::unordered_map<HRL_id, ScreenMessageTextGPU> screen_message_textures;
 };
 static GL33_Backend* bck_;
 static GL_33_GI* g_gl33_gi = nullptr;
@@ -1040,7 +1572,7 @@ vec4 ApplyVolumetricClouds(vec2 globalUV, vec2 localUV, float sceneDepth, vec4 b
     int steps = clamp(int(mix(8.0, float(requestedSteps), stepFactor)), 8, requestedSteps);
     float stepLength = cloudDistance / float(steps);
 
-    float jitter = Hash(vec3(globalUV * uScreenSize, uCloudTime)) - 0.5;
+    float jitter = CloudHash(vec3(globalUV * uScreenSize, uCloudTime)) - 0.5;
     float t = tEnter + stepLength * (0.5 + jitter * 0.65);
     vec3 lightDir = normalize(-uCloudSunDirection);
 
@@ -1074,6 +1606,40 @@ vec4 ApplyVolumetricClouds(vec2 globalUV, vec2 localUV, float sceneDepth, vec4 b
     }
 
     return vec4(base.rgb * transmittance + cloudScattering, base.a);
+}
+
+vec4 ApplyGodRays(vec2 globalUV, vec4 base)
+{
+    if (uGodRaysEnabled == 0 || uGodRaysWeight <= 0.0 || uGodRaysDensity <= 0.0)
+        return base;
+
+    int samples = clamp(uGodRaysSamples, 8, 96);
+    vec2 lightUV = uViewportOrigin + uGodRaysLightUV * uViewportSize;
+    vec2 delta = (globalUV - lightUV) * (uGodRaysDensity / float(samples));
+    vec2 sampleUV = globalUV;
+    vec3 rays = vec3(0.0);
+    float illumination = 1.0;
+
+    for (int i = 0; i < 96; ++i)
+    {
+        if (i >= samples) break;
+        sampleUV -= delta;
+
+        if (any(lessThan(sampleUV, vec2(0.0))) ||
+            any(greaterThan(sampleUV, vec2(1.0))))
+            break;
+
+        vec3 sceneColor = texture(uScene, sampleUV).rgb;
+        vec3 brightColor = texture(uBrightScene, sampleUV).rgb;
+        float luminance = dot(sceneColor, vec3(0.2126, 0.7152, 0.0722));
+
+        rays += (brightColor +
+                 max(luminance - 0.55, 0.0) * sceneColor * 0.35) * illumination;
+        illumination *= uGodRaysDecay;
+    }
+
+    base.rgb += rays / float(samples) * uGodRaysColor * uGodRaysWeight;
+    return base;
 }
 
 void main()
@@ -1446,6 +2012,744 @@ static bool IsFiniteBounds(const HRL_Mesh* mesh)
 		std::isfinite(mesh->bounds_center_.z) && std::isfinite(mesh->bounds_radius_);
 }
 
+struct GL33_VoxelVertex
+{
+	float position[3];
+	float normal[3];
+	float color[4];
+};
+
+static uint64_t MakeVoxelChunkKey(int chunkX, int chunkY)
+{
+	return (static_cast<uint64_t>(static_cast<uint32_t>(chunkX)) << 32u) |
+		static_cast<uint32_t>(chunkY);
+}
+
+static int VoxelChunkXFromKey(uint64_t key)
+{
+	return static_cast<int>(static_cast<uint32_t>(key >> 32u));
+}
+
+static int VoxelChunkYFromKey(uint64_t key)
+{
+	return static_cast<int>(static_cast<uint32_t>(key & 0xffffffffu));
+}
+
+static glm::mat4 CalculateVoxelViewportProjection(const HRL_Viewport* viewport)
+{
+	if (!viewport || !viewport->camera_)
+		return glm::mat4(1.f);
+	const float viewportWidth = std::max(1.f, static_cast<float>(GetWindowWidth()) * viewport->width_);
+	const float viewportHeight = std::max(1.f, static_cast<float>(GetWindowHeight()) * viewport->height_);
+	const float aspect = viewportWidth / viewportHeight;
+	const HRL_Camera* camera = viewport->camera_;
+	if (camera->type_ == HRL_PERSPECTIVE)
+	{
+		return glm::perspective(glm::radians(camera->value_), aspect, camera->near_plane_, camera->far_plane_);
+	}
+	const float halfHeight = camera->value_ * 0.5f;
+	const float halfWidth = halfHeight * aspect;
+	return glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight,
+		camera->near_plane_, camera->far_plane_);
+}
+
+static glm::mat4 CalculateVoxelViewportView(const HRL_Viewport* viewport)
+{
+	if (!viewport || !viewport->camera_)
+		return glm::mat4(1.f);
+	const HRL_Camera* camera = viewport->camera_;
+	return glm::lookAt(
+		camera->position_,
+		camera->position_ + GetForwardVector(camera->rotation_),
+		GetUpVector(camera->rotation_)
+	);
+}
+
+static bool CollectVoxelVisibleChunksForViewport(const HRL_VoxelWorld* world,
+	const HRL_Viewport* viewport, std::unordered_set<uint64_t>& desired)
+{
+	if (!world || world->voxels_.size() != static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_) ||
+		world->width_ <= 0 || world->height_ <= 0 || world->chunk_size_ <= 0 ||
+		world->voxel_size_ <= 0.f || !viewport || !viewport->camera_)
+		return false;
+
+	const glm::mat4 vp = CalculateVoxelViewportProjection(viewport) * CalculateVoxelViewportView(viewport);
+	const glm::mat4 invVp = glm::inverse(vp);
+
+	// The voxel world is the finite XY rectangle at Z=0. Intersect the camera
+	// frustum edges with that plane instead of sampling screen points: this is
+	// exact for the convex frustum and prevents loading unrelated chunks when
+	// the camera sees the world at a steep angle.
+	const float ndcX[2] = {-1.f, 1.f};
+	const float ndcY[2] = {-1.f, 1.f};
+	const float ndcZ[2] = {-1.f, 1.f};
+	glm::vec3 corners[8];
+	int cornerIndex = 0;
+	for (float z : ndcZ)
+	{
+		for (float y : ndcY)
+		{
+			for (float x : ndcX)
+			{
+				glm::vec4 point = invVp * glm::vec4(x, y, z, 1.f);
+				if (std::abs(point.w) < 1e-7f)
+					return false;
+				point /= point.w;
+				corners[cornerIndex++] = glm::vec3(point);
+			}
+		}
+	}
+
+	float minWorldX = std::numeric_limits<float>::max();
+	float minWorldY = std::numeric_limits<float>::max();
+	float maxWorldX = std::numeric_limits<float>::lowest();
+	float maxWorldY = std::numeric_limits<float>::lowest();
+	bool foundIntersection = false;
+
+	auto includePoint = [&](const glm::vec3& point)
+	{
+		if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z))
+			return;
+		if (std::abs(point.z) > 1e-4f)
+			return;
+		minWorldX = std::min(minWorldX, point.x);
+		minWorldY = std::min(minWorldY, point.y);
+		maxWorldX = std::max(maxWorldX, point.x);
+		maxWorldY = std::max(maxWorldY, point.y);
+		foundIntersection = true;
+	};
+
+	for (const glm::vec3& corner : corners)
+		includePoint(corner);
+
+	static const int edges[12][2] = {
+		{0, 1}, {0, 2}, {1, 3}, {2, 3},
+		{4, 5}, {4, 6}, {5, 7}, {6, 7},
+		{0, 4}, {1, 5}, {2, 6}, {3, 7}
+	};
+	for (const auto& edge : edges)
+	{
+		const glm::vec3& a = corners[edge[0]];
+		const glm::vec3& b = corners[edge[1]];
+		const float dz = b.z - a.z;
+		if (std::abs(dz) < 1e-7f)
+			continue;
+		const float t = -a.z / dz;
+		if (t < -1e-5f || t > 1.f + 1e-5f)
+			continue;
+		includePoint(glm::mix(a, b, glm::clamp(t, 0.f, 1.f)));
+	}
+
+	if (!foundIntersection)
+		return false;
+
+	const float worldWidth = static_cast<float>(world->width_) * world->voxel_size_;
+	const float worldHeight = static_cast<float>(world->height_) * world->voxel_size_;
+	if (maxWorldX < 0.f || maxWorldY < 0.f || minWorldX > worldWidth || minWorldY > worldHeight)
+		return false;
+
+	const int chunkCountX = (world->width_ + world->chunk_size_ - 1) / world->chunk_size_;
+	const int chunkCountY = (world->height_ + world->chunk_size_ - 1) / world->chunk_size_;
+	if (chunkCountX <= 0 || chunkCountY <= 0)
+		return false;
+
+	const float minVoxelX = std::max(0.f, minWorldX) / world->voxel_size_;
+	const float minVoxelY = std::max(0.f, minWorldY) / world->voxel_size_;
+	const float maxVoxelX = std::min(worldWidth, maxWorldX) / world->voxel_size_;
+	const float maxVoxelY = std::min(worldHeight, maxWorldY) / world->voxel_size_;
+
+	int minChunkX = static_cast<int>(std::floor(minVoxelX / static_cast<float>(world->chunk_size_)));
+	int minChunkY = static_cast<int>(std::floor(minVoxelY / static_cast<float>(world->chunk_size_)));
+	int maxChunkX = static_cast<int>(std::floor(maxVoxelX / static_cast<float>(world->chunk_size_)));
+	int maxChunkY = static_cast<int>(std::floor(maxVoxelY / static_cast<float>(world->chunk_size_)));
+
+	minChunkX = std::max(0, minChunkX - VOXEL_CHUNK_STREAM_MARGIN);
+	minChunkY = std::max(0, minChunkY - VOXEL_CHUNK_STREAM_MARGIN);
+	maxChunkX = std::min(chunkCountX - 1, maxChunkX + VOXEL_CHUNK_STREAM_MARGIN);
+	maxChunkY = std::min(chunkCountY - 1, maxChunkY + VOXEL_CHUNK_STREAM_MARGIN);
+	if (minChunkX > maxChunkX || minChunkY > maxChunkY)
+		return false;
+
+	for (int chunkY = minChunkY; chunkY <= maxChunkY; ++chunkY)
+		for (int chunkX = minChunkX; chunkX <= maxChunkX; ++chunkX)
+			desired.insert(MakeVoxelChunkKey(chunkX, chunkY));
+	return true;
+}
+
+static glm::vec4 GetVoxelTypeColor(const HRL_VoxelWorld* world, uint32_t type)
+{
+    if (!world || type == 0)
+        return glm::vec4(1.f);
+    const auto it = world->type_colors_.find(type);
+    if (it == world->type_colors_.end())
+        return glm::vec4(1.f);
+
+    const glm::vec4 color = it->second;
+    return glm::vec4(
+        glm::clamp(color.r, 0.f, 1.f),
+        glm::clamp(color.g, 0.f, 1.f),
+        glm::clamp(color.b, 0.f, 1.f),
+        glm::clamp(color.a, 0.f, 1.f));
+}
+
+static glm::vec3 GetVoxelTypeEmissiveColor(const HRL_VoxelWorld* world, uint32_t type)
+{
+    if (!world || type == 0)
+        return glm::vec3(0.f);
+    const auto it = world->type_emissive_colors_.find(type);
+    return it == world->type_emissive_colors_.end() ? glm::vec3(0.f) : glm::max(it->second, glm::vec3(0.f));
+}
+
+static void AppendVoxelQuad(std::vector<GL33_VoxelVertex>& vertices,
+    std::vector<HRL_uint>& indices, float x0, float x1, float y0, float y1,
+    const glm::vec4& color)
+{
+    const HRL_uint base = static_cast<HRL_uint>(vertices.size());
+    const float rgba[4] = {color.r, color.g, color.b, color.a};
+    const float positions[4][3] = {
+        {x0, y0, 0.f}, {x1, y0, 0.f}, {x1, y1, 0.f}, {x0, y1, 0.f}
+    };
+    for (const auto& position : positions)
+    {
+        GL33_VoxelVertex vertex{};
+        vertex.position[0] = position[0];
+        vertex.position[1] = position[1];
+        vertex.position[2] = position[2];
+        vertex.normal[0] = 0.f;
+        vertex.normal[1] = 0.f;
+        vertex.normal[2] = 1.f;
+        std::copy(std::begin(rgba), std::end(rgba), std::begin(vertex.color));
+        vertices.push_back(vertex);
+    }
+    indices.insert(indices.end(), {base, base + 1u, base + 2u, base + 2u, base + 3u, base});
+}
+
+static bool BuildVoxelChunkGeometry(const HRL_VoxelWorld* world, int chunkX, int chunkY,
+    std::vector<GL33_VoxelVertex>& vertices, std::vector<HRL_uint>& indices,
+    std::vector<GL33_VoxelVertex>& emissiveVertices, std::vector<HRL_uint>& emissiveIndices)
+{
+    vertices.clear();
+    indices.clear();
+    emissiveVertices.clear();
+    emissiveIndices.clear();
+    if (!world || world->chunk_size_ <= 0 || world->width_ <= 0 || world->height_ <= 0 ||
+        world->voxels_.size() != static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_))
+        return false;
+
+    const int startX = chunkX * world->chunk_size_;
+    const int startY = chunkY * world->chunk_size_;
+    if (startX < 0 || startY < 0 || startX >= world->width_ || startY >= world->height_)
+        return false;
+    const int localWidth = std::min(world->chunk_size_, world->width_ - startX);
+    const int localHeight = std::min(world->chunk_size_, world->height_ - startY);
+    if (localWidth <= 0 || localHeight <= 0)
+        return true;
+
+    const size_t cellCount = static_cast<size_t>(localWidth) * static_cast<size_t>(localHeight);
+    std::vector<uint8_t> used(cellCount, 0u);
+    const size_t reserveCells = std::min(cellCount, static_cast<size_t>(1024));
+    vertices.reserve(reserveCells * 2u + 4u);
+    indices.reserve(reserveCells * 3u + 6u);
+
+    auto localIndex = [localWidth](int x, int y) -> size_t {
+        return static_cast<size_t>(y) * static_cast<size_t>(localWidth) + static_cast<size_t>(x);
+    };
+    auto voxelAt = [world](int x, int y) -> uint32_t {
+        return world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x)].type;
+    };
+
+    for (int y = 0; y < localHeight; ++y)
+    {
+        for (int x = 0; x < localWidth; ++x)
+        {
+            const size_t startIndex = localIndex(x, y);
+            if (used[startIndex])
+                continue;
+            const uint32_t type = voxelAt(startX + x, startY + y);
+            if (type == 0)
+            {
+                used[startIndex] = 1u;
+                continue;
+            }
+
+            int rectWidth = 1;
+            while (x + rectWidth < localWidth)
+            {
+                const size_t idx = localIndex(x + rectWidth, y);
+                if (used[idx] || voxelAt(startX + x + rectWidth, startY + y) != type)
+                    break;
+                ++rectWidth;
+            }
+
+            int rectHeight = 1;
+            while (y + rectHeight < localHeight)
+            {
+                bool canExtend = true;
+                for (int xx = x; xx < x + rectWidth; ++xx)
+                {
+                    const size_t idx = localIndex(xx, y + rectHeight);
+                    if (used[idx] || voxelAt(startX + xx, startY + y + rectHeight) != type)
+                    {
+                        canExtend = false;
+                        break;
+                    }
+                }
+                if (!canExtend)
+                    break;
+                ++rectHeight;
+            }
+
+            for (int yy = y; yy < y + rectHeight; ++yy)
+                for (int xx = x; xx < x + rectWidth; ++xx)
+                    used[localIndex(xx, yy)] = 1u;
+
+            const float x0 = static_cast<float>(startX + x) * world->voxel_size_;
+            const float x1 = static_cast<float>(startX + x + rectWidth) * world->voxel_size_;
+            const float y0 = static_cast<float>(startY + y) * world->voxel_size_;
+            const float y1 = static_cast<float>(startY + y + rectHeight) * world->voxel_size_;
+            const glm::vec4 baseColor = GetVoxelTypeColor(world, type);
+            AppendVoxelQuad(vertices, indices, x0, x1, y0, y1, baseColor);
+
+            const glm::vec3 emissive = GetVoxelTypeEmissiveColor(world, type);
+            if (baseColor.a > 0.001f && std::max(emissive.r, std::max(emissive.g, emissive.b)) > 0.f)
+                AppendVoxelQuad(emissiveVertices, emissiveIndices,
+                    x0, x1, y0, y1, glm::vec4(emissive, baseColor.a));
+        }
+    }
+    return true;
+}
+
+static void DestroyVoxelSubmeshGPU(GLuint& vao, GLuint& vbo, GLuint& ebo,
+    GLsizei& vertexCount, GLsizei& indexCount)
+{
+    if (vao) glDeleteVertexArrays(1, &vao);
+    if (vbo) glDeleteBuffers(1, &vbo);
+    if (ebo) glDeleteBuffers(1, &ebo);
+    vao = 0;
+    vbo = 0;
+    ebo = 0;
+    vertexCount = 0;
+    indexCount = 0;
+}
+
+static bool UploadVoxelSubmeshGPU(GLuint& vao, GLuint& vbo, GLuint& ebo,
+    GLsizei& vertexCount, GLsizei& indexCount,
+    const std::vector<GL33_VoxelVertex>& vertices, const std::vector<HRL_uint>& indices)
+{
+    if (vertices.empty() || indices.empty())
+        return true;
+    if (indices.size() > static_cast<size_t>(std::numeric_limits<GLsizei>::max()) ||
+        vertices.size() > static_cast<size_t>(std::numeric_limits<GLsizei>::max()))
+        return false;
+
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+    if (!vao || !vbo || !ebo)
+    {
+        DestroyVoxelSubmeshGPU(vao, vbo, ebo, vertexCount, indexCount);
+        return false;
+    }
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(GL33_VoxelVertex)), vertices.data(), GL_STATIC_DRAW);
+    const GLsizei stride = static_cast<GLsizei>(sizeof(GL33_VoxelVertex));
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, position)));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, normal)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, color)));
+    glEnableVertexAttribArray(2);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indices.size() * sizeof(HRL_uint)), indices.data(), GL_STATIC_DRAW);
+    glBindVertexArray(0);
+
+    vertexCount = static_cast<GLsizei>(vertices.size());
+    indexCount = static_cast<GLsizei>(indices.size());
+    return true;
+}
+
+static void DestroyVoxelChunkGPU(GL33_Backend::VoxelChunkGPU& gpu)
+{
+    if (gpu.light_ubo)
+        glDeleteBuffers(1, &gpu.light_ubo);
+    gpu.light_ubo = 0;
+    gpu.light_revision = 0;
+    gpu.light_count = 0;
+
+    DestroyVoxelSubmeshGPU(gpu.vao, gpu.vbo, gpu.ebo, gpu.vertex_count, gpu.index_count);
+    DestroyVoxelSubmeshGPU(gpu.emissive_vao, gpu.emissive_vbo, gpu.emissive_ebo,
+        gpu.emissive_vertex_count, gpu.emissive_index_count);
+    gpu.geometry_revision = 0;
+    gpu.color_revision = 0;
+}
+
+static bool RebuildVoxelChunk(const HRL_VoxelWorld* world, int chunkX, int chunkY, GL33_Backend::VoxelChunkGPU& gpu)
+{
+    std::vector<GL33_VoxelVertex> vertices;
+    std::vector<HRL_uint> indices;
+    std::vector<GL33_VoxelVertex> emissiveVertices;
+    std::vector<HRL_uint> emissiveIndices;
+    if (!BuildVoxelChunkGeometry(world, chunkX, chunkY, vertices, indices, emissiveVertices, emissiveIndices))
+        return false;
+
+    DestroyVoxelChunkGPU(gpu);
+    if (!UploadVoxelSubmeshGPU(gpu.vao, gpu.vbo, gpu.ebo, gpu.vertex_count, gpu.index_count, vertices, indices))
+    {
+        DestroyVoxelChunkGPU(gpu);
+        return false;
+    }
+    if (!UploadVoxelSubmeshGPU(gpu.emissive_vao, gpu.emissive_vbo, gpu.emissive_ebo,
+        gpu.emissive_vertex_count, gpu.emissive_index_count, emissiveVertices, emissiveIndices))
+    {
+        DestroyVoxelChunkGPU(gpu);
+        return false;
+    }
+    return true;
+}
+
+static void DestroyAllVoxelChunks(HRL_id scene_id)
+{
+	if (!bck_)
+		return;
+	auto it = bck_->voxel_chunks.find(scene_id);
+	if (it == bck_->voxel_chunks.end())
+		return;
+	for (auto& [key, gpu] : it->second)
+	{
+		(void)key;
+		DestroyVoxelChunkGPU(gpu);
+	}
+	bck_->voxel_chunks.erase(it);
+}
+
+static void SyncVoxelChunks(HRL_id sceneId, const hrl_scene_t* scene)
+{
+	if (!bck_ || !scene || !scene->voxel_world)
+	{
+		return;
+	}
+	HRL_VoxelWorld* world = scene->voxel_world;
+	if (world->width_ <= 0 || world->height_ <= 0 ||
+		world->voxels_.size() != static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_))
+	{
+		DestroyAllVoxelChunks(sceneId);
+		return;
+	}
+
+	auto& chunks = bck_->voxel_chunks[sceneId];
+	std::unordered_set<uint64_t> desired;
+	for (const auto& [viewportId, viewport] : scene->viewports)
+	{
+		(void)viewportId;
+		CollectVoxelVisibleChunksForViewport(world, viewport, desired);
+	}
+
+	for (uint64_t key : desired)
+	{
+		const int chunkX = VoxelChunkXFromKey(key);
+		const int chunkY = VoxelChunkYFromKey(key);
+		auto it = chunks.find(key);
+		if (it == chunks.end())
+		{
+			GL33_Backend::VoxelChunkGPU gpu{};
+			if (!RebuildVoxelChunk(world, chunkX, chunkY, gpu))
+				continue;
+			gpu.geometry_revision = world->geometry_revision_;
+			gpu.color_revision = world->color_revision_;
+			chunks.emplace(key, gpu);
+			world->dirty_chunks_.erase(key);
+			continue;
+		}
+
+		const bool dirty = world->dirty_chunks_.find(key) != world->dirty_chunks_.end();
+		const bool revisionChanged = it->second.geometry_revision != world->geometry_revision_ ||
+			it->second.color_revision != world->color_revision_;
+		if (dirty || revisionChanged)
+		{
+			if (RebuildVoxelChunk(world, chunkX, chunkY, it->second))
+			{
+				it->second.geometry_revision = world->geometry_revision_;
+				it->second.color_revision = world->color_revision_;
+				world->dirty_chunks_.erase(key);
+			}
+		}
+	}
+
+	for (auto it = chunks.begin(); it != chunks.end(); )
+	{
+		if (desired.find(it->first) == desired.end())
+		{
+			DestroyVoxelChunkGPU(it->second);
+			it = chunks.erase(it);
+		}
+		else
+			++it;
+	}
+}
+
+static bool VoxelLightCanAffectChunk(const GL_Light& light, const glm::vec3& center, float radius)
+{
+	if (light.type != HRL_POINT_LIGHT && light.type != HRL_SPOT_LIGHT)
+		return true;
+
+	// Keep the same attenuation model as EvaluateVoxelLight(). We only reject
+	// contributions that are below the HDR precision/noise floor. This is a
+	// conservative visibility test, not a fixed light-count approximation.
+	const float maxContribution = std::max({ light.color.r, light.color.g, light.color.b, 0.f }) *
+		std::max(light.intensity, 0.f);
+	if (maxContribution <= 0.f)
+		return false;
+
+	constexpr float contributionFloor = 1e-4f;
+	const float attenuation = std::max(light.attenuation, 0.f);
+	float range = 1000000.f;
+	if (attenuation > 1e-8f)
+	{
+		const float requiredDenominator = maxContribution / contributionFloor;
+		if (requiredDenominator <= 1.f)
+			range = 0.f;
+		else
+			range = std::sqrt((requiredDenominator - 1.f) / attenuation);
+	}
+
+	const float d = glm::length(light.position - center);
+	return d <= range + radius;
+}
+
+static void EnsureVoxelChunkLightUBO(GL33_Backend::VoxelChunkGPU& gpu, const GL_Light* lights, int count, uint64_t revision)
+{
+    if (!gpu.light_ubo)
+    {
+        glGenBuffers(1, &gpu.light_ubo);
+        glBindBuffer(GL_UNIFORM_BUFFER, gpu.light_ubo);
+        glBufferData(GL_UNIFORM_BUFFER, MAX_LIGHTS * sizeof(GL_Light), nullptr, GL_STATIC_DRAW);
+        gpu.light_revision = 0;
+        gpu.light_count = 0;
+    }
+
+    if (gpu.light_revision != revision || gpu.light_count != count)
+    {
+        glBindBuffer(GL_UNIFORM_BUFFER, gpu.light_ubo);
+        if (count > 0)
+            glBufferSubData(GL_UNIFORM_BUFFER, 0, static_cast<GLsizeiptr>(count * sizeof(GL_Light)), lights);
+        gpu.light_revision = revision;
+        gpu.light_count = count;
+    }
+
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, gpu.light_ubo);
+}
+
+static void DrawVoxelWorld(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum)
+{
+	if (!bck_ || !scene || !scene->voxel_world || !bck_->voxel_shader || !ctx_ || !ctx_->viewport || !ctx_->viewport->camera_)
+		return;
+
+	auto mapIt = bck_->voxel_chunks.find(scene_id);
+	if (mapIt == bck_->voxel_chunks.end() || mapIt->second.empty())
+		return;
+
+	GL33_Shader* shader = bck_->voxel_shader;
+	shader->Use();
+	ctx_->shader = shader;
+	ctx_->bound_shader = shader;
+	ctx_->bound_material = nullptr;
+	shader->SetMat4("projection", ctx_->proj_mat);
+	shader->SetMat4("view", ctx_->view_mat);
+	shader->SetMat4("model", glm::mat4(1.f));
+	shader->SetVec3("CamPos", ctx_->viewport->camera_->position_);
+	shader->SetFloat("BrightThreshold", 1.0f);
+	shader->SetFloat("VoxelSize", scene->voxel_world->voxel_size_);
+	// Display limiter: leave normal colors alone up to 75%, then softly
+	// compress HDR peaks toward 1.0 while preserving the voxel hue.
+	shader->SetInt("VoxelEmissionPass", 0);
+	shader->SetInt("DebugView", static_cast<int>(scene->debug_view));
+	shader->SetInt("FogEnabled", scene->fog.enabled ? 1 : 0);
+	shader->SetInt("FogMode", static_cast<int>(scene->fog.mode));
+	shader->SetVec4("FogColor", glm::vec4(scene->fog.r, scene->fog.g, scene->fog.b, 1.f));
+	shader->SetFloat("FogStart", scene->fog.range_start);
+	shader->SetFloat("FogEnd", scene->fog.range_end);
+	shader->SetFloat("FogDensity", scene->fog.density);
+	// The light list is selected per visible chunk below. Start from zero so a
+	// frame with no usable chunk-light cache can never inherit a stale count.
+	shader->SetInt("VoxelLightCount", 0);
+	shader->SetInt("VoxelShadowLightCount", 0);
+
+	shader->SetInt("ShadowMap2D_0", SHADOW_2D_TEXTURE_UNIT_BASE + 0);
+	shader->SetInt("ShadowMap2D_1", SHADOW_2D_TEXTURE_UNIT_BASE + 1);
+	shader->SetInt("ShadowMap2D_2", SHADOW_2D_TEXTURE_UNIT_BASE + 2);
+	shader->SetInt("ShadowMap2D_3", SHADOW_2D_TEXTURE_UNIT_BASE + 3);
+	shader->SetInt("ShadowMapCube_0", SHADOW_CUBE_TEXTURE_UNIT_BASE + 0);
+	shader->SetInt("ShadowMapCube_1", SHADOW_CUBE_TEXTURE_UNIT_BASE + 1);
+	shader->SetInt("ShadowMapCube_2", SHADOW_CUBE_TEXTURE_UNIT_BASE + 2);
+	shader->SetInt("ShadowMapCube_3", SHADOW_CUBE_TEXTURE_UNIT_BASE + 3);
+
+	const bool wireframe = scene->debug_view == HRL_DEBUG_VIEW_WIREFRAME;
+	// DrawScene enters the opaque stage with blending disabled and writable depth.
+	// Establish the complete voxel state directly instead of querying OpenGL.
+	// glGet*/glIsEnabled can force a driver synchronization and are needlessly
+	// expensive on a per-frame rendering path.
+	glDisable(GL_CULL_FACE); // 2D voxel squares are intentionally double-sided.
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
+	glDepthMask(GL_TRUE);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	if (wireframe)
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+	else
+		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+
+	// Build the visible chunk list once. The emissive pass reuses the same list,
+	// avoiding a second pass over every chunk and duplicate frustum/bounds math.
+	struct VoxelVisibleChunk
+	{
+		uint64_t key = 0;
+		GL33_Backend::VoxelChunkGPU* gpu = nullptr;
+		glm::vec3 center{ 0.f };
+		float radius = 0.f;
+	};
+	std::vector<VoxelVisibleChunk> visibleChunks;
+	visibleChunks.reserve(mapIt->second.size());
+
+	for (auto& [key, gpu] : mapIt->second)
+	{
+		if (!gpu.vao || gpu.index_count <= 0)
+			continue;
+		const int chunkX = VoxelChunkXFromKey(key);
+		const int chunkY = VoxelChunkYFromKey(key);
+		const int startX = chunkX * scene->voxel_world->chunk_size_;
+		const int startY = chunkY * scene->voxel_world->chunk_size_;
+		const int endX = std::min(startX + scene->voxel_world->chunk_size_, scene->voxel_world->width_);
+		const int endY = std::min(startY + scene->voxel_world->chunk_size_, scene->voxel_world->height_);
+		if (startX >= endX || startY >= endY)
+			continue;
+
+		const glm::vec3 center(
+			(0.5f * static_cast<float>(startX + endX)) * scene->voxel_world->voxel_size_,
+			(0.5f * static_cast<float>(startY + endY)) * scene->voxel_world->voxel_size_,
+			0.f);
+		const float dx = 0.5f * static_cast<float>(endX - startX) * scene->voxel_world->voxel_size_;
+		const float dy = 0.5f * static_cast<float>(endY - startY) * scene->voxel_world->voxel_size_;
+		const float radius = std::sqrt(dx * dx + dy * dy);
+		if (!SphereInsideFrustum(frustum, center, radius))
+			continue;
+
+		visibleChunks.push_back({ key, &gpu, center, radius });
+	}
+
+	int boundVoxelLightCount = -1;
+	int boundVoxelShadowLightCount = -1;
+	GLuint boundVoxelLightUBO = 0;
+	auto cacheIt = bck_->voxel_light_cache.find(scene_id);
+	const GL33_Backend::VoxelLightCache* lightCache =
+		(cacheIt != bck_->voxel_light_cache.end()) ? &cacheIt->second : nullptr;
+	for (const VoxelVisibleChunk& visible : visibleChunks)
+	{
+		const uint64_t key = visible.key;
+		auto& gpu = *visible.gpu;
+		// Build the spatially culled light list only when the light cache changes.
+		// The chunk bounds are stable, so repeating chunk x light intersection tests
+		// every frame is pure CPU overhead when the scene is static.
+		if (lightCache)
+		{
+			const auto& cache = *lightCache;
+			if (gpu.light_revision != cache.revision)
+			{
+					gpu.lights.clear();
+					gpu.lights.reserve(std::min(static_cast<size_t>(MAX_LIGHTS),
+						static_cast<size_t>(cache.scene_light_count) + cache.lights.size()));
+
+					for (int i = 0; i < cache.scene_light_count &&
+						static_cast<int>(gpu.lights.size()) < MAX_LIGHTS; ++i)
+						gpu.lights.push_back(cache.scene_lights[static_cast<size_t>(i)]);
+
+					for (const GL_Light& light : cache.lights)
+					{
+						if (static_cast<int>(gpu.lights.size()) >= MAX_LIGHTS)
+							break;
+						if (VoxelLightCanAffectChunk(light, visible.center, visible.radius))
+							gpu.lights.push_back(light);
+					}
+
+					gpu.light_count = static_cast<int>(gpu.lights.size());
+					gpu.shadow_light_count = 0;
+					for (const GL_Light& light : gpu.lights)
+					{
+						if (light.shadowParams.z >= -0.5f)
+							++gpu.shadow_light_count;
+					}
+					EnsureVoxelChunkLightUBO(gpu, gpu.lights.data(), gpu.light_count, cache.revision);
+				}
+
+				if (gpu.light_ubo && boundVoxelLightUBO != gpu.light_ubo)
+				{
+					glBindBufferBase(GL_UNIFORM_BUFFER, 0, gpu.light_ubo);
+					boundVoxelLightUBO = gpu.light_ubo;
+				}
+				if (boundVoxelLightCount != gpu.light_count)
+				{
+					shader->SetInt("VoxelLightCount", gpu.light_count);
+					boundVoxelLightCount = gpu.light_count;
+				}
+				if (boundVoxelShadowLightCount != gpu.shadow_light_count)
+				{
+					shader->SetInt("VoxelShadowLightCount", gpu.shadow_light_count);
+					boundVoxelShadowLightCount = gpu.shadow_light_count;
+				}
+			}
+
+			glBindVertexArray(gpu.vao);
+		glDrawElements(GL_TRIANGLES, gpu.index_count, GL_UNSIGNED_INT, nullptr);
+	}
+
+	glBindVertexArray(0);
+
+	// Emissive voxels are rendered additively in a second, sparse geometry pass.
+	// Only the first two MRTs are touched here; GI and picking buffers keep the
+	// values produced by the regular shaded pass.
+	if (!wireframe)
+	{
+		glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+		glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+		glColorMaski(2, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+		glColorMaski(3, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+		glColorMaski(4, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+
+		glDepthFunc(GL_EQUAL);
+	glDepthMask(GL_FALSE);
+		glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+		shader->SetInt("VoxelEmissionPass", 1);
+
+		for (const VoxelVisibleChunk& visible : visibleChunks)
+		{
+			const auto& gpu = *visible.gpu;
+			if (!gpu.emissive_vao || gpu.emissive_index_count <= 0)
+				continue;
+			glBindVertexArray(gpu.emissive_vao);
+			glDrawElements(GL_TRIANGLES, gpu.emissive_index_count, GL_UNSIGNED_INT, nullptr);
+		}
+
+		shader->SetInt("VoxelEmissionPass", 0);
+		glBindVertexArray(0);
+		for (GLuint i = 0; i < 5; ++i)
+			glColorMaski(i, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	}
+
+	// Leave the opaque-stage state in the known configuration expected by the
+	// following mesh/sprite passes. No driver state queries are needed.
+	glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
+	if (wireframe) glDisable(GL_CULL_FACE); else { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); }
+	glDisable(GL_BLEND);
+	glDepthMask(GL_TRUE);
+
+	// Restore the shared scene-light UBO for the rest of the renderer. Voxel
+	// chunks temporarily bind their own immutable light buffers at binding 0.
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, bck_->ubo[UBO_LIGHTS]);
+}
+
 static void CreateSpriteGeometry()
 {
 	const HRL_Vertex3D vertices[4] = {
@@ -1731,6 +3035,22 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 	mesh3d_shader->SetFloat("BrightThreshold", 0.75f);
 	mesh3d_shader->SetFloat("EnvironmentStrength", 0.0f);
 
+	//2D VOXEL SHADER
+	bck_->voxel_shader = new GL33_Shader();
+	if (bck_->voxel_shader->GL33_Create(
+		kVoxel2DVertexShader, std::strlen(kVoxel2DVertexShader),
+		kVoxel2DFragmentShader, std::strlen(kVoxel2DFragmentShader)) != 0)
+	{
+		delete bck_->voxel_shader;
+		bck_->voxel_shader = nullptr;
+	}
+	else
+	{
+		// Voxel HDR emission starts above 1.0. A color of (5,5,5) therefore
+		// becomes a bloom source with intensity 5 while colors <= 1 stay unlit.
+		bck_->voxel_shader->SetFloat("BrightThreshold", 1.0f);
+	}
+
 	//SKINNED 3D MESH SHADER
 	auto* skinned_mesh_shader = new GL33_Shader();
 	if (skinned_mesh_shader->GL33_Create(
@@ -1787,6 +3107,7 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		bck_->sky_shader = nullptr;
 	}
 	CreateSkySphereGeometry();
+	CreateSpriteGeometry();
 
 	//SHADOW SHADERS
 	bck_->shadow_2d_shader = new GL33_Shader();
@@ -1903,6 +3224,21 @@ void GL33_Shutdown()
 	}
 	bck_->meshes.clear();
 
+	for (auto& [scene_id, chunks] : bck_->voxel_chunks)
+	{
+		(void)scene_id;
+		for (auto& [key, gpu] : chunks)
+		{
+			(void)key;
+			if (gpu.light_ubo) glDeleteBuffers(1, &gpu.light_ubo);
+			if (gpu.vao) glDeleteVertexArrays(1, &gpu.vao);
+			if (gpu.vbo) glDeleteBuffers(1, &gpu.vbo);
+			if (gpu.ebo) glDeleteBuffers(1, &gpu.ebo);
+		}
+	}
+	bck_->voxel_chunks.clear();
+	bck_->voxel_light_cache.clear();
+
 	for (auto& [id, mesh] : bck_->skeletal_meshes)
 	{
 		(void)id;
@@ -1944,6 +3280,8 @@ void GL33_Shutdown()
 	delete bck_->vfx_shader;
 	delete bck_->ss_displacement_static_shader;
 	delete bck_->ss_displacement_skinned_shader;
+	delete bck_->voxel_shader;
+	bck_->voxel_shader = nullptr;
 	if (bck_->vfx_vao) glDeleteVertexArrays(1, &bck_->vfx_vao);
 	if (bck_->vfx_vbo) glDeleteBuffers(1, &bck_->vfx_vbo);
 	if (bck_->vfx_ebo) glDeleteBuffers(1, &bck_->vfx_ebo);
@@ -2087,6 +3425,11 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 	PrepareSceneShadows(scene, scene_id);
 	UploadSceneLights(scene, scene_id);
 
+	// Voxel world geometry is streamed from the complete CPU-side voxel array.
+	// Only chunks intersecting the scene cameras (plus a small margin) receive
+	// OpenGL buffers.
+	SyncVoxelChunks(scene_id, scene);
+
 	// Scene-scoped shadow textures are identical for all viewports. Bind once.
 	for (int i = 0; i < MAX_SHADOW_SLOTS; ++i)
 	{
@@ -2171,6 +3514,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		// is a second pass that re-samples this already-rendered image, so the
 		// displaced mesh must be present in the source image.
 		DrawLandscapes(scene_id, scene, cameraFrustum);
+		DrawVoxelWorld(scene_id, scene, cameraFrustum);
 		DrawOpaqueMeshes(scene_id, scene->meshes, scene->debug_view, cameraFrustum, false);
 		if (!wireframeDebug)
 		{
@@ -2315,6 +3659,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		DrawGizmos(scene, v.second, [&](){ for (const auto& [vid, vp] : scene->viewports) if (vp == v.second) return vid; return (HRL_id)HRL_INVALID_ID; }());
 		if (scene->debug_view == HRL_DEBUG_VIEW_MESH_INFO)
 			DrawMeshDebugInfoTexts(scene, v.second);
+		DrawScreenMessages(scene, v.second);
 		DrawWidgets(v.second->widgets, v.second);
 	}
 }
@@ -2959,7 +4304,12 @@ static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, con
 		return a.mesh->draw_order_ < b.mesh->draw_order_;
 	});
 
-	glDisable(GL_DEPTH_TEST);
+	// Sprites are transparent, so they must not write depth, but they MUST
+	// test against the depth written by opaque geometry (including voxels).
+	// Previously depth testing was disabled here, which made every sprite
+	// appear in front of the voxel world regardless of its position.
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
 	glDepthMask(GL_FALSE);
 	glDisable(GL_CULL_FACE);
 	glEnable(GL_BLEND);
@@ -3729,6 +5079,144 @@ static void DrawMeshDebugInfoTexts(const hrl_scene_t* scene, const HRL_Viewport*
 		}
 		else ++it;
 	}
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
+	glViewport(0, 0, static_cast<GLsizei>(winW), static_cast<GLsizei>(winH));
+}
+
+static void DrawScreenMessages(const hrl_scene_t* scene, const HRL_Viewport* viewport)
+{
+	if (!scene || !viewport || !bck_ || !bck_->ui_shader || !ctx_)
+		return;
+
+	HRL_Context* privateContext = GetPrivateContext();
+	if (!privateContext || privateContext->fonts.empty())
+		return;
+
+	const float winW = static_cast<float>(GetWindowWidth());
+	const float winH = static_cast<float>(GetWindowHeight());
+	const int viewportX = static_cast<int>(viewport->x_ * winW);
+	const int viewportY = static_cast<int>(viewport->y_ * winH);
+	const int viewportW = std::max(1, static_cast<int>(viewport->width_ * winW));
+	const int viewportH = std::max(1, static_cast<int>(viewport->height_ * winH));
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(viewportX, viewportY, viewportW, viewportH);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	bck_->ui_shader->Use();
+	bck_->ui_shader->SetMat4("projection", glm::ortho(0.f, 1.f, 1.f, 0.f, -1.f, 1.f));
+	bck_->ui_shader->SetInt("uSDFText", 1);
+	bck_->ui_shader->SetInt("uTexture", 0);
+
+	// Unreal-style stack: newest messages are appended below older ones.
+	// All positions are screen-pixel based and therefore independent of the
+	// viewport's resolution.
+	float cursorY = 16.0f;
+	const float leftMargin = 16.0f;
+	const float lineGap = 4.0f;
+
+	std::unordered_set<HRL_id> activeIds;
+	activeIds.reserve(scene->screen_messages.size());
+
+	for (const HRL_ScreenMessage& message : scene->screen_messages)
+	{
+		activeIds.insert(message.id);
+
+		HRL_id fontId = message.font;
+		if (fontId == HRL_INVALID_ID || privateContext->fonts.find(fontId) == privateContext->fonts.end())
+			fontId = scene->debug_mesh_info_font;
+		if (fontId == HRL_INVALID_ID || privateContext->fonts.find(fontId) == privateContext->fonts.end())
+			fontId = privateContext->fonts.begin()->first;
+
+		auto& cache = bck_->screen_message_textures[message.id];
+		if (cache.texture == HRL_INVALID_ID ||
+			cache.font != fontId ||
+			cache.size != message.size ||
+			cache.text != message.text ||
+			!HRL_IsValidTexture(cache.texture))
+		{
+			if (cache.texture != HRL_INVALID_ID && HRL_IsValidTexture(cache.texture))
+				HRL_DeleteTexture(cache.texture);
+
+			cache = {};
+			cache.font = fontId;
+			cache.size = message.size;
+			cache.text = message.text;
+			cache.texture = HRL_InternalCreateSDFTextTexture(
+				message.text.c_str(), fontId, message.size);
+			if (cache.texture == HRL_INVALID_ID)
+				continue;
+
+			HRL_SetTextureMinFilter(cache.texture, HRL_FILTER_LINEAR);
+			HRL_SetTextureMagFilter(cache.texture, HRL_FILTER_LINEAR);
+			HRL_GetTextureSize(cache.texture, &cache.width, &cache.height);
+		}
+
+		if (cache.texture == HRL_INVALID_ID || cache.width <= 0 || cache.height <= 0)
+			continue;
+
+		const float lineHeight = std::max(1.0f, message.size);
+		const float lineCount = 1.0f + static_cast<float>(std::count(message.text.begin(), message.text.end(), '\n'));
+		const float pixelHeight = lineHeight * lineCount;
+		const float bitmapAspect = static_cast<float>(cache.width) / static_cast<float>(cache.height);
+		const float pixelWidth = pixelHeight * bitmapAspect;
+
+		const float x = leftMargin / static_cast<float>(viewportW);
+		const float y = cursorY / static_cast<float>(viewportH);
+		const float w = pixelWidth / static_cast<float>(viewportW);
+		const float h = pixelHeight / static_cast<float>(viewportH);
+
+		// A small dark translucent shadow makes messages readable over the scene,
+		// while preserving the exact configured message color.
+		bck_->ui_shader->SetVec4("uTintColor", glm::vec4(0.f, 0.f, 0.f, message.color.a * 0.75f));
+		glActiveTexture(GL_TEXTURE0);
+		auto texIt = bck_->textures.find(cache.texture);
+		if (texIt == bck_->textures.end() || !texIt->second)
+			continue;
+		glBindTexture(GL_TEXTURE_2D, texIt->second->GetGL_ID());
+
+		const float shadowOffsetX = 1.5f / static_cast<float>(viewportW);
+		const float shadowOffsetY = 1.5f / static_cast<float>(viewportH);
+		const float shadowVertices[16] = {
+			x + shadowOffsetX, y + shadowOffsetY, 0.0f, 1.0f,
+			x + w + shadowOffsetX, y + shadowOffsetY, 1.0f, 1.0f,
+			x + w + shadowOffsetX, y + h + shadowOffsetY, 1.0f, 0.0f,
+			x + shadowOffsetX, y + h + shadowOffsetY, 0.0f, 0.0f,
+		};
+		glBindVertexArray(bck_->vao[BUFFER_UI]);
+		glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_UI]);
+		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(shadowVertices), shadowVertices);
+		glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+
+		bck_->ui_shader->SetVec4("uTintColor", message.color);
+		const float vertices[16] = {
+			x, y, 0.0f, 1.0f,
+			x + w, y, 1.0f, 1.0f,
+			x + w, y + h, 1.0f, 0.0f,
+			x, y + h, 0.0f, 0.0f,
+		};
+		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
+		glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
+
+		cursorY += pixelHeight + lineGap;
+	}
+
+	for (auto it = bck_->screen_message_textures.begin(); it != bck_->screen_message_textures.end(); )
+	{
+		if (activeIds.find(it->first) == activeIds.end())
+		{
+			if (it->second.texture != HRL_INVALID_ID && HRL_IsValidTexture(it->second.texture))
+				HRL_DeleteTexture(it->second.texture);
+			it = bck_->screen_message_textures.erase(it);
+		}
+		else
+			++it;
+	}
+
 	glDisable(GL_BLEND);
 	glEnable(GL_DEPTH_TEST);
 	glViewport(0, 0, static_cast<GLsizei>(winW), static_cast<GLsizei>(winH));
@@ -4744,6 +6232,7 @@ static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id)
 static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 {
 	GL_Light gpu_lights[MAX_LIGHTS]{};
+	auto& voxelCache = bck_->voxel_light_cache[scene_id];
 	for (int i = 0; i < MAX_LIGHTS; ++i)
 	{
 		gpu_lights[i].shadowMatrix = glm::mat4(1.f);
@@ -4756,10 +6245,13 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 	const auto slotsIt = bck_->active_shadow_slots_by_scene.find(scene_id);
 	const auto* activeSlots = (slotsIt != bck_->active_shadow_slots_by_scene.end()) ? &slotsIt->second : nullptr;
 
+	// Reserve the original HRL light budget and use the remaining slots for
+	// HDR voxel emitters. Both use exactly the same global LightBlock.
+	constexpr int MAX_HRL_SCENE_LIGHTS = 32;
 	int count = 0;
 	for (const auto& [id, light] : scene->lights)
 	{
-		if (count >= MAX_LIGHTS)
+		if (!light || count >= MAX_HRL_SCENE_LIGHTS || count >= MAX_LIGHTS)
 			break;
 		GL_Light& dst = gpu_lights[count];
 		dst.type = light->type_;
@@ -4776,49 +6268,187 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 		{
 			auto slotIt = activeSlots->find(id);
 			if (slotIt != activeSlots->end())
-		{
-			const int slot = slotIt->second;
-			if (light->type_ == HRL_POINT_LIGHT)
 			{
-				constexpr float farPlane = 100.f;
-				const glm::vec3 pos = light->position_;
-				// The point-light shader only needs the far plane; cube sampling uses
-				// the fragment-to-light vector as its lookup direction.
-				dst.shadowParams = glm::vec4(light->shadow_bias_, farPlane, (float)slot, 2.f);
-			}
-			else
-			{
-				const glm::vec3 lightDir = GetLightDirection(light);
-				const glm::vec3 center = (light->type_ == HRL_SPOT_LIGHT) ? light->position_ : glm::vec3(0.f);
-				const glm::vec3 up = std::abs(glm::dot(lightDir, glm::vec3(0,1,0))) > 0.98f ? glm::vec3(0,0,1) : glm::vec3(0,1,0);
-				glm::mat4 lightView;
-				glm::mat4 projection;
-				if (light->type_ == HRL_SPOT_LIGHT)
+				const int slot = slotIt->second;
+				if (light->type_ == HRL_POINT_LIGHT)
 				{
-					const float outerAngle = glm::clamp(light->outerCutoff, 1.f, 89.0f);
-					projection = glm::perspective(glm::radians(outerAngle * 2.f), 1.f, 0.1f, 100.f);
-					lightView = glm::lookAt(light->position_, light->position_ + lightDir, up);
+					constexpr float farPlane = 100.f;
+					dst.shadowParams = glm::vec4(light->shadow_bias_, farPlane, (float)slot, 2.f);
 				}
 				else
 				{
-					const glm::vec3 lightPosition = center - lightDir * 80.f;
-					projection = glm::ortho(-60.f, 60.f, -60.f, 60.f, 0.1f, 200.f);
-					lightView = glm::lookAt(lightPosition, center, up);
+					const glm::vec3 lightDir = GetLightDirection(light);
+					const glm::vec3 center = (light->type_ == HRL_SPOT_LIGHT) ? light->position_ : glm::vec3(0.f);
+					const glm::vec3 up = std::abs(glm::dot(lightDir, glm::vec3(0,1,0))) > 0.98f
+						? glm::vec3(0,0,1) : glm::vec3(0,1,0);
+					glm::mat4 lightView;
+					glm::mat4 projection;
+					if (light->type_ == HRL_SPOT_LIGHT)
+					{
+						const float outerAngle = glm::clamp(light->outerCutoff, 1.f, 89.0f);
+						projection = glm::perspective(glm::radians(outerAngle * 2.f), 1.f, 0.1f, 100.f);
+						lightView = glm::lookAt(light->position_, light->position_ + lightDir, up);
+					}
+					else
+					{
+						const glm::vec3 lightPosition = center - lightDir * 80.f;
+						projection = glm::ortho(-60.f, 60.f, -60.f, 60.f, 0.1f, 200.f);
+						lightView = glm::lookAt(lightPosition, center, up);
+					}
+					const glm::mat4 clip = projection * lightView;
+					const glm::mat4 matrix = glm::translate(glm::mat4(1.f), glm::vec3(0.5f)) *
+						glm::scale(glm::mat4(1.f), glm::vec3(0.5f)) * clip;
+					dst.shadowMatrix = matrix;
+					dst.shadowParams = glm::vec4(light->shadow_bias_, 0.f, (float)slot, 1.f);
 				}
-				const glm::mat4 clip = projection * lightView;
-				const glm::mat4 matrix = glm::translate(glm::mat4(1.f), glm::vec3(0.5f)) *
-					glm::scale(glm::mat4(1.f), glm::vec3(0.5f)) * clip;
-				dst.shadowMatrix = matrix;
-				dst.shadowParams = glm::vec4(light->shadow_bias_, 0.f, (float)slot, 1.f);
 			}
 		}
-		}
 		++count;
+	}
+
+	voxelCache.scene_light_count = count;
+	for (int i = 0; i < count && i < 32; ++i)
+		voxelCache.scene_lights[static_cast<size_t>(i)] = gpu_lights[i];
+
+	// Promote the strongest HDR voxel colors to world-space point emitters.
+	// This list is cached by world revisions: previously this code scanned every
+	// voxel on every frame, turning a 4096x4096 empty world into a 16.7M-element
+	// CPU loop per frame.
+	const HRL_VoxelWorld* world = scene->voxel_world;
+	if (!world || world->voxel_size_ <= 0.f)
+	{
+		voxelCache.lights.clear();
+		voxelCache.valid = true;
+		voxelCache.geometry_revision = world ? world->voxel_revision_ : 0;
+		voxelCache.color_revision = world ? world->color_revision_ : 0;
+	}
+	else if (!voxelCache.valid ||
+		voxelCache.geometry_revision != world->voxel_revision_ ||
+		voxelCache.color_revision != world->color_revision_)
+	{
+		voxelCache.lights.clear();
+		voxelCache.geometry_revision = world->voxel_revision_;
+		voxelCache.color_revision = world->color_revision_;
+		voxelCache.valid = true;
+
+		const size_t expectedCount = (world->width_ > 0 && world->height_ > 0)
+			? static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_)
+			: 0u;
+
+		if (world->voxels_.size() == expectedCount && !world->type_emissive_colors_.empty())
+		{
+			struct VoxelEmitterCandidate
+			{
+				float energy = 0.f;
+				glm::vec3 position{0.f};
+				glm::vec3 color{0.f};
+			};
+
+			std::vector<VoxelEmitterCandidate> emitters;
+			emitters.reserve(std::min(expectedCount, static_cast<size_t>(MAX_LIGHTS)));
+			for (int y = 0; y < world->height_; ++y)
+			{
+				for (int x = 0; x < world->width_; ++x)
+				{
+					const size_t index = static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x);
+					const uint32_t type = world->voxels_[index].type;
+					if (type == 0)
+						continue;
+
+					auto emissiveIt = world->type_emissive_colors_.find(type);
+					if (emissiveIt == world->type_emissive_colors_.end())
+						continue;
+					auto baseIt = world->type_colors_.find(type);
+					if (baseIt != world->type_colors_.end() && baseIt->second.a <= 0.001f)
+						continue;
+
+					const glm::vec3 emissive = glm::max(emissiveIt->second, glm::vec3(0.f));
+					const float energy = std::max({emissive.r, emissive.g, emissive.b});
+					if (energy <= 0.f)
+						continue;
+
+					VoxelEmitterCandidate emitter;
+					emitter.energy = energy;
+					emitter.color = emissive / energy;
+					emitter.position = glm::vec3(
+						(static_cast<float>(x) + 0.5f) * world->voxel_size_,
+						(static_cast<float>(y) + 0.5f) * world->voxel_size_,
+						0.5f * world->voxel_size_);
+					emitters.push_back(emitter);
+				}
+			}
+
+			const size_t maxEmitterCount = static_cast<size_t>(MAX_LIGHTS);
+			if (emitters.size() > maxEmitterCount)
+			{
+				std::nth_element(emitters.begin(), emitters.begin() + maxEmitterCount, emitters.end(),
+					[](const VoxelEmitterCandidate& a, const VoxelEmitterCandidate& b)
+					{ return a.energy > b.energy; });
+				emitters.resize(maxEmitterCount);
+			}
+
+			const float falloffDistance = std::max(world->voxel_size_ * 8.f, world->voxel_size_);
+			const float attenuation = 1.f / std::max(falloffDistance * falloffDistance, 1e-6f);
+			voxelCache.lights.reserve(emitters.size());
+			for (const VoxelEmitterCandidate& emitter : emitters)
+			{
+				GL_Light light{};
+				light.type = HRL_POINT_LIGHT;
+				light.intensity = emitter.energy;
+				light.attenuation = attenuation;
+				light.innerCutoff = 0.f;
+				light.position = emitter.position;
+				light.outerCutoff = 0.f;
+				light.rotation = glm::vec3(0.f, -1.f, 0.f);
+				light.padding3 = 0.f;
+				light.color = emitter.color;
+				light.shadowStrength = 0.f;
+				light.shadowMatrix = glm::mat4(1.f);
+				light.shadowParams = glm::vec4(0.f, 0.f, -1.f, 0.f);
+				voxelCache.lights.push_back(light);
+			}
+		}
+	}
+
+	// A stable signature lets each chunk keep its own UBO untouched across frames.
+	// Hashing at most 32 scene lights + 256 voxel emitters is tiny compared with
+	// rewriting an OpenGL buffer for every visible chunk.
+	const auto hashLights = [](uint64_t seed, const GL_Light* data, size_t count)
+	{
+		const unsigned char* bytes = reinterpret_cast<const unsigned char*>(data);
+		const size_t byteCount = count * sizeof(GL_Light);
+		uint64_t hash = seed;
+		for (size_t i = 0; i < byteCount; ++i)
+		{
+			hash ^= static_cast<uint64_t>(bytes[i]);
+			hash *= 1099511628211ull;
+		}
+		return hash;
+	};
+
+	uint64_t signature = 1469598103934665603ull;
+	signature = hashLights(signature, voxelCache.scene_lights.data(), static_cast<size_t>(voxelCache.scene_light_count));
+	if (!voxelCache.lights.empty())
+		signature = hashLights(signature, voxelCache.lights.data(), voxelCache.lights.size());
+	if (signature != voxelCache.signature)
+	{
+		voxelCache.signature = signature;
+		++voxelCache.revision;
+		if (voxelCache.revision == 0)
+			voxelCache.revision = 1;
+	}
+
+	for (const GL_Light& light : voxelCache.lights)
+	{
+		if (count >= MAX_LIGHTS)
+			break;
+		gpu_lights[count++] = light;
 	}
 
 	glBindBuffer(GL_UNIFORM_BUFFER, bck_->ubo[UBO_LIGHTS]);
 	glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)sizeof(gpu_lights), gpu_lights);
 }
+
 
 static void DestroyMSAAResources(GL_Scene* scene)
 {
@@ -4919,7 +6549,6 @@ void GL33_CreateScene(HRL_id _newSceneid, int _renderOnScreen)
 	scene->width = (int)GetWindowWidth();
 	scene->height = (int)GetWindowHeight();
 
-	printf("scene size : %dx%d\n", scene->width, scene->height);
 
 
 	// Gen scene textures: color, bloom, picking, GI albedo, GI normal.
@@ -5015,6 +6644,9 @@ void GL33_DeleteScene(HRL_id _sceneid)
 
 	if (g_gl33_gi)
 		g_gl33_gi->ReleaseScene(_sceneid);
+
+	DestroyAllVoxelChunks(_sceneid);
+	bck_->voxel_light_cache.erase(_sceneid);
 
 	//scene is not rendered at screen
 	DestroyMSAAResources(it->second);
@@ -6028,6 +7660,18 @@ unsigned int HRL_GL_GetSceneColorBufferGL_ID(HRL_id _sceneid)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneColorBufferGL_ID: scene ID is not valid");
 		return GL_INVALID_VALUE;
 	}
+	return it->second->textures[2];
+}
+
+unsigned int HRL_GL_GetSceneColorPickingBufferGL_ID(HRL_id _sceneid)
+{
+	auto it = bck_->gpu_scenes.find(_sceneid);
+	if (it == bck_->gpu_scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GL_GetSceneColorPickingBufferGL_ID: scene ID is not valid");
+		return GL_INVALID_VALUE;
+	}
+
 	return it->second->textures[2];
 }
 

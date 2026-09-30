@@ -27,7 +27,7 @@
 #ifndef HRL_IMPL
 #define HRL_IMPL
 
-#define HRL_API_VERSION "0.6"
+#define HRL_API_VERSION "0.8"
 
 #ifdef __cplusplus
  #include <cstdint>
@@ -72,6 +72,51 @@ typedef struct HRL_Vertex3D {
 	float tangent[3];
 	float bitangent[3];
 } HRL_Vertex3D;
+
+/**
+ * @brief Describes one voxel in a 2D voxel world.
+ *
+ * A voxel is rendered as a filled square in the XY plane, not as a 3D cube.
+ * Type 0 is reserved for empty space and is never rendered. Voxel type IDs
+ * are stored in one byte and therefore range from 0 to 255.
+ */
+/** Voxel type ID. 0 is reserved for empty space; valid voxel types are 0..255. */
+#define HRL_VOXEL_TYPE_MAX 255u
+
+typedef uint8_t HRL_VoxelType;
+
+typedef struct HRL_Voxel {
+	HRL_VoxelType type;
+} HRL_Voxel;
+
+#ifdef __cplusplus
+static_assert(sizeof(HRL_Voxel) == sizeof(HRL_VoxelType), "HRL_Voxel must remain one byte");
+#else
+_Static_assert(sizeof(HRL_Voxel) == sizeof(HRL_VoxelType), "HRL_Voxel must remain one byte");
+#endif
+
+/** Collision result for a floating-point 2D voxel-space AABB.
+ *
+ * The queried shape uses voxel-space coordinates: one unit equals one voxel.
+ * Position is the center of the shape and size is its full width/height.
+ * Voxel types are non-collidable by default. Collision is opt-in per type
+ * through the user-defined collision flags configured on voxel types.
+ */
+typedef struct HRL_VoxelCollision {
+	uint32_t flags;
+	uint32_t left_type;
+	uint32_t right_type;
+	uint32_t top_type;
+	uint32_t bottom_type;
+	uint32_t inside_type;
+} HRL_VoxelCollision;
+
+#define HRL_VOXEL_COLLISION_NONE    0u
+#define HRL_VOXEL_COLLISION_LEFT    (1u << 0)
+#define HRL_VOXEL_COLLISION_RIGHT   (1u << 1)
+#define HRL_VOXEL_COLLISION_TOP     (1u << 2)
+#define HRL_VOXEL_COLLISION_BOTTOM  (1u << 3)
+#define HRL_VOXEL_COLLISION_INSIDE  (1u << 4)
 
 /** Maximum number of bone influences stored per skeletal vertex. */
 #define HRL_SKELETAL_MAX_INFLUENCES 4
@@ -717,7 +762,23 @@ extern "C" {
 	/**
 	 * @brief Sets the world-space position of a mesh.
 	 */
+	/**
+	 * @brief Associates an opaque user-owned pointer with a mesh.
+	 *
+	 * HRL stores the pointer as-is and never allocates, frees, or dereferences it.
+	 * Passing nullptr clears the handle.
+	 */
+	HRL_API void HRL_SetMeshUserHandle(HRL_id _meshid, void* _handle);
+
+	/**
+	 * @brief Returns the opaque user-owned pointer associated with a mesh.
+	 *
+	 * Returns nullptr for an invalid mesh ID or when no handle has been assigned.
+	 */
+	HRL_API void* HRL_GetMeshUserHandle(HRL_id _meshid);
+
 	HRL_API void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z);
+	HRL_API void HRL_GetMeshLocation(HRL_id _meshid, float* x, float* y, float* z);
 
 	/**
 	 * @brief Sets the rotation of a mesh using Euler angles (in degrees).
@@ -1058,6 +1119,268 @@ extern "C" {
 	 */
 	HRL_API void HRL_SetEnvironmentMap(HRL_id _sceneid, HRL_id _textureid);
 
+
+	/* ============================================================================
+	 *  2D VOXEL WORLDS
+	 * ============================================================================ */
+
+	/**
+	 * @brief Sets the voxel world dimensions in number of cells.
+	 *
+	 * The world is indexed as [y * width + x]. Calling this function clears any
+	 * previously loaded voxel data for the scene.
+	 *
+	 * @param _sceneid   Scene receiving the voxel world.
+	 * @param _width     World width in voxels.
+	 * @param _height    World height in voxels.
+	 */
+	HRL_API void HRL_SetVoxelSize(HRL_id _sceneid, int _width, int _height);
+
+	/**
+	 * @brief Creates an empty voxel world with the given dimensions.
+	 *
+	 * All voxels are initialized to type 0 (empty). Existing voxel data is
+	 * replaced, while the current physical voxel size and chunk size are kept.
+	 *
+	 * @param _sceneid   Scene receiving the voxel world.
+	 * @param _width     World width in voxels.
+	 * @param _height    World height in voxels.
+	 * @return HRL_TRUE on success, HRL_FALSE on invalid input.
+	 */
+	HRL_API int HRL_CreateVoxelWorld(HRL_id _sceneid, int _width, int _height);
+
+	/**
+	 * @brief Sets the physical side length of one voxel square in world units.
+	 *
+	 * @param _sceneid Scene receiving the voxel world.
+	 * @param _size    Side length of one voxel square in world units.
+	 */
+	HRL_API void HRL_SetVoxelPhysicalSize(HRL_id _sceneid, float _size);
+
+	/**
+	 * @brief Converts world-space 2D coordinates to voxel-space coordinates.
+	 *
+	 * One voxel is exactly 1.0 voxel-space unit. The conversion divides both
+	 * components by the physical voxel side length configured with
+	 * HRL_SetVoxelPhysicalSize(). The function is also suitable for converting
+	 * a size or delta because those values use the same scale factor.
+	 *
+	 * @param _sceneid Scene whose voxel physical size defines the conversion.
+	 * @param _world_x World-space X coordinate, size, or delta.
+	 * @param _world_y World-space Y coordinate, size, or delta.
+	 * @param _voxel_x Receives the value in voxel-space units.
+	 * @param _voxel_y Receives the value in voxel-space units.
+	 * @return HRL_TRUE on success, HRL_FALSE when the scene or voxel world is invalid.
+	 */
+	HRL_API int HRL_WorldToVoxelCoordinates(
+		HRL_id _sceneid,
+		float _world_x, float _world_y,
+		float* _voxel_x, float* _voxel_y
+	);
+
+	/**
+	 * @brief Converts voxel-space 2D coordinates to world-space coordinates.
+	 *
+	 * One voxel is exactly 1.0 voxel-space unit. The conversion multiplies both
+	 * components by the physical voxel side length configured with
+	 * HRL_SetVoxelPhysicalSize(). The function is also suitable for converting
+	 * a size or delta because those values use the same scale factor.
+	 *
+	 * @param _sceneid Scene whose voxel physical size defines the conversion.
+	 * @param _voxel_x Voxel-space X coordinate, size, or delta.
+	 * @param _voxel_y Voxel-space Y coordinate, size, or delta.
+	 * @param _world_x Receives the value in world-space units.
+	 * @param _world_y Receives the value in world-space units.
+	 * @return HRL_TRUE on success, HRL_FALSE when the scene or voxel world is invalid.
+	 */
+	HRL_API int HRL_VoxelToWorldCoordinates(
+		HRL_id _sceneid,
+		float _voxel_x, float _voxel_y,
+		float* _world_x, float* _world_y
+	);
+
+	/**
+	 * @brief Sets the side length of square voxel chunks.
+	 *
+	 * Only chunks visible by the scene cameras, plus a small internal margin, are
+	 * kept as OpenGL geometry. The complete voxel array remains CPU-side.
+	 *
+	 * @param _sceneid   Scene receiving the voxel world.
+	 * @param _chunkSize Number of voxels on each chunk side.
+	 */
+	HRL_API void HRL_SetVoxelChunkSize(HRL_id _sceneid, int _chunkSize);
+
+	/**
+	 * @brief Assigns the display color associated with a voxel type.
+	 *
+	 * Type 0 is reserved for empty space and its color has no rendering effect.
+	 * RGB components are clamped to the displayable [0, 1] range. Emission is configured separately with HRL_SetVoxelTypeEmissiveColor(). Alpha remains in the [0, 1] range.
+	 */
+	HRL_API void HRL_SetVoxelTypeColor(HRL_id _sceneid, uint32_t _type, float _r, float _g, float _b, float _a);
+	/**
+	 * @brief Assigns the emissive RGB color associated with a voxel type.
+	 *
+	 * Emissive RGB is HDR and defaults to (0, 0, 0). A non-zero emissive
+	 * color is added to the voxel appearance and also acts as a global
+	 * light source for the voxel world.
+	 */
+	HRL_API void HRL_SetVoxelTypeEmissiveColor(HRL_id _sceneid, uint32_t _type, float _r, float _g, float _b);
+
+	/**
+	 * @brief Loads or replaces the CPU-side voxel array for a scene.
+	 *
+	 * The input array must contain exactly width * height elements using the
+	 * dimensions configured by HRL_SetVoxelSize(). The OpenGL backend does not
+	 * upload the complete world: it builds geometry only for chunks currently
+	 * visible by the scene cameras, with a small streaming margin.
+	 *
+	 * @param _sceneid Scene receiving the voxel world.
+	 * @param _voxels  Array containing width * height voxels. May be NULL only
+	 *                 when _count is zero.
+	 * @param _count   Number of HRL_Voxel elements in _voxels.
+	 * @return HRL_TRUE on success, HRL_FALSE on invalid input.
+	 */
+	HRL_API int HRL_LoadVoxelWorld(HRL_id _sceneid, const HRL_Voxel* _voxels, size_t _count);
+
+	/**
+	 * @brief Returns the size in bytes required to serialize the complete voxel world.
+	 *
+	 * The serialized representation is a compact, chunked binary buffer. Empty
+	 * chunks are omitted and each non-empty chunk automatically uses the smallest
+	 * of constant, palette bit-packed, raw, or scanline-RLE encodings.
+	 *
+	 * Rendering/material properties (type colors, emissive colors and user-defined
+	 * collision flags) are not serialized; those remain application-side type data.
+	 */
+	HRL_API size_t HRL_GetVoxelWorldSaveAllSize(HRL_id _sceneid);
+
+	/**
+	 * @brief Serializes the complete voxel world into a caller-provided memory buffer.
+	 *
+	 * If _buffer is NULL or _capacity is too small, nothing is written and the
+	 * required buffer size is returned. Otherwise the serialized byte count is
+	 * returned. A return value of 0 indicates an invalid scene/world or another
+	 * serialization error.
+	 */
+	HRL_API size_t HRL_SaveVoxelWorldAll(HRL_id _sceneid, void* _buffer, size_t _capacity);
+
+	/**
+	 * @brief Loads a voxel world from a serialized memory buffer.
+	 *
+	 * The buffer must have been produced by HRL_SaveVoxelWorldAll() or use the
+	 * same HRL voxel-world serialization format. World dimensions, voxel physical
+	 * size, chunk size and voxel types are restored. Existing type configuration
+	 * (colors, emissive colors and user-defined collision flags) is kept.
+	 */
+	HRL_API int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size);
+
+	/**
+	 * @brief Serializes the complete voxel world directly to a file.
+	 *
+	 * The file contains the same binary representation produced by
+	 * HRL_SaveVoxelWorldAll(). The voxel world is written in one snapshot;
+	 * rendering/material properties are not included.
+	 *
+	 * @param _sceneid Scene whose voxel world is saved.
+	 * @param _path    Destination file path.
+	 * @return HRL_TRUE on success, HRL_FALSE on invalid input or file I/O failure.
+	 */
+	HRL_API int HRL_SaveVoxelWorldAllFile(HRL_id _sceneid, const char* _path);
+
+	/**
+	 * @brief Changes one voxel and marks its affected chunk for regeneration.
+	 *
+	 * The new geometry is uploaded automatically by the OpenGL renderer on the
+	 * next render of the scene. Type 0 removes the voxel.
+	 */
+	/**
+	 * @brief Begins a batch of voxel edits.
+	 *
+	 * Calls to HRL_SetVoxelType() made between Begin/End are coalesced so
+	 * derived voxel lighting is invalidated once for the whole edit. Nested
+	 * batches are supported.
+	 */
+	HRL_API void HRL_BeginVoxelEdit(HRL_id _sceneid);
+
+	/**
+	 * @brief Ends a batch of voxel edits.
+	 *
+	 * When the outermost batch ends, all modified chunks remain dirty for the
+	 * normal renderer synchronization and derived voxel lighting is invalidated
+	 * once. Calling this without a matching Begin has no effect.
+	 */
+	HRL_API void HRL_EndVoxelEdit(HRL_id _sceneid);
+
+	HRL_API void HRL_SetVoxelType(HRL_id _sceneid, int _pos_x, int _pos_y, uint32_t _type);
+
+	/**
+	 * @brief Returns the current voxel type at a world-grid position.
+	 *
+	 * Returns 0 for empty space and for positions outside the configured world.
+	 */
+	HRL_API uint32_t HRL_GetVoxelType(HRL_id _sceneid, int _pos_x, int _pos_y);
+
+	/**
+	 * @brief Assigns arbitrary user-defined flags to one voxel type.
+	 *
+	 * HRL does not define or interpret these flags. A type has zero flags by
+	 * default. Setting _flags to zero removes the sparse entry.
+	 * The setting is stored per type, so it adds no per-voxel memory.
+	 */
+	HRL_API void HRL_SetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type, uint32_t _flags);
+
+	/**
+	 * @brief Returns the user-defined flags associated with a voxel type.
+	 *
+	 * Returns zero when the type has no flags configured or when the type is
+	 * unknown.
+	 */
+	HRL_API uint32_t HRL_GetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type);
+
+	/**
+	 * @brief Tests a floating-point axis-aligned box against voxel types matching
+	 * a user-defined flag mask.
+	 *
+	 * Position and size are expressed in voxel-space units (1.0f = one voxel).
+	 * Position is the center of the shape and size is its full width/height.
+	 * The function only detects overlaps; it does not move or resolve the shape.
+	 * _mask is fully application-defined: HRL simply matches
+	 * `(voxel_flags & _mask) != 0`. The result reports which side is touching
+	 * a matching voxel and the corresponding voxel type.
+	 *
+	 * @return HRL_TRUE when the shape touches or overlaps at least one matching
+	 *         voxel, otherwise HRL_FALSE.
+	 */
+	HRL_API int HRL_VoxelCheckCollision(
+		HRL_id _sceneid,
+		float _x, float _y,
+		float _width, float _height,
+		uint32_t _mask,
+		HRL_VoxelCollision* _out_collision
+	);
+
+	/**
+	 * @brief Projects a window-space mouse position onto the 2D voxel world.
+	 *
+	 * The projection uses the camera attached to the scene viewport containing
+	 * the mouse position. The voxel world lies on the XY plane at Z = 0, so the
+	 * camera is ray-cast against that plane.
+	 *
+	 * Mouse coordinates are window-relative pixels with the origin at the
+	 * top-left, matching GLFW cursor coordinates and HRL_MouseMovedCallback().
+	 * The returned coordinates identify the voxel cell under the cursor, even
+	 * when that cell is empty (type 0).
+	 *
+	 * @param _sceneid Scene containing the voxel world and viewport/camera.
+	 * @param _loc_x Window-relative mouse X coordinate in pixels.
+	 * @param _loc_y Window-relative mouse Y coordinate in pixels.
+	 * @param _vx Receives the voxel X coordinate.
+	 * @param _vy Receives the voxel Y coordinate.
+	 * @return HRL_TRUE when the mouse ray intersects the voxel world, otherwise
+	 *         HRL_FALSE. On failure, _vx and _vy are set to -1 when non-null.
+	 */
+	HRL_API int HRL_GetVoxelAtScreenPosition(HRL_id _sceneid, int _loc_x, int _loc_y, int* _vx, int* _vy);
+
 	/**
 	 * @brief Enables or disables the GPU color-picking buffer for a scene.
 	 * When enabled, each rendered object is assigned a unique color ID,
@@ -1175,6 +1498,21 @@ extern "C" {
 	 * @param _matid ID of the material to delete.
 	 */
 	HRL_API void HRL_DeleteMaterial(HRL_id _matid);
+
+	/**
+	 * @brief Associates an opaque user-owned pointer with a material.
+	 *
+	 * HRL stores the pointer as-is and never allocates, frees, or dereferences it.
+	 * Passing nullptr clears the handle.
+	 */
+	HRL_API void HRL_SetMaterialUserHandle(HRL_id _matid, void* _handle);
+
+	/**
+	 * @brief Returns the opaque user-owned pointer associated with a material.
+	 *
+	 * Returns nullptr for an invalid material ID or when no handle has been assigned.
+	 */
+	HRL_API void* HRL_GetMaterialUserHandle(HRL_id _matid);
 
 	/**
 	 * @brief Returns whether the given ID refers to a live material object.
@@ -1301,6 +1639,21 @@ extern "C" {
 	 * @param _camid ID of the camera to delete.
 	 */
 	HRL_API void HRL_DeleteCamera(HRL_id _camid);
+
+	/**
+	 * @brief Associates an opaque user-owned pointer with a camera.
+	 *
+	 * HRL stores the pointer as-is and never allocates, frees, or dereferences it.
+	 * Passing nullptr clears the handle.
+	 */
+	HRL_API void HRL_SetCameraUserHandle(HRL_id _camid, void* _handle);
+
+	/**
+	 * @brief Returns the opaque user-owned pointer associated with a camera.
+	 *
+	 * Returns nullptr for an invalid camera ID or when no handle has been assigned.
+	 */
+	HRL_API void* HRL_GetCameraUserHandle(HRL_id _camid);
 
 	/**
 	 * @brief Returns whether the given ID refers to a live camera object.
@@ -1662,6 +2015,19 @@ extern "C" {
 	HRL_API void HRL_SetDebugMeshInfoFont(HRL_id _sceneid, HRL_id _fontid);
 	HRL_API void HRL_SetDebugMeshInfoTextSize(HRL_id _sceneid, float _size);
 	HRL_API void HRL_SetDebugMeshInfoTextColor(HRL_id _sceneid, float r, float g, float b, float a);
+
+	/**
+	 * @brief Adds an Unreal-style screen debug message to the scene.
+	 * Messages are stacked on screen and automatically removed after _duration_seconds.
+	 * The scene's current screen-message color, size and font are copied into the
+	 * message when it is created; changing the settings does not affect messages
+	 * that are already visible.
+	 * @return The message ID, or HRL_INVALID_ID on failure.
+	 */
+	HRL_API HRL_id HRL_AddScreenMessage(HRL_id _sceneid, float _duration_seconds, const char* _format, ...);
+	HRL_API void HRL_SetScreenMessageTextSize(HRL_id _sceneid, float _size);
+	HRL_API void HRL_SetScreenMessageTextColor(HRL_id _sceneid, float r, float g, float b, float a);
+	HRL_API void HRL_SetScreenMessageFont(HRL_id _sceneid, HRL_id _fontid);
 
 
 	/* ============================================================================

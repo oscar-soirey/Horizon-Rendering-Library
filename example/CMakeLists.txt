@@ -13,7 +13,7 @@ include_directories("${VULKAN_SDK}/Include")
 
 #Crée l'exécutable
 add_executable(example
-        main.cpp
+        main.voxel.cpp
         src/example.cpp
 )
 

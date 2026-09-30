@@ -21,6 +21,7 @@ layout(location = 2) out vec4 ColorPickingBuffer;   //writes the ID of the sprit
 #define HRL_PointLight       (uint(0x0011))
 #define HRL_DirectionalLight (uint(0x0012))
 #define HRL_SpotLight        (uint(0x0013))
+#define HRL_SkyLight         (uint(0x0014))
 
 // Modes de brouillard
 const int FOG_LINEAR = 0x0090; // interpolation linéaire entre FogStart et FogEnd
@@ -236,6 +237,15 @@ void main()
         continue; // slot vide, on skip
 
         vec3 lightColor = light.color * light.intensity;
+
+        // ── Sky Light ─────────────────────────────────────────────────────────
+        // Sky lights provide low-frequency ambient illumination. Keep this
+        // diffuse-only, matching the static 3D mesh lighting path.
+        if (light.type == HRL_SkyLight)
+        {
+            result += (1.0 - metallic) * lightColor;
+            continue;
+        }
 
         // ── Point Light ───────────────────────────────────────────────────────
         // Lumière omnidirectionnelle émise depuis light.position.
