@@ -7529,7 +7529,8 @@ void GL33_GetModelMatrix(HRL_Mesh *mesh, float *aa)
 //DEBUG
 void GL33_DrawDebug(const DebugRenderer &_renderer, float line_thickness)
 {
-	glDisable(GL_DEPTH_TEST);
+	if (_renderer.lines.empty() && _renderer.triangles.empty())
+		return;
 
 	auto it = bck_->shaders.find(HRL_DEBUG_SHADER);
 	if (it == bck_->shaders.end())
@@ -7538,6 +7539,13 @@ void GL33_DrawDebug(const DebugRenderer &_renderer, float line_thickness)
 		return;
 	}
 	auto* s = it->second;
+
+	// Debug primitives are an overlay. They must not be hidden by the scene
+	// geometry they are meant to inspect (voxel faces, sprites, etc.).
+	glDisable(GL_DEPTH_TEST);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
 	//on set CurrentShader pour spécifier que les prochains calls utiliseront ce shader
 	ctx_->shader = s;
 	s->Use();
@@ -7549,10 +7557,8 @@ void GL33_DrawDebug(const DebugRenderer &_renderer, float line_thickness)
 	glBindVertexArray(bck_->vao[BUFFER_DEBUG]);
 	glBindBuffer(GL_ARRAY_BUFFER, bck_->vbo[BUFFER_DEBUG]);
 
-	glEnable(GL_DEPTH_TEST);
-
-	//remplacer par une seule fonction dans la vtable pour eviter de le faire a chaque frames
-	glLineWidth(line_thickness);
+	// Keep depth testing disabled for the whole debug pass.
+	glLineWidth(std::max(1.0f, line_thickness));
 
 	// lignes
 	if (!_renderer.lines.empty())
@@ -7590,6 +7596,9 @@ void GL33_DrawDebug(const DebugRenderer &_renderer, float line_thickness)
 
 		glDrawArrays(GL_TRIANGLES, 0, (GLsizei)_renderer.triangles.size());
 	}
+
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
 }
 
 
