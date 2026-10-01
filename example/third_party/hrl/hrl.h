@@ -1203,7 +1203,8 @@ extern "C" {
 	 * @brief Sets the side length of square voxel chunks.
 	 *
 	 * Only chunks visible by the scene cameras, plus a small internal margin, are
-	 * kept as OpenGL geometry. The complete voxel array remains CPU-side.
+	 * kept as OpenGL geometry. CPU-side voxel storage is sparse: absent chunks are
+	 * implicitly empty (type 0).
 	 *
 	 * @param _sceneid   Scene receiving the voxel world.
 	 * @param _chunkSize Number of voxels on each chunk side.
@@ -1227,11 +1228,12 @@ extern "C" {
 	HRL_API void HRL_SetVoxelTypeEmissiveColor(HRL_id _sceneid, uint32_t _type, float _r, float _g, float _b);
 
 	/**
-	 * @brief Loads or replaces the CPU-side voxel array for a scene.
+	 * @brief Loads or replaces voxel data for a scene.
 	 *
 	 * The input array must contain exactly width * height elements using the
-	 * dimensions configured by HRL_SetVoxelSize(). The OpenGL backend does not
-	 * upload the complete world: it builds geometry only for chunks currently
+	 * dimensions configured by HRL_SetVoxelSize(). Non-empty data is converted
+	 * to HRL's sparse chunk storage. The OpenGL backend does not upload the
+	 * complete world: it builds geometry only for chunks currently
 	 * visible by the scene cameras, with a small streaming margin.
 	 *
 	 * @param _sceneid Scene receiving the voxel world.
@@ -1277,8 +1279,10 @@ extern "C" {
 	/**
 	 * @brief Serializes the complete voxel world directly to a file.
 	 *
-	 * The file contains the same binary representation produced by
-	 * HRL_SaveVoxelWorldAll(). The voxel world is written in one snapshot;
+	 * The first save writes a compact base snapshot. Subsequent saves to the same
+	 * world file append only chunks changed since the previous load/save; unchanged
+	 * chunk payloads are never rewritten. The loader accepts these delta sections
+	 * transparently, and only visible chunks are decoded into CPU voxel storage.
 	 * rendering/material properties are not included.
 	 *
 	 * @param _sceneid Scene whose voxel world is saved.

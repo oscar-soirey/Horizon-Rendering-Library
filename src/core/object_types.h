@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <vector>
 #include <cstdint>
+#include <algorithm>
 
 #include <glm/glm.hpp>
 #include <stb/stb_truetype.h>
@@ -525,19 +526,92 @@ struct HRL_ScreenMessage
   HRL_id font = HRL_INVALID_ID;
 };
 
-// Internal 2D voxel-world storage. The complete voxel array stays on the CPU;
-// the OpenGL backend keeps GPU geometry only for visible chunks.
+// Internal 2D voxel-world storage.
+  //
+  // Voxel data is sparse at chunk granularity: an absent chunk is implicitly
+  // filled with type 0. This is important for large mostly-empty worlds:
+  // dimensions no longer imply a width*height allocation.
 struct HRL_VoxelWorld final {
+  using VoxelChunk = std::vector<HRL_Voxel>;
+
   int width_ = 0;
   int height_ = 0;
   int chunk_size_ = 32;
   float voxel_size_ = 1.0f;
 
-  std::vector<HRL_Voxel> voxels_;
+  std::unordered_map<uint64_t, VoxelChunk> voxel_chunks_;
+
+  static uint64_t MakeVoxelChunkKey(int chunkX, int chunkY)
+  {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(chunkX)) << 32u) |
+      static_cast<uint64_t>(static_cast<uint32_t>(chunkY));
+  }
+
+  const VoxelChunk* FindVoxelChunk(int chunkX, int chunkY) const
+  {
+    const auto it = voxel_chunks_.find(MakeVoxelChunkKey(chunkX, chunkY));
+    return it != voxel_chunks_.end() ? &it->second : nullptr;
+  }
+
+  VoxelChunk* FindVoxelChunk(int chunkX, int chunkY)
+  {
+    auto it = voxel_chunks_.find(MakeVoxelChunkKey(chunkX, chunkY));
+    return it != voxel_chunks_.end() ? &it->second : nullptr;
+  }
+
+  VoxelChunk& EnsureVoxelChunk(int chunkX, int chunkY)
+  {
+    const uint64_t key = MakeVoxelChunkKey(chunkX, chunkY);
+    auto [it, inserted] = voxel_chunks_.try_emplace(key);
+    if (inserted)
+    {
+      const int minX = chunkX * chunk_size_;
+      const int minY = chunkY * chunk_size_;
+      const int chunkW = std::min(chunk_size_, width_ - minX);
+      const int chunkH = std::min(chunk_size_, height_ - minY);
+      it->second.assign(
+        static_cast<size_t>(std::max(0, chunkW)) * static_cast<size_t>(std::max(0, chunkH)),
+        HRL_Voxel{0});
+    }
+    return it->second;
+  }
+
+  HRL_VoxelType GetVoxelType(int x, int y) const
+  {
+    if (x < 0 || y < 0 || x >= width_ || y >= height_)
+      return 0;
+
+    const int chunkX = x / chunk_size_;
+    const int chunkY = y / chunk_size_;
+    const VoxelChunk* chunk = FindVoxelChunk(chunkX, chunkY);
+    if (!chunk)
+      return 0;
+
+    const int localX = x - chunkX * chunk_size_;
+    const int localY = y - chunkY * chunk_size_;
+    const int chunkW = std::min(chunk_size_, width_ - chunkX * chunk_size_);
+    const size_t index = static_cast<size_t>(localY) * static_cast<size_t>(chunkW) +
+      static_cast<size_t>(localX);
+    return (*chunk)[index].type;
+  }
+
+  HRL_VoxelType* GetVoxelTypeMutable(int x, int y)
+  {
+    if (x < 0 || y < 0 || x >= width_ || y >= height_)
+      return nullptr;
+
+    const int chunkX = x / chunk_size_;
+    const int chunkY = y / chunk_size_;
+    VoxelChunk& chunk = EnsureVoxelChunk(chunkX, chunkY);
+    const int localX = x - chunkX * chunk_size_;
+    const int localY = y - chunkY * chunk_size_;
+    const int chunkW = std::min(chunk_size_, width_ - chunkX * chunk_size_);
+    return &chunk[static_cast<size_t>(localY) * static_cast<size_t>(chunkW) +
+      static_cast<size_t>(localX)].type;
+  }
+
   std::unordered_map<HRL_VoxelType, glm::vec4> type_colors_;
 
-  // Sparse user-defined flags associated with voxel types.
-  // A type has no flags by default; HRL does not assign any semantics to them.
   std::unordered_map<HRL_VoxelType, uint32_t> type_collision_flags_;
 
   // Sparse type-level emissive colors. Most voxel types have no entry, so
@@ -546,6 +620,26 @@ struct HRL_VoxelWorld final {
 
   // Chunks whose baked topology no longer matches the CPU data.
   std::unordered_set<uint64_t> dirty_chunks_;
+
+  // Chunks whose GPU representation needs rebuilding. This is deliberately
+  // separate from dirty_chunks_: the latter must remain dirty until the
+  // changes have actually been persisted to disk.
+  std::unordered_set<uint64_t> render_dirty_chunks_;
+
+  // Serialized chunk records retained after a lazy world load.  The payload
+  // stays compressed in serialized_source_ until a chunk becomes visible or
+  // is explicitly accessed. This keeps large worlds cheap to load.
+  struct SerializedChunkRecord
+  {
+    uint8_t encoding = 0;
+    uint8_t bits = 0;
+    std::vector<uint8_t> palette;
+    size_t payload_offset = 0;
+    size_t payload_size = 0;
+    bool deleted = false;
+  };
+  std::vector<uint8_t> serialized_source_;
+  std::unordered_map<uint64_t, SerializedChunkRecord> serialized_chunks_;
 
   // Incremented whenever all chunk geometry must be regenerated (world load or
   // a geometry-affecting configuration change).
@@ -565,6 +659,10 @@ struct HRL_VoxelWorld final {
   // this with each loaded chunk because colors are baked into chunk vertices.
   uint64_t color_revision_ = 1;
 };
+
+// Loads a serialized chunk on demand. Implemented in hrl.cpp and used by
+// rendering backends so disk-loaded worlds stay lazy on the CPU side.
+bool HRL_EnsureVoxelChunkLoaded(HRL_VoxelWorld* world, int chunkX, int chunkY);
 
 //objects//
 typedef struct {

@@ -1021,6 +1021,15 @@ void HRL_EndFrame()
 		UpdateSceneLights(scene_id);
 		g_Backend.RHI_RenderScene(scene, scene_id);
 
+		// Debug primitives are owned by the HRL context, while the backend
+		// renderer has its own private context. Draw them explicitly here so
+		// they are not lost between HRL and RHI_RenderScene().
+		auto debugIt = ctx_.debug_renderers.find(scene_id);
+		if (debugIt != ctx_.debug_renderers.end())
+		{
+			g_Backend.RHI_DrawDebug(debugIt->second, ctx_.debug_line_thickness);
+		}
+
 		// Screenshot requests are captured after the scene has completed its
 		// post-process/UI passes for the frame.
 		auto screenshotIt = ctx_.pending_screenshots.find(scene_id);
@@ -2131,6 +2140,7 @@ static void MarkVoxelChunkDirty(HRL_VoxelWorld* world, int voxelX, int voxelY)
 	const int chunkX = voxelX / world->chunk_size_;
 	const int chunkY = voxelY / world->chunk_size_;
 	world->dirty_chunks_.insert(VoxelChunkKey(chunkX, chunkY));
+	world->render_dirty_chunks_.insert(VoxelChunkKey(chunkX, chunkY));
 
 	// Keep local voxel edits separate from the global geometry revision.
 	// Otherwise changing one voxel makes every visible chunk look stale.
@@ -2145,6 +2155,9 @@ static void MarkVoxelChunkDirty(HRL_VoxelWorld* world, int voxelX, int voxelY)
 static constexpr uint32_t kVoxelWorldSaveMagic = 0x31564C48u; // "HLV1" on little-endian files.
 static constexpr uint16_t kVoxelWorldSaveVersion = 1u;
 static constexpr size_t kVoxelWorldSaveHeaderSize = 28u;
+static constexpr uint32_t kVoxelWorldDeltaMagic = 0x31504448u; // "HDP1" little-endian.
+static constexpr uint16_t kVoxelWorldDeltaVersion = 1u;
+static constexpr uint8_t kVoxelWorldDeltaDeleteEncoding = 0xffu;
 
 enum class VoxelSaveEncoding : uint8_t
 {
@@ -2284,6 +2297,10 @@ static void VoxelSaveAppendPackedIndices(
 	const int minY = chunkY * chunkSize;
 	const int maxX = std::min(minX + chunkSize, world->width_);
 	const int maxY = std::min(minY + chunkSize, world->height_);
+	const int chunkW = maxX - minX;
+	const HRL_VoxelWorld::VoxelChunk* chunk = world->FindVoxelChunk(chunkX, chunkY);
+	if (!chunk || chunkW <= 0)
+		return;
 
 	uint32_t accumulator = 0;
 	unsigned accumulatorBits = 0;
@@ -2291,7 +2308,10 @@ static void VoxelSaveAppendPackedIndices(
 	{
 		for (int x = minX; x < maxX; ++x)
 		{
-			const HRL_VoxelType type = world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x)].type;
+			const int localX = x - minX;
+			const int localY = y - minY;
+			const HRL_VoxelType type = (*chunk)[static_cast<size_t>(localY) * static_cast<size_t>(chunkW) +
+				static_cast<size_t>(localX)].type;
 			const int16_t palette = paletteIndex[type];
 			if (palette < 0) return;
 			accumulator |= static_cast<uint32_t>(palette) << accumulatorBits;
@@ -2318,16 +2338,24 @@ static void VoxelSaveBuildRle(
 	const int minY = chunkY * chunkSize;
 	const int maxX = std::min(minX + chunkSize, world->width_);
 	const int maxY = std::min(minY + chunkSize, world->height_);
+	const int chunkW = maxX - minX;
+	const HRL_VoxelWorld::VoxelChunk* chunk = world->FindVoxelChunk(chunkX, chunkY);
+	if (!chunk || chunkW <= 0)
+		return;
 
 	for (int y = minY; y < maxY; ++y)
 	{
 		int x = minX;
 		while (x < maxX)
 		{
-			const HRL_VoxelType type = world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x)].type;
+			const int localY = y - minY;
+			const int localX = x - minX;
+			const HRL_VoxelType type = (*chunk)[static_cast<size_t>(localY) * static_cast<size_t>(chunkW) +
+				static_cast<size_t>(localX)].type;
 			int run = 1;
 			while (x + run < maxX &&
-				world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x + run)].type == type)
+				(*chunk)[static_cast<size_t>(localY) * static_cast<size_t>(chunkW) +
+					static_cast<size_t>(localX + run)].type == type)
 				++run;
 			out.push_back(type);
 			uint32_t remaining = static_cast<uint32_t>(run);
@@ -2367,11 +2395,18 @@ static bool VoxelSaveBuildChunk(
 	const int minY = chunkY * chunkSize;
 	const int maxX = std::min(minX + chunkSize, world->width_);
 	const int maxY = std::min(minY + chunkSize, world->height_);
+	const int chunkW = maxX - minX;
+	const HRL_VoxelWorld::VoxelChunk* chunk = world->FindVoxelChunk(chunkX, chunkY);
+	if (!chunk || chunkW <= 0)
+		return false;
 	for (int y = minY; y < maxY; ++y)
 	{
 		for (int x = minX; x < maxX; ++x)
 		{
-			const HRL_VoxelType type = world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x)].type;
+			const int localX = x - minX;
+			const int localY = y - minY;
+			const HRL_VoxelType type = (*chunk)[static_cast<size_t>(localY) * static_cast<size_t>(chunkW) +
+				static_cast<size_t>(localX)].type;
 			if (!firstSet) { first = type; firstSet = true; }
 			else if (type != first) uniform = false;
 			if (!seen[type])
@@ -2403,7 +2438,8 @@ static bool VoxelSaveBuildChunk(
 	rawPayload.reserve(static_cast<size_t>(maxX - minX) * static_cast<size_t>(maxY - minY));
 	for (int y = minY; y < maxY; ++y)
 		for (int x = minX; x < maxX; ++x)
-			rawPayload.push_back(world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x)].type);
+			rawPayload.push_back((*chunk)[static_cast<size_t>(y - minY) * static_cast<size_t>(chunkW) +
+				static_cast<size_t>(x - minX)].type);
 
 	std::vector<uint8_t> rlePayload;
 	VoxelSaveBuildRle(world, chunkX, chunkY, rlePayload);
@@ -2436,18 +2472,17 @@ static bool VoxelSaveBuildAll(const HRL_VoxelWorld* world, std::vector<uint8_t>&
 	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->chunk_size_ <= 0 ||
 		!std::isfinite(world->voxel_size_) || world->voxel_size_ <= 0.f)
 		return false;
-	if (world->voxels_.size() != static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_))
+
+	const uint64_t chunkColumns64 =
+		(static_cast<uint64_t>(world->width_) + static_cast<uint64_t>(world->chunk_size_) - 1u) /
+		static_cast<uint64_t>(world->chunk_size_);
+	const uint64_t chunkRows64 =
+		(static_cast<uint64_t>(world->height_) + static_cast<uint64_t>(world->chunk_size_) - 1u) /
+		static_cast<uint64_t>(world->chunk_size_);
+	if (chunkColumns64 == 0 || chunkRows64 == 0 ||
+		chunkColumns64 * chunkRows64 > std::numeric_limits<uint32_t>::max())
 		return false;
 
-	const uint64_t chunkColumns64 = (static_cast<uint64_t>(world->width_) + static_cast<uint64_t>(world->chunk_size_) - 1u) /
-		static_cast<uint64_t>(world->chunk_size_);
-	const uint64_t chunkRows64 = (static_cast<uint64_t>(world->height_) + static_cast<uint64_t>(world->chunk_size_) - 1u) /
-		static_cast<uint64_t>(world->chunk_size_);
-	if (chunkColumns64 == 0 || chunkRows64 == 0 || chunkColumns64 * chunkRows64 > std::numeric_limits<uint32_t>::max())
-		return false;
-
-	std::vector<uint8_t> bytes;
-	bytes.reserve(kVoxelWorldSaveHeaderSize);
 	VoxelSaveWriter writer;
 	writer.WriteU32(kVoxelWorldSaveMagic);
 	writer.WriteU16(kVoxelWorldSaveVersion);
@@ -2458,41 +2493,48 @@ static bool VoxelSaveBuildAll(const HRL_VoxelWorld* world, std::vector<uint8_t>&
 	writer.WriteU32(static_cast<uint32_t>(world->chunk_size_));
 
 	const size_t chunkCountOffset = 24u;
-	writer.WriteU32(0u); // patched after chunks are emitted
+	writer.WriteU32(0u);
 
 	uint32_t nonEmptyChunks = 0;
-	for (uint64_t cy = 0; cy < chunkRows64; ++cy)
-	{
-		for (uint64_t cx = 0; cx < chunkColumns64; ++cx)
-		{
-			const int chunkX = static_cast<int>(cx);
-			const int chunkY = static_cast<int>(cy);
-			VoxelSaveEncoding encoding = VoxelSaveEncoding::Raw;
-			uint8_t bits = 0;
-			std::vector<uint8_t> palette;
-			std::vector<uint8_t> payload;
-			if (!VoxelSaveBuildChunk(world, chunkX, chunkY, encoding, bits, palette, payload))
-				continue; // empty chunk
 
-			if (payload.size() > std::numeric_limits<uint32_t>::max())
-				return false;
-			writer.WriteU32(static_cast<uint32_t>(cy * chunkColumns64 + cx));
-			writer.WriteU8(static_cast<uint8_t>(encoding));
-			writer.WriteU8(bits);
-			writer.WriteU8(static_cast<uint8_t>(palette.size()));
-			writer.WriteU8(0u);
-			writer.WriteU32(static_cast<uint32_t>(payload.size()));
-			writer.WriteBytes(palette.data(), palette.size());
-			writer.WriteBytes(payload.data(), payload.size());
-			++nonEmptyChunks;
-		}
+	// The world is sparse: only chunks that actually contain data exist.
+	// Iterating the complete chunk grid was the main cost for huge empty worlds.
+	for (const auto& [key, chunk] : world->voxel_chunks_)
+	{
+		(void)chunk;
+		const int chunkX = static_cast<int32_t>(key >> 32u);
+		const int chunkY = static_cast<int32_t>(key & 0xffffffffu);
+		if (chunkX < 0 || chunkY < 0 ||
+			static_cast<uint64_t>(chunkX) >= chunkColumns64 ||
+			static_cast<uint64_t>(chunkY) >= chunkRows64)
+			return false;
+
+		VoxelSaveEncoding encoding = VoxelSaveEncoding::Raw;
+		uint8_t bits = 0;
+		std::vector<uint8_t> palette;
+		std::vector<uint8_t> payload;
+		if (!VoxelSaveBuildChunk(world, chunkX, chunkY, encoding, bits, palette, payload))
+			continue;
+
+		if (palette.size() > 255u || payload.size() > std::numeric_limits<uint32_t>::max())
+			return false;
+
+		writer.WriteU32(static_cast<uint32_t>(static_cast<uint64_t>(chunkY) * chunkColumns64 +
+			static_cast<uint64_t>(chunkX)));
+		writer.WriteU8(static_cast<uint8_t>(encoding));
+		writer.WriteU8(bits);
+		writer.WriteU8(static_cast<uint8_t>(palette.size()));
+		writer.WriteU8(0u);
+		writer.WriteU32(static_cast<uint32_t>(payload.size()));
+		writer.WriteBytes(palette.data(), palette.size());
+		writer.WriteBytes(payload.data(), payload.size());
+		++nonEmptyChunks;
 	}
 
-	if (nonEmptyChunks > std::numeric_limits<uint32_t>::max())
-		return false;
 	std::vector<uint8_t> result = writer.Data();
 	if (result.size() < kVoxelWorldSaveHeaderSize)
 		return false;
+
 	const uint32_t count = nonEmptyChunks;
 	result[chunkCountOffset + 0] = static_cast<uint8_t>(count & 0xffu);
 	result[chunkCountOffset + 1] = static_cast<uint8_t>((count >> 8u) & 0xffu);
@@ -2572,6 +2614,49 @@ static bool VoxelSaveDecodeChunk(
 	}
 	return false;
 }
+ }
+
+bool HRL_EnsureVoxelChunkLoaded(HRL_VoxelWorld* world, int chunkX, int chunkY)
+{
+	if (!world || chunkX < 0 || chunkY < 0)
+		return false;
+	if (world->FindVoxelChunk(chunkX, chunkY))
+		return true;
+
+	const uint64_t key = HRL_VoxelWorld::MakeVoxelChunkKey(chunkX, chunkY);
+	auto it = world->serialized_chunks_.find(key);
+	if (it == world->serialized_chunks_.end() || it->second.deleted)
+		return false;
+	const auto& rec = it->second;
+	if (rec.payload_offset > world->serialized_source_.size() ||
+		rec.payload_size > world->serialized_source_.size() - rec.payload_offset)
+		return false;
+
+	const int minX = chunkX * world->chunk_size_;
+	const int minY = chunkY * world->chunk_size_;
+	const int chunkW = std::min(world->chunk_size_, world->width_ - minX);
+	const int chunkH = std::min(world->chunk_size_, world->height_ - minY);
+	if (chunkW <= 0 || chunkH <= 0)
+		return false;
+
+	std::vector<HRL_VoxelType> decoded;
+	if (!VoxelSaveDecodeChunk(world->serialized_source_.data() + rec.payload_offset,
+		rec.payload_size, static_cast<VoxelSaveEncoding>(rec.encoding), rec.bits,
+		rec.palette, chunkW, chunkH, decoded))
+		return false;
+
+	bool nonEmpty = false;
+	for (HRL_VoxelType type : decoded)
+	{
+		if (type != 0) { nonEmpty = true; break; }
+	}
+	if (!nonEmpty)
+		return false;
+
+	auto& chunk = world->EnsureVoxelChunk(chunkX, chunkY);
+	for (size_t i = 0; i < decoded.size(); ++i)
+		chunk[i].type = decoded[i];
+	return true;
 }
 
 void HRL_SetVoxelSize(HRL_id _sceneid, int _width, int _height)
@@ -2583,10 +2668,10 @@ void HRL_SetVoxelSize(HRL_id _sceneid, int _width, int _height)
 		return;
 	}
 
-	size_t elementCount = 0;
-	if (!VoxelWorldElementCount(_width, _height, elementCount))
+	if (_width <= 0 || _height <= 0)
 	{
-		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVoxelSize: width and height must be positive and their product must fit in size_t");
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR,
+			"HRL_SetVoxelSize: width and height must be positive");
 		return;
 	}
 
@@ -2594,8 +2679,11 @@ void HRL_SetVoxelSize(HRL_id _sceneid, int _width, int _height)
 	HRL_VoxelWorld* world = it->second->voxel_world;
 	world->width_ = _width;
 	world->height_ = _height;
-	world->voxels_.assign(elementCount, HRL_Voxel{ 0 });
+	world->voxel_chunks_.clear();
+	world->serialized_source_.clear();
+	world->serialized_chunks_.clear();
 	world->dirty_chunks_.clear();
+	world->render_dirty_chunks_.clear();
 	++world->geometry_revision_;
 	++world->voxel_revision_;
 }
@@ -2609,10 +2697,10 @@ int HRL_CreateVoxelWorld(HRL_id _sceneid, int _width, int _height)
 		return HRL_FALSE;
 	}
 
-	size_t elementCount = 0;
-	if (!VoxelWorldElementCount(_width, _height, elementCount))
+	if (_width <= 0 || _height <= 0)
 	{
-		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateVoxelWorld: width and height must be positive and their product must fit in size_t");
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR,
+			"HRL_CreateVoxelWorld: width and height must be positive");
 		return HRL_FALSE;
 	}
 
@@ -2621,8 +2709,11 @@ int HRL_CreateVoxelWorld(HRL_id _sceneid, int _width, int _height)
 
 	world->width_ = _width;
 	world->height_ = _height;
-	world->voxels_.assign(elementCount, HRL_Voxel{ 0 });
+	world->voxel_chunks_.clear();
+	world->serialized_source_.clear();
+	world->serialized_chunks_.clear();
 	world->dirty_chunks_.clear();
+	world->render_dirty_chunks_.clear();
 	++world->geometry_revision_;
 	++world->voxel_revision_;
 
@@ -2751,8 +2842,44 @@ void HRL_SetVoxelChunkSize(HRL_id _sceneid, int _chunkSize)
 	HRL_VoxelWorld* world = it->second->voxel_world;
 	if (world->chunk_size_ == _chunkSize)
 		return;
+	const int oldChunkSize = world->chunk_size_;
+	auto oldChunks = std::move(world->voxel_chunks_);
+	world->voxel_chunks_.clear();
+	world->serialized_source_.clear();
+	world->serialized_chunks_.clear();
 	world->chunk_size_ = _chunkSize;
+
+	// Re-bucket the sparse storage when the chunk size changes. This is an
+	// explicit configuration operation, so paying the cost once here is much
+	// better than keeping a dense world just to make this case cheap.
+	const int oldChunkColumns = (world->width_ + oldChunkSize - 1) / oldChunkSize;
+	for (const auto& [key, oldChunk] : oldChunks)
+	{
+		const int oldChunkX = static_cast<int32_t>(key >> 32u);
+		const int oldChunkY = static_cast<int32_t>(key & 0xffffffffu);
+		const int oldMinX = oldChunkX * oldChunkSize;
+		const int oldMinY = oldChunkY * oldChunkSize;
+		const int oldChunkW = std::min(oldChunkSize, world->width_ - oldMinX);
+		const int oldChunkH = std::min(oldChunkSize, world->height_ - oldMinY);
+		if (oldChunkX < 0 || oldChunkY < 0 || oldChunkX >= oldChunkColumns ||
+			oldChunkW <= 0 || oldChunkH <= 0)
+			continue;
+
+		for (int y = 0; y < oldChunkH; ++y)
+		{
+			for (int x = 0; x < oldChunkW; ++x)
+			{
+				const HRL_VoxelType type =
+					oldChunk[static_cast<size_t>(y) * static_cast<size_t>(oldChunkW) +
+					static_cast<size_t>(x)].type;
+				if (type == 0)
+					continue;
+				*world->GetVoxelTypeMutable(oldMinX + x, oldMinY + y) = type;
+			}
+		}
+	}
 	world->dirty_chunks_.clear();
+	world->render_dirty_chunks_.clear();
 	++world->geometry_revision_;
 	++world->voxel_revision_;
 }
@@ -2841,24 +2968,72 @@ int HRL_LoadVoxelWorld(HRL_id _sceneid, const HRL_Voxel* _voxels, size_t _count)
 	HRL_VoxelWorld* world = it->second->voxel_world;
 	if (!world || world->width_ <= 0 || world->height_ <= 0)
 	{
-		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorld: call HRL_SetVoxelSize before loading voxel data");
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR,
+			"HRL_LoadVoxelWorld: call HRL_SetVoxelSize before loading voxel data");
 		return HRL_FALSE;
 	}
 
 	size_t expectedCount = 0;
 	if (!VoxelWorldElementCount(world->width_, world->height_, expectedCount) || expectedCount != _count)
 	{
-		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorld: count must equal voxel world width * height");
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR,
+			"HRL_LoadVoxelWorld: count must equal voxel world width * height");
 		return HRL_FALSE;
 	}
 	if (expectedCount > 0 && !_voxels)
 	{
-		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorld: voxel array is null");
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR,
+			"HRL_LoadVoxelWorld: voxel array is null");
 		return HRL_FALSE;
 	}
 
-	world->voxels_.assign(_voxels, _voxels + _count);
+	world->voxel_chunks_.clear();
+	world->serialized_source_.clear();
+	world->serialized_chunks_.clear();
+
+	const int chunkSize = world->chunk_size_;
+	const int chunkColumns = (world->width_ + chunkSize - 1) / chunkSize;
+	const int chunkRows = (world->height_ + chunkSize - 1) / chunkSize;
+
+	// Convert the caller's dense array into the sparse chunk representation.
+	for (int chunkY = 0; chunkY < chunkRows; ++chunkY)
+	{
+		for (int chunkX = 0; chunkX < chunkColumns; ++chunkX)
+		{
+			const int minX = chunkX * chunkSize;
+			const int minY = chunkY * chunkSize;
+			const int chunkW = std::min(chunkSize, world->width_ - minX);
+			const int chunkH = std::min(chunkSize, world->height_ - minY);
+
+			bool nonEmpty = false;
+			for (int y = 0; y < chunkH && !nonEmpty; ++y)
+			{
+				const size_t row = static_cast<size_t>(minY + y) * static_cast<size_t>(world->width_);
+				for (int x = 0; x < chunkW; ++x)
+				{
+					if (_voxels[row + static_cast<size_t>(minX + x)].type != 0)
+					{
+						nonEmpty = true;
+						break;
+					}
+				}
+			}
+			if (!nonEmpty)
+				continue;
+
+			auto& chunk = world->EnsureVoxelChunk(chunkX, chunkY);
+			for (int y = 0; y < chunkH; ++y)
+			{
+				const size_t src = static_cast<size_t>(minY + y) * static_cast<size_t>(world->width_) +
+					static_cast<size_t>(minX);
+				const size_t dst = static_cast<size_t>(y) * static_cast<size_t>(chunkW);
+				std::memcpy(chunk.data() + dst, _voxels + src, static_cast<size_t>(chunkW) * sizeof(HRL_Voxel));
+			}
+		}
+	}
+
 	world->dirty_chunks_.clear();
+	world->render_dirty_chunks_.clear();
 	++world->geometry_revision_;
 	++world->voxel_revision_;
 	return HRL_TRUE;
@@ -2919,7 +3094,8 @@ int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size)
 		return HRL_FALSE;
 	}
 
-	VoxelSaveReader reader(static_cast<const uint8_t*>(_buffer), _size);
+	const auto* bytes = static_cast<const uint8_t*>(_buffer);
+	VoxelSaveReader reader(bytes, _size);
 	uint32_t magic = 0, width = 0, height = 0, chunkSize = 0, chunkCount = 0;
 	uint16_t version = 0, flags = 0;
 	float voxelSize = 0.f;
@@ -2948,12 +3124,6 @@ int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size)
 		return HRL_FALSE;
 	}
 
-	size_t expectedCount = 0;
-	if (!VoxelWorldElementCount(static_cast<int>(width), static_cast<int>(height), expectedCount))
-	{
-		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: world is too large");
-		return HRL_FALSE;
-	}
 	const uint64_t chunkColumns = (static_cast<uint64_t>(width) + chunkSize - 1u) / chunkSize;
 	const uint64_t chunkRows = (static_cast<uint64_t>(height) + chunkSize - 1u) / chunkSize;
 	const uint64_t totalChunks = chunkColumns * chunkRows;
@@ -2963,89 +3133,127 @@ int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size)
 		return HRL_FALSE;
 	}
 
-	std::vector<HRL_Voxel> newVoxels(expectedCount);
-	std::vector<uint8_t> seenChunks(static_cast<size_t>(totalChunks), 0u);
-	for (uint32_t record = 0; record < chunkCount; ++record)
+	// Keep the compressed source around.  The initial load only parses record
+	// metadata; voxel payloads are decoded lazily by the renderer when a chunk
+	// enters the visible streaming set.
+	HRL_VoxelWorld* newWorld = new HRL_VoxelWorld();
+	newWorld->width_ = static_cast<int>(width);
+	newWorld->height_ = static_cast<int>(height);
+	newWorld->voxel_size_ = voxelSize;
+	newWorld->chunk_size_ = static_cast<int>(chunkSize);
+	newWorld->serialized_source_.assign(bytes, bytes + _size);
+
+	auto readRecord = [&](VoxelSaveReader& r, bool allowDelete, bool& ok) -> uint64_t
 	{
+		ok = false;
 		uint32_t chunkIndex = 0;
 		uint8_t encodingByte = 0, bits = 0, paletteCount = 0, reserved = 0;
 		uint32_t payloadSize = 0;
-		if (!reader.ReadU32(chunkIndex) || !reader.ReadU8(encodingByte) || !reader.ReadU8(bits) ||
-			!reader.ReadU8(paletteCount) || !reader.ReadU8(reserved) || !reader.ReadU32(payloadSize))
+		if (!r.ReadU32(chunkIndex) || !r.ReadU8(encodingByte) || !r.ReadU8(bits) ||
+			!r.ReadU8(paletteCount) || !r.ReadU8(reserved) || !r.ReadU32(payloadSize))
+			return 0;
+		if (reserved != 0u || chunkIndex >= totalChunks)
+			return 0;
+		if (encodingByte == kVoxelWorldDeltaDeleteEncoding)
 		{
-			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: truncated chunk record");
-			return HRL_FALSE;
+			if (!allowDelete || bits != 0 || paletteCount != 0 || payloadSize != 0)
+				return 0;
 		}
-		if (reserved != 0u || chunkIndex >= totalChunks || seenChunks[chunkIndex] != 0u)
-		{
-			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid or duplicate chunk");
-			return HRL_FALSE;
-		}
-		seenChunks[chunkIndex] = 1u;
-		if (paletteCount == 0 && encodingByte == static_cast<uint8_t>(VoxelSaveEncoding::Constant))
-		{
-			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: constant chunk has no palette");
-			return HRL_FALSE;
-		}
-		if (encodingByte > static_cast<uint8_t>(VoxelSaveEncoding::Rle))
-		{
-			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: unknown chunk encoding");
-			return HRL_FALSE;
-		}
+		else if (encodingByte > static_cast<uint8_t>(VoxelSaveEncoding::Rle))
+			return 0;
 
-		std::vector<HRL_VoxelType> palette(paletteCount);
+		std::vector<uint8_t> palette(paletteCount);
 		for (uint8_t& value : palette)
-		{
-			if (!reader.ReadU8(value))
-			{
-				SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: truncated palette");
-				return HRL_FALSE;
-			}
-		}
+			if (!r.ReadU8(value)) return 0;
+		const size_t payloadOffset = r.Position();
 		const uint8_t* payload = nullptr;
-		if (!reader.ReadBytes(payload, payloadSize))
-		{
-			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: truncated chunk payload");
-			return HRL_FALSE;
-		}
+		if (!r.ReadBytes(payload, payloadSize)) return 0;
+		(void)payload;
 
 		const uint32_t chunkX = chunkIndex % static_cast<uint32_t>(chunkColumns);
 		const uint32_t chunkY = chunkIndex / static_cast<uint32_t>(chunkColumns);
-		const int minX = static_cast<int>(chunkX * chunkSize);
-		const int minY = static_cast<int>(chunkY * chunkSize);
-		const int chunkW = std::min(static_cast<int>(chunkSize), static_cast<int>(width) - minX);
-		const int chunkH = std::min(static_cast<int>(chunkSize), static_cast<int>(height) - minY);
-		std::vector<HRL_VoxelType> decoded;
-		if (!VoxelSaveDecodeChunk(payload, payloadSize,
-			static_cast<VoxelSaveEncoding>(encodingByte), bits, palette, chunkW, chunkH, decoded))
+		const int chunkW = std::min(static_cast<int>(chunkSize), static_cast<int>(width) - static_cast<int>(chunkX * chunkSize));
+		const int chunkH = std::min(static_cast<int>(chunkSize), static_cast<int>(height) - static_cast<int>(chunkY * chunkSize));
+		if (chunkW <= 0 || chunkH <= 0) return 0;
+		if (encodingByte == static_cast<uint8_t>(VoxelSaveEncoding::Constant) &&
+			(palette.size() != 1 || payloadSize != 0)) return 0;
+		if (encodingByte == static_cast<uint8_t>(VoxelSaveEncoding::Raw) &&
+			(!palette.empty() || payloadSize != static_cast<size_t>(chunkW) * static_cast<size_t>(chunkH))) return 0;
+		if (encodingByte == static_cast<uint8_t>(VoxelSaveEncoding::Palette) &&
+			(palette.empty() || bits == 0 || bits > 8 ||
+			 payloadSize != (static_cast<size_t>(chunkW) * static_cast<size_t>(chunkH) * bits + 7u) / 8u)) return 0;
+
+		const uint64_t key = HRL_VoxelWorld::MakeVoxelChunkKey(static_cast<int>(chunkX), static_cast<int>(chunkY));
+		HRL_VoxelWorld::SerializedChunkRecord rec;
+		rec.encoding = encodingByte;
+		rec.bits = bits;
+		rec.palette = std::move(palette);
+		rec.payload_offset = payloadOffset;
+		rec.payload_size = payloadSize;
+		rec.deleted = encodingByte == kVoxelWorldDeltaDeleteEncoding;
+		newWorld->serialized_chunks_[key] = std::move(rec);
+		ok = true;
+		return key;
+	};
+
+	for (uint32_t record = 0; record < chunkCount; ++record)
+	{
+		bool ok = false;
+		readRecord(reader, false, ok);
+		if (!ok)
 		{
-			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid chunk encoding");
+			delete newWorld;
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid chunk record");
 			return HRL_FALSE;
 		}
-		for (int y = 0; y < chunkH; ++y)
-		{
-			const size_t dst = (static_cast<size_t>(minY + y) * static_cast<size_t>(width)) + static_cast<size_t>(minX);
-			const size_t src = static_cast<size_t>(y) * static_cast<size_t>(chunkW);
-			for (int x = 0; x < chunkW; ++x)
-				newVoxels[dst + static_cast<size_t>(x)].type = decoded[src + static_cast<size_t>(x)];
-		}
-	}
-	if (reader.Remaining() != 0)
-	{
-		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: trailing bytes after chunk data");
-		return HRL_FALSE;
 	}
 
-	EnsureVoxelWorld(_sceneid);
+	// A save to an existing world file is append-only: each delta contains only
+	// chunks changed since the previous save. The last record for a chunk wins.
+	while (reader.Remaining() != 0)
+	{
+		uint32_t deltaMagic = 0, deltaCount = 0;
+		uint16_t deltaVersion = 0, deltaFlags = 0;
+		if (!reader.ReadU32(deltaMagic) || !reader.ReadU16(deltaVersion) || !reader.ReadU16(deltaFlags) ||
+			!reader.ReadU32(deltaCount) || deltaMagic != kVoxelWorldDeltaMagic ||
+			deltaVersion != kVoxelWorldDeltaVersion || deltaFlags != 0u || deltaCount > totalChunks)
+		{
+			delete newWorld;
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid voxel delta section");
+			return HRL_FALSE;
+		}
+		for (uint32_t record = 0; record < deltaCount; ++record)
+		{
+			bool ok = false;
+			readRecord(reader, true, ok);
+			if (!ok)
+			{
+				delete newWorld;
+				SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid voxel delta record");
+				return HRL_FALSE;
+			}
+		}
+	}
+
 	HRL_VoxelWorld* world = it->second->voxel_world;
-	world->width_ = static_cast<int>(width);
-	world->height_ = static_cast<int>(height);
-	world->voxel_size_ = voxelSize;
-	world->chunk_size_ = static_cast<int>(chunkSize);
-	world->voxels_ = std::move(newVoxels);
-	world->dirty_chunks_.clear();
-	++world->geometry_revision_;
-	++world->voxel_revision_;
+	if (!world)
+		world = new HRL_VoxelWorld();
+	const auto colors = std::move(world->type_colors_);
+	const auto collisionFlags = std::move(world->type_collision_flags_);
+	const auto emissiveColors = std::move(world->type_emissive_colors_);
+	const uint64_t geometryRevision = world->geometry_revision_;
+	const uint64_t voxelRevision = world->voxel_revision_;
+	const uint64_t colorRevision = world->color_revision_;
+	newWorld->type_colors_ = colors;
+	newWorld->type_collision_flags_ = collisionFlags;
+	newWorld->type_emissive_colors_ = emissiveColors;
+	newWorld->geometry_revision_ = geometryRevision + 1;
+	newWorld->voxel_revision_ = voxelRevision + 1;
+	newWorld->color_revision_ = colorRevision;
+	newWorld->dirty_chunks_.clear();
+	newWorld->render_dirty_chunks_.clear();
+	it->second->voxel_world = newWorld;
+	delete world;
 	return HRL_TRUE;
 }
 
@@ -3067,7 +3275,40 @@ int HRL_SaveVoxelWorldAllFile(HRL_id _sceneid, const char* _path)
 		return HRL_FALSE;
 	}
 
-	const HRL_VoxelWorld* world = it->second->voxel_world;
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	if (!world || world->width_ <= 0 || world->height_ <= 0 ||
+		world->chunk_size_ <= 0 || !std::isfinite(world->voxel_size_) ||
+		world->voxel_size_ <= 0.0f)
+	{
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_WARNING,
+			"HRL_SaveVoxelWorldAllFile: voxel world is not valid for serialization");
+		return HRL_FALSE;
+	}
+
+	/*
+	 * Always write a complete HLV1 snapshot.
+	 *
+	 * The previous implementation appended HDP1 delta records when the
+	 * destination already contained a matching world. That makes the file
+	 * depend on the complete history of lazy chunks and dirty-chunk state.
+	 * For a full-world save this is unnecessary and, more importantly, makes
+	 * it very easy for a lazy chunk to be missing from the resulting snapshot.
+	 *
+	 * Before building the snapshot, materialize every chunk that still exists
+	 * only in serialized_chunks_. This guarantees that VoxelSaveBuildAll sees
+	 * the complete current world.
+	 */
+	for (const auto& [key, record] : world->serialized_chunks_)
+	{
+		if (record.deleted)
+			continue;
+
+		const int chunkX = static_cast<int32_t>(key >> 32u);
+		const int chunkY = static_cast<int32_t>(key & 0xffffffffu);
+
+		HRL_EnsureVoxelChunkLoaded(world, chunkX, chunkY);
+	}
+
 	std::vector<uint8_t> data;
 	if (!VoxelSaveBuildAll(world, data))
 	{
@@ -3084,22 +3325,21 @@ int HRL_SaveVoxelWorldAllFile(HRL_id _sceneid, const char* _path)
 		return HRL_FALSE;
 	}
 
-	bool ok = true;
-	if (!data.empty())
-		ok = (std::fwrite(data.data(), 1, data.size(), file) == data.size());
-	if (std::fclose(file) != 0)
-		ok = false;
+	const bool wroteAll =
+		data.empty() || std::fwrite(data.data(), 1, data.size(), file) == data.size();
 
-	if (!ok)
+	const bool closed = std::fclose(file) == 0;
+
+	if (!wroteAll || !closed)
 	{
 		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR,
 			"HRL_SaveVoxelWorldAllFile: file write failed");
 		return HRL_FALSE;
 	}
 
+	world->dirty_chunks_.clear();
 	return HRL_TRUE;
 }
-
 
 void HRL_BeginVoxelEdit(HRL_id _sceneid)
 {
@@ -3141,47 +3381,109 @@ void HRL_SetVoxelType(HRL_id _sceneid, int _pos_x, int _pos_y, uint32_t _type)
 			"HRL_SetVoxelType: voxel type must be in range 0..255");
 		return;
 	}
+
 	auto it = ctx_.scenes.find(_sceneid);
 	if (it == ctx_.scenes.end() || !it->second)
 	{
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVoxelType: invalid scene ID");
 		return;
 	}
+
 	HRL_VoxelWorld* world = FindVoxelWorld(_sceneid);
-	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->voxels_.empty())
+	if (!world || world->width_ <= 0 || world->height_ <= 0)
 	{
-		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR, "HRL_SetVoxelType: voxel world is not loaded");
-		return;
-	}
-	if (_pos_x < 0 || _pos_y < 0 || _pos_x >= world->width_ || _pos_y >= world->height_)
-	{
-		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING, "HRL_SetVoxelType: position is outside the voxel world");
+		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_ERROR,
+			"HRL_SetVoxelType: voxel world is not loaded");
 		return;
 	}
 
-	const size_t index = static_cast<size_t>(_pos_y) * static_cast<size_t>(world->width_) + static_cast<size_t>(_pos_x);
-	if (world->voxels_[index].type == _type)
+	if (_pos_x < 0 || _pos_y < 0 || _pos_x >= world->width_ || _pos_y >= world->height_)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_SetVoxelType: position is outside the voxel world");
 		return;
-	world->voxels_[index].type = static_cast<HRL_VoxelType>(_type);
+	}
+
+	const HRL_VoxelType requested = static_cast<HRL_VoxelType>(_type);
+
+	const int chunkX = _pos_x / world->chunk_size_;
+	const int chunkY = _pos_y / world->chunk_size_;
+	const uint64_t key = HRL_VoxelWorld::MakeVoxelChunkKey(chunkX, chunkY);
+
+	// A loaded world keeps off-screen chunks in serialized_chunks_. Before any
+	// write, materialize the target chunk so editing it never replaces an
+	// existing lazy chunk with a newly-created empty one.
+	if (!world->FindVoxelChunk(chunkX, chunkY))
+		HRL_EnsureVoxelChunkLoaded(world, chunkX, chunkY);
+
+	const HRL_VoxelType old = world->GetVoxelType(_pos_x, _pos_y);
+	if (old == requested)
+		return;
+
+	// Always edit the materialized chunk directly, including when setting a
+	// voxel to 0. This changes only the requested voxel.
+	HRL_VoxelType* voxel = world->GetVoxelTypeMutable(_pos_x, _pos_y);
+	if (!voxel)
+		return;
+
+	*voxel = requested;
+
+	if (requested == 0)
+	{
+		auto* chunk = world->FindVoxelChunk(chunkX, chunkY);
+		if (chunk)
+		{
+			bool anyNonEmpty = false;
+			for (const HRL_Voxel& current : *chunk)
+			{
+				if (current.type != 0)
+				{
+					anyNonEmpty = true;
+					break;
+				}
+			}
+
+			if (!anyNonEmpty)
+			{
+				// Keep the empty chunk in voxel_chunks_. This is important:
+				// removing it would make GetVoxelType/EnsureVoxelChunkLoaded
+				// able to fall back to the old serialized chunk.
+				auto serializedIt = world->serialized_chunks_.find(key);
+				if (serializedIt != world->serialized_chunks_.end())
+					serializedIt->second.deleted = true;
+			}
+		}
+	}
+	else
+	{
+		// The current in-memory chunk is authoritative after an edit.
+		// Its old serialized record must not be used as a fallback.
+		auto serializedIt = world->serialized_chunks_.find(key);
+		if (serializedIt != world->serialized_chunks_.end())
+			serializedIt->second.deleted = true;
+	}
+
 	MarkVoxelChunkDirty(world, _pos_x, _pos_y);
 }
 
 uint32_t HRL_GetVoxelType(HRL_id _sceneid, int _pos_x, int _pos_y)
 {
-	const HRL_VoxelWorld* world = nullptr;
 	auto it = ctx_.scenes.find(_sceneid);
 	if (it == ctx_.scenes.end() || !it->second)
 	{
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetVoxelType: invalid scene ID");
 		return 0;
 	}
-	world = it->second->voxel_world;
-	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->voxels_.empty())
+
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	if (!world || world->width_ <= 0 || world->height_ <= 0)
 		return 0;
+
 	if (_pos_x < 0 || _pos_y < 0 || _pos_x >= world->width_ || _pos_y >= world->height_)
 		return 0;
-	const size_t index = static_cast<size_t>(_pos_y) * static_cast<size_t>(world->width_) + static_cast<size_t>(_pos_x);
-	return world->voxels_[index].type;
+
+	HRL_EnsureVoxelChunkLoaded(world, _pos_x / world->chunk_size_, _pos_y / world->chunk_size_);
+	return world->GetVoxelType(_pos_x, _pos_y);
 }
 
 void HRL_SetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type, uint32_t _flags)
@@ -3272,7 +3574,7 @@ int HRL_VoxelCheckCollision(
 	}
 
 	const HRL_VoxelWorld* world = it->second->voxel_world;
-	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->voxels_.empty())
+	if (!world || world->width_ <= 0 || world->height_ <= 0)
 		return HRL_FALSE;
 	if (!std::isfinite(_x) || !std::isfinite(_y) ||
 		!std::isfinite(_width) || !std::isfinite(_height) ||
@@ -3324,9 +3626,7 @@ int HRL_VoxelCheckCollision(
 	{
 		for (int vx = minVX; vx <= maxVX; ++vx)
 		{
-			const size_t index = static_cast<size_t>(vy) * static_cast<size_t>(world->width_) +
-				static_cast<size_t>(vx);
-			const HRL_VoxelType type = world->voxels_[index].type;
+			const HRL_VoxelType type = world->GetVoxelType(vx, vy);
 			const uint32_t voxelFlags = HRL_GetVoxelCollisionFlags(world, type);
 			if (_mask == 0u || (voxelFlags & _mask) == 0u)
 				continue;
@@ -3509,8 +3809,7 @@ int HRL_GetVoxelAtScreenPosition(HRL_id _sceneid, int _loc_x, int _loc_y, int* _
     hrl_scene_t* scene = sceneIt->second;
     HRL_VoxelWorld* world = scene->voxel_world;
     if (!world || world->width_ <= 0 || world->height_ <= 0 ||
-        world->voxel_size_ <= 0.f ||
-        world->voxels_.size() != static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_))
+        world->voxel_size_ <= 0.f)
         return HRL_FALSE;
 
     // A scene can have several viewports. Select the one containing the mouse.

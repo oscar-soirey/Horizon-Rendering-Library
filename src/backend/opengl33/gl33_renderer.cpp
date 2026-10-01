@@ -607,6 +607,11 @@ struct GL33_Backend {
 	std::unordered_map<HRL_id, GL33_Shader*> shaders;
 	std::unordered_map<HRL_id, GL33_Texture*> textures;
 
+	// Sampler object forcing NEAREST min/mag filtering. It is bound over the
+	// texture units while sprites are drawn, so sprites are always pixel-perfect
+	// whatever filter the underlying texture was created/configured with.
+	GLuint nearest_sampler = 0;
+
 	struct MeshLOD_GPU {
 		GLuint vao = 0;
 		GLuint vbo = 0;
@@ -2068,8 +2073,7 @@ static glm::mat4 CalculateVoxelViewportView(const HRL_Viewport* viewport)
 static bool CollectVoxelVisibleChunksForViewport(const HRL_VoxelWorld* world,
 	const HRL_Viewport* viewport, std::unordered_set<uint64_t>& desired)
 {
-	if (!world || world->voxels_.size() != static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_) ||
-		world->width_ <= 0 || world->height_ <= 0 || world->chunk_size_ <= 0 ||
+	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->chunk_size_ <= 0 ||
 		world->voxel_size_ <= 0.f || !viewport || !viewport->camera_)
 		return false;
 
@@ -2232,9 +2236,12 @@ static bool BuildVoxelChunkGeometry(const HRL_VoxelWorld* world, int chunkX, int
     indices.clear();
     emissiveVertices.clear();
     emissiveIndices.clear();
-    if (!world || world->chunk_size_ <= 0 || world->width_ <= 0 || world->height_ <= 0 ||
-        world->voxels_.size() != static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_))
+    if (!world || world->chunk_size_ <= 0 || world->width_ <= 0 || world->height_ <= 0)
         return false;
+
+    // Missing sparse chunks are completely empty.
+    if (!world->FindVoxelChunk(chunkX, chunkY))
+        return true;
 
     const int startX = chunkX * world->chunk_size_;
     const int startY = chunkY * world->chunk_size_;
@@ -2254,8 +2261,18 @@ static bool BuildVoxelChunkGeometry(const HRL_VoxelWorld* world, int chunkX, int
     auto localIndex = [localWidth](int x, int y) -> size_t {
         return static_cast<size_t>(y) * static_cast<size_t>(localWidth) + static_cast<size_t>(x);
     };
-    auto voxelAt = [world](int x, int y) -> uint32_t {
-        return world->voxels_[static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x)].type;
+    const HRL_VoxelWorld::VoxelChunk* chunk = world->FindVoxelChunk(chunkX, chunkY);
+    if (!chunk)
+        return true;
+
+    auto voxelAt = [world, chunk](int x, int y) -> uint32_t {
+        const int cx = x / world->chunk_size_;
+        const int cy = y / world->chunk_size_;
+        const int localX = x - cx * world->chunk_size_;
+        const int localY = y - cy * world->chunk_size_;
+        const int localWidth = std::min(world->chunk_size_, world->width_ - cx * world->chunk_size_);
+        return (*chunk)[static_cast<size_t>(localY) * static_cast<size_t>(localWidth) +
+            static_cast<size_t>(localX)].type;
     };
 
     for (int y = 0; y < localHeight; ++y)
@@ -2431,8 +2448,7 @@ static void SyncVoxelChunks(HRL_id sceneId, const hrl_scene_t* scene)
 		return;
 	}
 	HRL_VoxelWorld* world = scene->voxel_world;
-	if (world->width_ <= 0 || world->height_ <= 0 ||
-		world->voxels_.size() != static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_))
+	if (world->width_ <= 0 || world->height_ <= 0)
 	{
 		DestroyAllVoxelChunks(sceneId);
 		return;
@@ -2451,6 +2467,22 @@ static void SyncVoxelChunks(HRL_id sceneId, const hrl_scene_t* scene)
 		const int chunkX = VoxelChunkXFromKey(key);
 		const int chunkY = VoxelChunkYFromKey(key);
 		auto it = chunks.find(key);
+
+		// CPU-side voxel data is lazy after a disk/buffer load. Materialize only
+		// chunks that are currently visible (plus the visibility margin selected
+		// by CollectVoxelVisibleChunksForViewport).
+		HRL_EnsureVoxelChunkLoaded(world, chunkX, chunkY);
+
+		// Empty chunks have no GPU representation.
+		if (!world->FindVoxelChunk(chunkX, chunkY))
+		{
+			if (it != chunks.end())
+			{
+				DestroyVoxelChunkGPU(it->second);
+				chunks.erase(it);
+			}
+			continue;
+		}
 		if (it == chunks.end())
 		{
 			GL33_Backend::VoxelChunkGPU gpu{};
@@ -2459,11 +2491,11 @@ static void SyncVoxelChunks(HRL_id sceneId, const hrl_scene_t* scene)
 			gpu.geometry_revision = world->geometry_revision_;
 			gpu.color_revision = world->color_revision_;
 			chunks.emplace(key, gpu);
-			world->dirty_chunks_.erase(key);
+			world->render_dirty_chunks_.erase(key);
 			continue;
 		}
 
-		const bool dirty = world->dirty_chunks_.find(key) != world->dirty_chunks_.end();
+		const bool dirty = world->render_dirty_chunks_.find(key) != world->render_dirty_chunks_.end();
 		const bool revisionChanged = it->second.geometry_revision != world->geometry_revision_ ||
 			it->second.color_revision != world->color_revision_;
 		if (dirty || revisionChanged)
@@ -2472,7 +2504,7 @@ static void SyncVoxelChunks(HRL_id sceneId, const hrl_scene_t* scene)
 			{
 				it->second.geometry_revision = world->geometry_revision_;
 				it->second.color_revision = world->color_revision_;
-				world->dirty_chunks_.erase(key);
+				world->render_dirty_chunks_.erase(key);
 			}
 		}
 	}
@@ -4281,6 +4313,14 @@ static void UploadSpriteBatch(const std::vector<SpriteBatchInstance>& instances)
 	glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)required, instances.data());
 }
 
+// Texture units a sprite material can sample from (see BindMaterial).
+static void BindSpriteSamplers(GLuint sampler)
+{
+	for (int unit = 0; unit < 6; ++unit)
+		glBindSampler((GLuint)unit, sampler);
+	glBindSampler((GLuint)AO_TEXTURE_UNIT, sampler);
+}
+
 static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum)
 {
 	struct SpriteItem { HRL_id id; HRL_Mesh* mesh; HRL_Material* material; glm::mat4 model; float distance2; };
@@ -4316,6 +4356,19 @@ static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, con
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	ctx_->bound_material = nullptr;
 	ctx_->bound_shader = nullptr;
+
+	// All sprites use NEAREST filtering (sampler objects override the filter
+	// stored in the texture without modifying textures shared with 3D meshes).
+	if (bck_->nearest_sampler == 0)
+	{
+		glGenSamplers(1, &bck_->nearest_sampler);
+		glSamplerParameteri(bck_->nearest_sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glSamplerParameteri(bck_->nearest_sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glSamplerParameteri(bck_->nearest_sampler, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glSamplerParameteri(bck_->nearest_sampler, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	}
+	BindSpriteSamplers(bck_->nearest_sampler);
+
 	std::vector<SpriteBatchInstance> instances;
 	instances.reserve(std::min<size_t>(sprites.size(), MAX_SPRITE_BATCH_INSTANCES));
 
@@ -4355,6 +4408,10 @@ static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, con
 		}
 		i = end;
 	}
+
+	// Restore the textures' own filtering for everything drawn after sprites.
+	BindSpriteSamplers(0);
+
 	glDepthMask(GL_TRUE);
 	glDisable(GL_BLEND);
 }
@@ -6331,11 +6388,7 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 		voxelCache.color_revision = world->color_revision_;
 		voxelCache.valid = true;
 
-		const size_t expectedCount = (world->width_ > 0 && world->height_ > 0)
-			? static_cast<size_t>(world->width_) * static_cast<size_t>(world->height_)
-			: 0u;
-
-		if (world->voxels_.size() == expectedCount && !world->type_emissive_colors_.empty())
+		if (!world->type_emissive_colors_.empty())
 		{
 			struct VoxelEmitterCandidate
 			{
@@ -6345,13 +6398,21 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 			};
 
 			std::vector<VoxelEmitterCandidate> emitters;
-			emitters.reserve(std::min(expectedCount, static_cast<size_t>(MAX_LIGHTS)));
-			for (int y = 0; y < world->height_; ++y)
+			emitters.reserve(std::min(world->voxel_chunks_.size() * 4u, static_cast<size_t>(MAX_LIGHTS)));
+			for (const auto& [key, chunk] : world->voxel_chunks_)
 			{
-				for (int x = 0; x < world->width_; ++x)
+				const int chunkX = static_cast<int32_t>(key >> 32u);
+				const int chunkY = static_cast<int32_t>(key & 0xffffffffu);
+				const int minX = chunkX * world->chunk_size_;
+				const int minY = chunkY * world->chunk_size_;
+				const int chunkW = std::min(world->chunk_size_, world->width_ - minX);
+				const int chunkH = std::min(world->chunk_size_, world->height_ - minY);
+				for (int y = 0; y < chunkH; ++y)
 				{
-					const size_t index = static_cast<size_t>(y) * static_cast<size_t>(world->width_) + static_cast<size_t>(x);
-					const uint32_t type = world->voxels_[index].type;
+					for (int x = 0; x < chunkW; ++x)
+					{
+						const uint32_t type = chunk[static_cast<size_t>(y) * static_cast<size_t>(chunkW) +
+							static_cast<size_t>(x)].type;
 					if (type == 0)
 						continue;
 
@@ -6371,10 +6432,11 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 					emitter.energy = energy;
 					emitter.color = emissive / energy;
 					emitter.position = glm::vec3(
-						(static_cast<float>(x) + 0.5f) * world->voxel_size_,
-						(static_cast<float>(y) + 0.5f) * world->voxel_size_,
+						(static_cast<float>(minX + x) + 0.5f) * world->voxel_size_,
+						(static_cast<float>(minY + y) + 0.5f) * world->voxel_size_,
 						0.5f * world->voxel_size_);
-					emitters.push_back(emitter);
+						emitters.push_back(emitter);
+					}
 				}
 			}
 
