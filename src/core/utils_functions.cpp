@@ -278,14 +278,17 @@ BitmapResult GenerateSDFBitmap(
 
     // Render at a reasonably high resolution. The resulting distance field can
     // then be minified or magnified by the UI shader without becoming a bitmap.
-    const float generation_size = std::max(font_size, 48.0f);
+    const float generation_size = SDFTextGenerationSize(font_size);
     const float scale = stbtt_ScaleForPixelHeight(font, generation_size);
     int ascent = 0, descent = 0, line_gap = 0;
     stbtt_GetFontVMetrics(font, &ascent, &descent, &line_gap);
 
-    const int padding = std::max(8, static_cast<int>(std::ceil(generation_size * 0.20f)));
+    const int padding = SDFTextPadding(generation_size);
+    // One line = exactly the text size in pixels (ascent - descent), like
+    // Dear ImGui : a label drawn at its real size matches the editor preview.
+    (void)line_gap;
     const float line_height = std::max(1.0f,
-        (static_cast<float>(ascent - descent + line_gap) * scale));
+        (static_cast<float>(ascent - descent) * scale));
 
     std::vector<SDFGlyphPlacement> placements;
     placements.reserve(codepoints.size());

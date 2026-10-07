@@ -144,20 +144,28 @@ HRL_WidgetButton::~HRL_WidgetButton()
 
 void HRL_WidgetButton::SetText(const char* text)
 {
-	text_text_ = text ? text : "";
-	GenerateTextTexture();
+	const char* value = text ? text : "";
+	if (text_text_ == value)
+		return;
+	text_text_ = value;
+	text_dirty_ = true;
 }
 
 void HRL_WidgetButton::SetFont(HRL_id font)
 {
+	if (font_ == font && text_texture_ != HRL_INVALID_ID)
+		return;
 	font_ = font;
-	GenerateTextTexture();
+	text_dirty_ = true;
 }
 
 void HRL_WidgetButton::SetTextSize(float size)
 {
-	text_size_ = std::max(1.0f, size);
-	GenerateTextTexture();
+	size = std::max(1.0f, size);
+	if (text_size_ == size)
+		return;
+	text_size_ = size;
+	text_dirty_ = true;
 }
 
 void HRL_WidgetButton::SetTextTintColor(HRL_EWidgetState state, const glm::vec4& color)
@@ -229,41 +237,17 @@ void HRL_WidgetButton::GetDrawInfos(std::vector<WidgetDrawInfos>& infos)
 		background.r, background.g, background.b, background.w
 	});
 
-	if (text_texture_ == HRL_INVALID_ID || !HRL_IsValidTexture(text_texture_))
-		return;
-
-	int texture_width = 0;
-	int texture_height = 0;
-	HRL_GetTextureSize(text_texture_, &texture_width, &texture_height);
-	if (texture_width <= 0 || texture_height <= 0)
-		return;
-
-	const float available_width_px = std::max(1.0f, GetWidthPixels());
-	const float available_height_px = std::max(1.0f, GetHeightPixels());
-	const float texture_aspect = static_cast<float>(texture_width) / static_cast<float>(texture_height);
-	float text_width_px = std::min(available_width_px, available_height_px * texture_aspect);
-	float text_height_px = text_width_px / texture_aspect;
-	if (text_height_px > available_height_px)
-	{
-		text_height_px = available_height_px;
-		text_width_px = text_height_px * texture_aspect;
-	}
-
-	const float text_sx = text_width_px / viewport_width_;
-	const float text_sy = text_height_px / viewport_height_;
-	const float widget_left = (position_.x * viewport_width_ - GetWidthPixels() * anchor_.x) / viewport_width_;
-	const float widget_top = (position_.y * viewport_height_ - GetHeightPixels() * anchor_.y) / viewport_height_;
-	const float text_px = widget_left + (width / viewport_width_ - text_sx) * 0.5f;
-	const float text_py = widget_top + (height / viewport_height_ - text_sy) * 0.5f;
+	if (text_dirty_)
+		GenerateTextTexture();
 
 	glm::vec4 text_color = text_tint_colors_[state];
 	ApplyAlpha(text_color);
-	infos.push_back({text_px, text_py, text_sx, text_sy, text_texture_,
-		text_color.r, text_color.g, text_color.b, text_color.a, true});
+	PushText(infos, text_texture_, text_text_, text_size_, text_layout_, text_color);
 }
 
 void HRL_WidgetButton::GenerateTextTexture()
 {
+	text_dirty_ = false;
 	if (HRL_IsValidTexture(text_texture_))
 		HRL_DeleteTexture(text_texture_);
 	text_texture_ = HRL_INVALID_ID;
@@ -285,20 +269,28 @@ HRL_WidgetLabel::~HRL_WidgetLabel()
 
 void HRL_WidgetLabel::SetText(const char* text)
 {
-	text_text_ = text ? text : "";
-	GenerateTextTexture();
+	const char* value = text ? text : "";
+	if (text_text_ == value)
+		return;
+	text_text_ = value;
+	text_dirty_ = true;
 }
 
 void HRL_WidgetLabel::SetFont(HRL_id font)
 {
+	if (font_ == font && text_texture_ != HRL_INVALID_ID)
+		return;
 	font_ = font;
-	GenerateTextTexture();
+	text_dirty_ = true;
 }
 
 void HRL_WidgetLabel::SetTextSize(float size)
 {
-	text_size_ = std::max(1.0f, size);
-	GenerateTextTexture();
+	size = std::max(1.0f, size);
+	if (text_size_ == size)
+		return;
+	text_size_ = size;
+	text_dirty_ = true;
 }
 
 void HRL_WidgetLabel::SetTintColor(const glm::vec4& color)
@@ -308,6 +300,7 @@ void HRL_WidgetLabel::SetTintColor(const glm::vec4& color)
 
 void HRL_WidgetLabel::GenerateTextTexture()
 {
+	text_dirty_ = false;
 	if (HRL_IsValidTexture(text_texture_))
 		HRL_DeleteTexture(text_texture_);
 	text_texture_ = HRL_INVALID_ID;
@@ -320,37 +313,113 @@ void HRL_WidgetLabel::GenerateTextTexture()
 
 void HRL_WidgetLabel::GetDrawInfos(std::vector<WidgetDrawInfos>& infos)
 {
-	if (!visible_ || text_texture_ == HRL_INVALID_ID || !HRL_IsValidTexture(text_texture_))
+	if (!visible_)
+		return;
+
+	if (text_dirty_)
+		GenerateTextTexture();
+
+	glm::vec4 color = tint_color_;
+	ApplyAlpha(color);
+	PushText(infos, text_texture_, text_text_, text_size_, text_layout_, color);
+}
+
+// TEXT (labels and buttons)
+void HRL_Widget::PushText(std::vector<WidgetDrawInfos>& infos, HRL_id texture, const std::string& text,
+	float text_size, HRL_ETextLayout layout, const glm::vec4& color) const
+{
+	if (texture == HRL_INVALID_ID || !HRL_IsValidTexture(texture) || color.a <= 0.0f)
 		return;
 
 	int texture_width = 0;
 	int texture_height = 0;
-	HRL_GetTextureSize(text_texture_, &texture_width, &texture_height);
+	HRL_GetTextureSize(texture, &texture_width, &texture_height);
 	if (texture_width <= 0 || texture_height <= 0)
 		return;
 
-	const float available_width_px = std::max(1.0f, GetWidthPixels());
-	const float available_height_px = std::max(1.0f, GetHeightPixels());
-	const float texture_aspect = static_cast<float>(texture_width) / static_cast<float>(texture_height);
-	float text_width_px = std::min(available_width_px, available_height_px * texture_aspect);
-	float text_height_px = text_width_px / texture_aspect;
-	if (text_height_px > available_height_px)
+	// Widget box, in pixels of the viewport.
+	const float box_w = GetWidthPixels();
+	const float box_h = GetHeightPixels();
+	const float box_x = position_.x * viewport_width_ - box_w * anchor_.x;
+	const float box_y = position_.y * viewport_height_ - box_h * anchor_.y;
+	if (box_w <= 0.0f || box_h <= 0.0f)
+		return;
+
+	const float tex_w = static_cast<float>(texture_width);
+	const float tex_h = static_cast<float>(texture_height);
+
+	if (layout == HRL_TEXT_LAYOUT_FIT)
 	{
-		text_height_px = available_height_px;
-		text_width_px = text_height_px * texture_aspect;
+		// Historical behavior : the whole texture scaled into the box, centered.
+		const float aspect = tex_w / tex_h;
+		float w = std::min(box_w, box_h * aspect);
+		float h = w / aspect;
+		if (h > box_h)
+		{
+			h = box_h;
+			w = h * aspect;
+		}
+		WidgetDrawInfos d{};
+		d.px = (box_x + (box_w - w) * 0.5f) / viewport_width_;
+		d.py = (box_y + (box_h - h) * 0.5f) / viewport_height_;
+		d.sx = w / viewport_width_;
+		d.sy = h / viewport_height_;
+		d.texture = texture;
+		d.r = color.r; d.g = color.g; d.b = color.b; d.a = color.a;
+		d.sdf = true;
+		infos.push_back(d);
+		return;
 	}
 
-	const float text_sx = text_width_px / viewport_width_;
-	const float text_sy = text_height_px / viewport_height_;
-	const float widget_left = (position_.x * viewport_width_ - GetWidthPixels() * anchor_.x) / viewport_width_;
-	const float widget_top = (position_.y * viewport_height_ - GetHeightPixels() * anchor_.y) / viewport_height_;
-	glm::vec4 color = tint_color_;
-	ApplyAlpha(color);
-	infos.push_back({
-		widget_left + (GetWidthPixels() / viewport_width_ - text_sx) * 0.5f,
-		widget_top + (GetHeightPixels() / viewport_height_ - text_sy) * 0.5f,
-		text_sx, text_sy, text_texture_,
-		color.r, color.g, color.b, color.a, true});
+	// Real size : the texture was generated at `generation` px per line with a
+	// padding around the text (see GenerateSDFBitmap).
+	const float generation = SDFTextGenerationSize(text_size);
+	const float k = text_size / generation;
+	const float padding = static_cast<float>(SDFTextPadding(generation)) * k;
+	const float quad_w = tex_w * k;
+	const float quad_h = tex_h * k;
+
+	// Text block = the texture without its padding.
+	const float text_w = std::max(0.0f, quad_w - padding * 2.0f);
+	int lines = 1;
+	for (char c : text)
+		if (c == '\n')
+			++lines;
+	const float text_h = static_cast<float>(lines) * text_size;
+
+	float text_x = box_x;
+	float text_y = box_y;
+	if (layout == HRL_TEXT_LAYOUT_CENTER)
+	{
+		text_x = box_x + (box_w - text_w) * 0.5f;
+		text_y = box_y + (box_h - text_h) * 0.5f;
+	}
+
+	// Snapped on whole pixels : sharper text.
+	const float quad_x = std::floor(text_x - padding + 0.5f);
+	const float quad_y = std::floor(text_y - padding + 0.5f);
+
+	// Clipped by the widget box.
+	const float x0 = std::max(quad_x, box_x);
+	const float y0 = std::max(quad_y, box_y);
+	const float x1 = std::min(quad_x + quad_w, box_x + box_w);
+	const float y1 = std::min(quad_y + quad_h, box_y + box_h);
+	if (x1 <= x0 || y1 <= y0)
+		return;
+
+	WidgetDrawInfos d{};
+	d.px = x0 / viewport_width_;
+	d.py = y0 / viewport_height_;
+	d.sx = (x1 - x0) / viewport_width_;
+	d.sy = (y1 - y0) / viewport_height_;
+	d.texture = texture;
+	d.r = color.r; d.g = color.g; d.b = color.b; d.a = color.a;
+	d.sdf = true;
+	d.u0 = (x0 - quad_x) / quad_w;
+	d.u1 = (x1 - quad_x) / quad_w;
+	d.t0 = (y0 - quad_y) / quad_h;
+	d.t1 = (y1 - quad_y) / quad_h;
+	infos.push_back(d);
 }
 
 // IMAGE

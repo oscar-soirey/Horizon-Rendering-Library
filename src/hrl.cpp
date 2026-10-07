@@ -10049,6 +10049,19 @@ void HRL_SetButtonTextFont(HRL_id widget, HRL_id font)
 	}
 }
 
+void HRL_SetButtonTextLayout(HRL_id widget, HRL_ETextLayout layout)
+{
+	if (auto* w = FindTypedWidget<HRL_WidgetButton>(widget, "HRL_SetButtonTextLayout"))
+	{
+		if (layout < HRL_TEXT_LAYOUT_FIT || layout > HRL_TEXT_LAYOUT_CENTER)
+		{
+			SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_SetButtonTextLayout: invalid layout");
+			return;
+		}
+		w->text_layout_ = layout;
+	}
+}
+
 void HRL_SetButtonBackgroundTexture(HRL_id widget, HRL_EWidgetState state, HRL_id texture)
 {
 	if (auto* w = FindTypedWidget<HRL_WidgetButton>(widget, "HRL_SetButtonBackgroundTexture"))
@@ -10123,6 +10136,19 @@ void HRL_SetLabelTintColor(HRL_id widget, float r, float g, float b, float a)
 {
 	if (auto* w = FindTypedWidget<HRL_WidgetLabel>(widget, "HRL_SetLabelTintColor"))
 		w->SetTintColor({r, g, b, a});
+}
+
+void HRL_SetLabelTextLayout(HRL_id widget, HRL_ETextLayout layout)
+{
+	if (auto* w = FindTypedWidget<HRL_WidgetLabel>(widget, "HRL_SetLabelTextLayout"))
+	{
+		if (layout < HRL_TEXT_LAYOUT_FIT || layout > HRL_TEXT_LAYOUT_CENTER)
+		{
+			SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_SetLabelTextLayout: invalid layout");
+			return;
+		}
+		w->text_layout_ = layout;
+	}
 }
 
 // IMAGE WIDGET

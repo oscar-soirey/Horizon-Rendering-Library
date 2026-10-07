@@ -857,6 +857,7 @@ struct GL33_Backend {
 
 	//Widgets
 	GL33_Shader* ui_shader=nullptr;
+	GLuint ui_white_texture = 0; // widgets without texture (created on first use)
 
 	// Cached SDF text textures used by the mesh-info debug overlay.
 	struct DebugMeshInfoTextGPU {
@@ -4535,6 +4536,11 @@ void GL33_Shutdown()
 	}
 
 	delete bck_->ui_shader;
+	if (bck_->ui_white_texture != 0)
+	{
+		glDeleteTextures(1, &bck_->ui_white_texture);
+		bck_->ui_white_texture = 0;
+	}
 	delete bck_->scene_effect_shader;
 	delete bck_->volumetric_cloud_shader;
 	delete bck_->ambient_occlusion_shader;
@@ -6700,24 +6706,42 @@ void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const H
 			if (g.sx <= 0.0f || g.sy <= 0.0f || g.a <= 0.0f)
 				continue;
 
+			// No texture (progress bar, slider, checkbox, plain colors) : a
+			// white texel, so the color is drawn as is. (The albedo fallback
+			// is a grey grid : it made these widgets look broken.)
+			GLuint gl_texture = 0;
 			auto texture_it = bck_->textures.find(g.texture);
-			if (texture_it == bck_->textures.end())
+			if (texture_it != bck_->textures.end())
+				gl_texture = texture_it->second->GetGL_ID();
+			else
 			{
-				auto fallback_it = bck_->textures.find(bck_->fallback_textures[ALBEDO_INT]);
-				if (fallback_it == bck_->textures.end())
-					continue;
-				texture_it = fallback_it;
+				if (bck_->ui_white_texture == 0)
+				{
+					const unsigned char white[4] = {255, 255, 255, 255};
+					glGenTextures(1, &bck_->ui_white_texture);
+					glBindTexture(GL_TEXTURE_2D, bck_->ui_white_texture);
+					glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+				}
+				gl_texture = bck_->ui_white_texture;
 			}
 
 			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, texture_it->second->GetGL_ID());
+			glBindTexture(GL_TEXTURE_2D, gl_texture);
 			bck_->ui_shader->SetInt("uTexture", 0);
 
+			// UV : top of the quad = v 1 (texture convention of the UI).
+			// u0/t0/u1/t1 crop the image (text clipped by its widget).
+			const float vt = 1.0f - g.t0;
+			const float vb = 1.0f - g.t1;
 			const float vertices[16] = {
-				g.px,        g.py,        0.0f, 1.0f,
-				g.px+g.sx,   g.py,        1.0f, 1.0f,
-				g.px+g.sx,   g.py+g.sy,   1.0f, 0.0f,
-				g.px,        g.py+g.sy,   0.0f, 0.0f,
+				g.px,        g.py,        g.u0, vt,
+				g.px+g.sx,   g.py,        g.u1, vt,
+				g.px+g.sx,   g.py+g.sy,   g.u1, vb,
+				g.px,        g.py+g.sy,   g.u0, vb,
 			};
 
 			bck_->ui_shader->SetMat4("projection", ui_proj);

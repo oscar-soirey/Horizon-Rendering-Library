@@ -38,6 +38,18 @@ BitmapResult GenerateBitmap(
 		float bg_r, float bg_g, float bg_b, float bg_a
 );
 
+// SDF text textures are generated at max(font_size, 48) px, with a padding
+// around the text. Widgets use the same numbers to draw a text at its real size.
+inline float SDFTextGenerationSize(float font_size)
+{
+	return font_size > 48.0f ? font_size : 48.0f;
+}
+inline int SDFTextPadding(float generation_size)
+{
+	const int p = static_cast<int>(generation_size * 0.20f + 0.999f);
+	return p > 8 ? p : 8;
+}
+
 // Internal UI text path: generates a single-channel signed distance field stored in RGBA.
 BitmapResult GenerateSDFBitmap(
 		const char* text, stbtt_fontinfo* font,

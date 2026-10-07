@@ -61,6 +61,12 @@ public:
 		float b;
 		float a;
 		bool sdf = false;
+		// Part of the texture shown, top-down (0,0 = top-left of the image).
+		// Used to clip a text by its widget box.
+		float u0 = 0.0f;
+		float t0 = 0.0f;
+		float u1 = 1.0f;
+		float t1 = 1.0f;
 	};
 
 	virtual void GetDrawInfos(std::vector<WidgetDrawInfos>& infos) = 0;
@@ -68,6 +74,11 @@ public:
 protected:
 	bool ContainsMouse() const;
 	void ApplyAlpha(glm::vec4& color) const;
+
+	// Draws an SDF text texture in the widget box with the given layout
+	// (FIT : scaled to the box ; TOP_LEFT / CENTER : real size, clipped).
+	void PushText(std::vector<WidgetDrawInfos>& infos, HRL_id texture, const std::string& text,
+		float text_size, HRL_ETextLayout layout, const glm::vec4& color) const;
 
 	// Position is normalized to the owning viewport (0..1).
 	// Size is expressed through SetScale using the public normalized API, but is
@@ -131,8 +142,12 @@ public:
 	float text_size_ = 15.0f;
 	HRL_id font_ = HRL_INVALID_ID;
 	std::string text_text_;
+	HRL_ETextLayout text_layout_ = HRL_TEXT_LAYOUT_FIT;
 
 private:
+	// The text texture is regenerated once, when drawn, after any change
+	// (text, font, size) : setting the same values again costs nothing.
+	bool text_dirty_ = false;
 	bool pressed_last_frame_ = false;
 	bool click_capture_ = false;
 	bool clickable_ = true;
@@ -152,12 +167,16 @@ public:
 	void SetTextSize(float size);
 	void SetTintColor(const glm::vec4& color);
 
+	HRL_ETextLayout text_layout_ = HRL_TEXT_LAYOUT_FIT;
+
 private:
 	HRL_id text_texture_ = HRL_INVALID_ID;
 	HRL_id font_ = HRL_INVALID_ID;
 	std::string text_text_;
 	float text_size_ = 15.0f;
 	glm::vec4 tint_color_{1.0f};
+	// Regenerated once, when drawn, after any change (see the button).
+	bool text_dirty_ = false;
 };
 
 class HRL_WidgetImage : public HRL_Widget {
