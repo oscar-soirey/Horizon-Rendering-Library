@@ -1,0 +1,2290 @@
+diff --git a/backend/opengl33/gl33_renderer.cpp b/backend/opengl33/gl33_renderer.cpp
+index e132673..1a69c8d 100644
+--- a/backend/opengl33/gl33_renderer.cpp
++++ b/backend/opengl33/gl33_renderer.cpp
+@@ -45,9 +45,8 @@ static void InitTextureAndBindToFBO(GLuint _texture, GLuint _fbo, int width, int
+ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* mesh, const glm::mat4& model);
+ static bool MaterialIsTwoSided(const HRL_Material* material)
+ {
+-	if (!material) return false;
+-	auto it = material->intParams_.find(HRL_MATERIAL_PARAM_TWO_SIDED);
+-	return it != material->intParams_.end() && it->second != 0;
++	// Flag maintenu par HRL_MaterialSetInt/Bool : pas de hash de chaine par draw.
++	return material && material->two_sided_;
+ }
+ 
+ static bool MaterialUsesScreenSpaceDisplacement(const HRL_Material* material);
+@@ -103,7 +102,6 @@ static bool CreateMSAAResources(GL_Scene* scene, int samples);
+ static void ResolveSceneMSAA(GL_Scene* scene);
+ static glm::vec3 GetLightDirection(const HRL_Light* light);
+ static bool EnsureShadowResource(HRL_Light* light);
+-static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution, GL33_Shader* shader, bool pointLight, const glm::vec3& lightPosition, float farPlane, int face);
+ static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum);
+ static void DrawLandscapeShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution, bool pointLight, const glm::vec3& lightPosition, float farPlane, int face);
+ 
+@@ -619,6 +617,9 @@ struct GL33_Backend {
+ 		GLsizei vertex_count = 0;
+ 		GLsizei index_count = 0;
+ 		bool indexed = false;
++		// Numero unique attribue a chaque upload (les noms GL peuvent etre
++		// recycles apres glDelete*). Sert a detecter un changement de geometrie.
++		uint64_t upload_serial = 0;
+ 	};
+ 	struct MeshGPU {
+ 		std::vector<MeshLOD_GPU> levels;
+@@ -657,8 +658,18 @@ struct GL33_Backend {
+ 	// to be rediscovered every frame. Rebuild this cache only when voxel data or
+ 	// voxel lighting configuration changes. This is critical for large worlds:
+ 	// a 4096x4096 empty world must not mean scanning 16.7M voxels every frame.
++	struct VoxelEmitterCandidate
++	{
++		float energy = 0.f;
++		glm::vec3 position{0.f};
++		glm::vec3 color{0.f};
++	};
+ 	struct VoxelLightCache
+ 	{
++		// Emetteurs candidats par chunk (liste vide = chunk scanne sans emetteur).
++		// Une edition ne rescanne que le chunk touche, plus le monde entier.
++		std::unordered_map<uint64_t, std::vector<VoxelEmitterCandidate>> chunk_emitters;
++		const HRL_VoxelWorld* world = nullptr;
+ 		uint64_t geometry_revision = 0;
+ 		uint64_t color_revision = 0;
+ 		uint64_t revision = 0;
+@@ -670,6 +681,12 @@ struct GL33_Backend {
+ 	};
+ 	std::unordered_map<HRL_id, VoxelLightCache> voxel_light_cache;
+ 
++	// Contenu actuel de ubo[UBO_LIGHTS] (scene + signature du VoxelLightCache).
++	// UploadSceneLights ne reecrit les ~40 Ko de l'UBO que s'ils changent.
++	HRL_id light_ubo_scene = HRL_INVALID_ID;
++	uint64_t light_ubo_signature = 0;
++	bool light_ubo_valid = false;
++
+ 	GL33_Shader* voxel_shader = nullptr;
+ 
+ 	struct SkeletalMeshGPU {
+@@ -682,6 +699,7 @@ struct GL33_Backend {
+ 		HRL_uint bone_count = 0;
+ 		bool indexed = false;
+ 		uint64_t uploaded_pose_serial = 0;
++		uint64_t upload_serial = 0;
+ 	};
+ 	std::unordered_map<HRL_id, SkeletalMeshGPU> skeletal_meshes;
+ 
+@@ -733,8 +751,14 @@ struct GL33_Backend {
+ 		GLuint depth_cube = 0;
+ 		int resolution = 0;
+ 		bool is_point = false;
++		// Empreinte de tout ce qui a ete rendu dans cette shadow map (parametres
++		// de la lumiere + casters dans sa zone d'influence). Si elle n'a pas
++		// change, la shadow map est reutilisee telle quelle.
++		uint64_t content_signature = 0;
++		bool content_valid = false;
+ 	};
+ 	std::unordered_map<HRL_id, ShadowGPU> shadow_maps;
++	uint64_t gpu_upload_serial = 0;
+ 	std::unordered_map<HRL_id, std::unordered_map<HRL_id, int>> active_shadow_slots_by_scene;
+ 
+ 	int antialiasing_samples = 1;
+@@ -2011,16 +2035,37 @@ static bool IsMeshVisible(const HRL_Mesh* mesh, const glm::mat4& model, const Fr
+ 	return SphereInsideFrustum(frustum, center, radius);
+ }
+ 
++// Etat laisse par les passes opaques (landscapes, meshes). Remplace l'ancienne
++// "restauration" basee sur glGet* : en profil core, glPolygonMode(GL_FRONT/
++// GL_BACK, ...) est de toute facon invalide (GL_INVALID_ENUM) et ne restaurait
++// rien. On laisse un etat connu : remplissage plein (les passes 2D suivantes
++// en ont besoin) et culling arriere sauf en vue fil de fer.
++static void RestoreOpaqueStageState(bool wireframe)
++{
++	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
++	if (wireframe)
++		glDisable(GL_CULL_FACE);
++	else
++	{
++		glEnable(GL_CULL_FACE);
++		glCullFace(GL_BACK);
++	}
++}
++
+ static bool IsFiniteBounds(const HRL_Mesh* mesh)
+ {
+ 	return mesh && std::isfinite(mesh->bounds_center_.x) && std::isfinite(mesh->bounds_center_.y) &&
+ 		std::isfinite(mesh->bounds_center_.z) && std::isfinite(mesh->bounds_radius_);
+ }
+ 
++// Sommet voxel compact : 24 octets au lieu de 40. Le monde voxel est dans le
++// plan Z=0 avec une normale constante (0,0,1) : la position est envoyee en 2
++// composantes (OpenGL complete z=0, w=1) et la normale passe par une valeur
++// d'attribut generique (glVertexAttrib3f) au lieu d'etre dupliquee par sommet.
++// Le shader voxel est inchange.
+ struct GL33_VoxelVertex
+ {
+-	float position[3];
+-	float normal[3];
++	float position[2];
+ 	float color[4];
+ };
+ 
+@@ -2184,11 +2229,9 @@ static glm::vec4 GetVoxelTypeColor(const HRL_VoxelWorld* world, uint32_t type)
+ {
+     if (!world || type == 0)
+         return glm::vec4(1.f);
+-    const auto it = world->type_colors_.find(type);
+-    if (it == world->type_colors_.end())
++    if (type > HRL_VOXEL_TYPE_MAX)
+         return glm::vec4(1.f);
+-
+-    const glm::vec4 color = it->second;
++    const glm::vec4 color = world->type_colors_[type];
+     return glm::vec4(
+         glm::clamp(color.r, 0.f, 1.f),
+         glm::clamp(color.g, 0.f, 1.f),
+@@ -2200,8 +2243,9 @@ static glm::vec3 GetVoxelTypeEmissiveColor(const HRL_VoxelWorld* world, uint32_t
+ {
+     if (!world || type == 0)
+         return glm::vec3(0.f);
+-    const auto it = world->type_emissive_colors_.find(type);
+-    return it == world->type_emissive_colors_.end() ? glm::vec3(0.f) : glm::max(it->second, glm::vec3(0.f));
++    if (type > HRL_VOXEL_TYPE_MAX)
++        return glm::vec3(0.f);
++    return glm::max(world->type_emissive_colors_[type], glm::vec3(0.f));
+ }
+ 
+ static void AppendVoxelQuad(std::vector<GL33_VoxelVertex>& vertices,
+@@ -2218,10 +2262,6 @@ static void AppendVoxelQuad(std::vector<GL33_VoxelVertex>& vertices,
+         GL33_VoxelVertex vertex{};
+         vertex.position[0] = position[0];
+         vertex.position[1] = position[1];
+-        vertex.position[2] = position[2];
+-        vertex.normal[0] = 0.f;
+-        vertex.normal[1] = 0.f;
+-        vertex.normal[2] = 1.f;
+         std::copy(std::begin(rgba), std::end(rgba), std::begin(vertex.color));
+         vertices.push_back(vertex);
+     }
+@@ -2253,7 +2293,9 @@ static bool BuildVoxelChunkGeometry(const HRL_VoxelWorld* world, int chunkX, int
+         return true;
+ 
+     const size_t cellCount = static_cast<size_t>(localWidth) * static_cast<size_t>(localHeight);
+-    std::vector<uint8_t> used(cellCount, 0u);
++    // Tampon reutilise entre les reconstructions (thread GL unique).
++    static std::vector<uint8_t> used;
++    used.assign(cellCount, 0u);
+     const size_t reserveCells = std::min(cellCount, static_cast<size_t>(1024));
+     vertices.reserve(reserveCells * 2u + 4u);
+     indices.reserve(reserveCells * 3u + 6u);
+@@ -2265,14 +2307,14 @@ static bool BuildVoxelChunkGeometry(const HRL_VoxelWorld* world, int chunkX, int
+     if (!chunk)
+         return true;
+ 
+-    auto voxelAt = [world, chunk](int x, int y) -> uint32_t {
+-        const int cx = x / world->chunk_size_;
+-        const int cy = y / world->chunk_size_;
+-        const int localX = x - cx * world->chunk_size_;
+-        const int localY = y - cy * world->chunk_size_;
+-        const int localWidth = std::min(world->chunk_size_, world->width_ - cx * world->chunk_size_);
+-        return (*chunk)[static_cast<size_t>(localY) * static_cast<size_t>(localWidth) +
+-            static_cast<size_t>(localX)].type;
++    if (chunk->size() < cellCount)
++        return false;
++    // Toutes les lectures restent dans ce chunk : indexation locale directe
++    // (l'ancienne version refaisait deux divisions par voxel lu).
++    const HRL_Voxel* cells = chunk->data();
++    auto voxelAt = [cells, startX, startY, localWidth](int x, int y) -> uint32_t {
++        return cells[static_cast<size_t>(y - startY) * static_cast<size_t>(localWidth) +
++            static_cast<size_t>(x - startX)].type;
+     };
+ 
+     for (int y = 0; y < localHeight; ++y)
+@@ -2354,30 +2396,45 @@ static bool UploadVoxelSubmeshGPU(GLuint& vao, GLuint& vbo, GLuint& ebo,
+     const std::vector<GL33_VoxelVertex>& vertices, const std::vector<HRL_uint>& indices)
+ {
+     if (vertices.empty() || indices.empty())
++    {
++        // Les objets GL existants sont conserves pour une prochaine edition ;
++        // un compteur nul suffit pour que le chunk ne soit pas dessine.
++        vertexCount = 0;
++        indexCount = 0;
+         return true;
++    }
+     if (indices.size() > static_cast<size_t>(std::numeric_limits<GLsizei>::max()) ||
+         vertices.size() > static_cast<size_t>(std::numeric_limits<GLsizei>::max()))
+         return false;
+ 
+-    glGenVertexArrays(1, &vao);
+-    glGenBuffers(1, &vbo);
+-    glGenBuffers(1, &ebo);
+-    if (!vao || !vbo || !ebo)
++    // Reutilise le VAO/VBO/EBO du chunk : une edition ne fait plus
++    // glDelete* + glGen* + reconfiguration complete des attributs.
++    const bool created = vao == 0;
++    if (created)
+     {
+-        DestroyVoxelSubmeshGPU(vao, vbo, ebo, vertexCount, indexCount);
+-        return false;
++        glGenVertexArrays(1, &vao);
++        glGenBuffers(1, &vbo);
++        glGenBuffers(1, &ebo);
++        if (!vao || !vbo || !ebo)
++        {
++            DestroyVoxelSubmeshGPU(vao, vbo, ebo, vertexCount, indexCount);
++            return false;
++        }
+     }
+ 
+     glBindVertexArray(vao);
+     glBindBuffer(GL_ARRAY_BUFFER, vbo);
+     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(GL33_VoxelVertex)), vertices.data(), GL_STATIC_DRAW);
+-    const GLsizei stride = static_cast<GLsizei>(sizeof(GL33_VoxelVertex));
+-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, position)));
+-    glEnableVertexAttribArray(0);
+-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, normal)));
+-    glEnableVertexAttribArray(1);
+-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, color)));
+-    glEnableVertexAttribArray(2);
++    if (created)
++    {
++        const GLsizei stride = static_cast<GLsizei>(sizeof(GL33_VoxelVertex));
++        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, position)));
++        glEnableVertexAttribArray(0);
++        // Attribut 1 (normale) : pas de tableau, valeur generique fixee au dessin.
++        glDisableVertexAttribArray(1);
++        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, color)));
++        glEnableVertexAttribArray(2);
++    }
+     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+     glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indices.size() * sizeof(HRL_uint)), indices.data(), GL_STATIC_DRAW);
+     glBindVertexArray(0);
+@@ -2404,14 +2461,18 @@ static void DestroyVoxelChunkGPU(GL33_Backend::VoxelChunkGPU& gpu)
+ 
+ static bool RebuildVoxelChunk(const HRL_VoxelWorld* world, int chunkX, int chunkY, GL33_Backend::VoxelChunkGPU& gpu)
+ {
+-    std::vector<GL33_VoxelVertex> vertices;
+-    std::vector<HRL_uint> indices;
+-    std::vector<GL33_VoxelVertex> emissiveVertices;
+-    std::vector<HRL_uint> emissiveIndices;
++    // Tampons CPU reutilises d'une reconstruction a l'autre (thread GL unique).
++    static std::vector<GL33_VoxelVertex> vertices;
++    static std::vector<HRL_uint> indices;
++    static std::vector<GL33_VoxelVertex> emissiveVertices;
++    static std::vector<HRL_uint> emissiveIndices;
+     if (!BuildVoxelChunkGeometry(world, chunkX, chunkY, vertices, indices, emissiveVertices, emissiveIndices))
+         return false;
+ 
+-    DestroyVoxelChunkGPU(gpu);
++    // Les buffers GL sont mis a jour en place. L'UBO de lumieres du chunk est
++    // conserve, mais sa liste est recalculee (les bornes du chunk peuvent avoir
++    // change avec la taille des voxels/chunks).
++    gpu.light_revision = 0;
+     if (!UploadVoxelSubmeshGPU(gpu.vao, gpu.vbo, gpu.ebo, gpu.vertex_count, gpu.index_count, vertices, indices))
+     {
+         DestroyVoxelChunkGPU(gpu);
+@@ -2584,6 +2645,8 @@ static void DrawVoxelWorld(HRL_id scene_id, const hrl_scene_t* scene, const Frus
+ 
+ 	GL33_Shader* shader = bck_->voxel_shader;
+ 	shader->Use();
++	// Normale constante des voxels 2D (attribut 1 sans tableau, voir GL33_VoxelVertex).
++	glVertexAttrib3f(1, 0.f, 0.f, 1.f);
+ 	ctx_->shader = shader;
+ 	ctx_->bound_shader = shader;
+ 	ctx_->bound_material = nullptr;
+@@ -3438,6 +3501,10 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
+ 
+ 	GL_Scene* gpu_scene = scene_it->second;
+ 	GLuint scene_fbo = gpu_scene->fbo;
++	// Les uniforms redondants sont filtres dans GL33_Shader. On repart d'un cache
++	// vide a chaque scene pour rester robuste si l'application ecrit elle-meme
++	// des uniforms via glUniform* sur un programme HRL.
++	GL33_Shader::InvalidateAllValueCaches();
+ 	ctx_->current_scene = scene;
+ 	ctx_->current_fog = &scene->fog;
+ 
+@@ -3497,6 +3564,20 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
+ 		g_gl33_gi->UpdateDDGI(scene_id);
+ 	}
+ 
++	// Independant de la camera : calcule une fois par scene, pas par viewport.
++	bool hasScreenSpaceDisplacement = false;
++	for (const auto& [meshId, mesh] : scene->meshes)
++	{
++		(void)meshId;
++		if (!mesh || mesh->material_ == HRL_INVALID_ID) continue;
++		auto matIt = GetPrivateContext()->materials.find(mesh->material_);
++		if (matIt != GetPrivateContext()->materials.end() && MaterialUsesScreenSpaceDisplacement(matIt->second))
++		{
++			hasScreenSpaceDisplacement = true;
++			break;
++		}
++	}
++
+ 	for (const auto& v : scene->viewports)
+ 	{
+ 		if (!v.second || !v.second->camera_)
+@@ -3557,19 +3638,6 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
+ 		// Resolve once so displacement samples a stable scene-color snapshot.
+ 		ResolveSceneMSAA(gpu_scene);
+ 
+-		bool hasScreenSpaceDisplacement = false;
+-		for (const auto& [meshId, mesh] : scene->meshes)
+-		{
+-			(void)meshId;
+-			if (!mesh || mesh->material_ == HRL_INVALID_ID) continue;
+-			auto matIt = GetPrivateContext()->materials.find(mesh->material_);
+-			if (matIt != GetPrivateContext()->materials.end() && MaterialUsesScreenSpaceDisplacement(matIt->second))
+-			{
+-				hasScreenSpaceDisplacement = true;
+-				break;
+-			}
+-		}
+-
+ 		bool displacementRendered = false;
+ 		if (!wireframeDebug && hasScreenSpaceDisplacement && scene->debug_view == HRL_DEBUG_VIEW_NONE &&
+ 			CaptureSceneColorForDisplacement(gpu_scene, bck_->post_textures[0]))
+@@ -3839,10 +3907,17 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* me
+ 		s->SetInt(HRL_MATERIAL_PARAM_TWO_SIDED, 0);
+ 
+ 		for (const auto& [name, value] : mat->intParams_) s->SetInt(name, value);
++		// Cles construites une seule fois : plus d'allocation de std::string par
++		// texture et par changement de materiau.
++		static const std::string kTextureKeys[6] = {
++			tex_uniform_name[0], tex_uniform_name[1], tex_uniform_name[2],
++			tex_uniform_name[3], tex_uniform_name[4], tex_uniform_name[5]
++		};
++		static const std::string kAmbientOcclusionKey = HRL_T_AMBIENT_OCCLUSION;
+ 		for (int i = 0; i < 6; ++i)
+ 		{
+ 			s->SetInt(tex_uniform_name[i], i);
+-			auto itParam = mat->textureParams_.find(std::string(tex_uniform_name[i]));
++			auto itParam = mat->textureParams_.find(kTextureKeys[i]);
+ 			if (itParam == mat->textureParams_.end()) { ApplyFallback(i); continue; }
+ 			auto itTexture = bck_->textures.find(itParam->second);
+ 			if (itTexture == bck_->textures.end()) { ApplyFallback(i); continue; }
+@@ -3851,7 +3926,7 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* me
+ 		}
+ 		s->SetInt(HRL_T_AMBIENT_OCCLUSION, AO_TEXTURE_UNIT);
+ 		glActiveTexture(GL_TEXTURE0 + AO_TEXTURE_UNIT);
+-		auto aoParam = mat->textureParams_.find(std::string(HRL_T_AMBIENT_OCCLUSION));
++		auto aoParam = mat->textureParams_.find(kAmbientOcclusionKey);
+ 		if (aoParam != mat->textureParams_.end())
+ 		{
+ 			auto aoTexture = bck_->textures.find(aoParam->second);
+@@ -3907,8 +3982,8 @@ static void DrawSkySphere(const hrl_scene_t* scene)
+ 	glEnable(GL_CULL_FACE);
+ 	glCullFace(GL_FRONT);
+ 
+-	GLint previousPolygonMode[2] = {GL_FILL, GL_FILL};
+-	glGetIntegerv(GL_POLYGON_MODE, previousPolygonMode);
++	// Pas de glGet* ici : ces requetes peuvent forcer une synchronisation du
++	// driver. Les passes 3D fixent explicitement l'etat dont elles ont besoin.
+ 	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+ 
+ 	bck_->sky_shader->Use();
+@@ -3937,8 +4012,6 @@ static void DrawSkySphere(const hrl_scene_t* scene)
+ 	glDrawElements(GL_TRIANGLES, bck_->sky_index_count, GL_UNSIGNED_INT, nullptr);
+ 	glBindVertexArray(0);
+ 
+-	glPolygonMode(GL_FRONT, previousPolygonMode[0]);
+-	glPolygonMode(GL_BACK, previousPolygonMode[1]);
+ 	glCullFace(GL_BACK);
+ 	glDisable(GL_CULL_FACE);
+ 	glDepthMask(GL_TRUE);
+@@ -3951,8 +4024,7 @@ static bool MaterialUsesScreenSpaceDisplacement(const HRL_Material* material)
+         return false;
+     // The feature is opt-in. Merely assigning a displacement texture must not
+     // change the rendering path; the material must explicitly enable it.
+-    auto enabledParam = material->intParams_.find(HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED);
+-    if (enabledParam == material->intParams_.end() || enabledParam->second == 0)
++    if (!material->ss_displacement_enabled_)
+         return false;
+ 
+     auto texParam = material->textureParams_.find(HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING);
+@@ -4131,12 +4203,8 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
+ 	glDepthMask(GL_TRUE);	glDepthFunc(GL_LESS);
+ 	glDisable(GL_BLEND);
+ 
+-	GLboolean previousCullEnabled = glIsEnabled(GL_CULL_FACE);
+-	GLint previousCullFace = GL_BACK;
+-	glGetIntegerv(GL_CULL_FACE_MODE, &previousCullFace);
+-	GLint previousPolygonMode[2] = {GL_FILL, GL_FILL};
+-	glGetIntegerv(GL_POLYGON_MODE, previousPolygonMode);
+-
++	// Etat fixe explicitement (plus de glIsEnabled/glGetIntegerv, qui peuvent
++	// forcer une synchronisation CPU/GPU dans le driver).
+ 	const bool wireframe = debug_view == HRL_DEBUG_VIEW_WIREFRAME;
+ 	if (wireframe)
+ 	{
+@@ -4149,7 +4217,9 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
+ 	{
+ 		glEnable(GL_CULL_FACE);
+ 		glCullFace(GL_BACK);
++		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+ 	}
++	bool cullEnabled = !wireframe;
+ 
+ 	struct DrawItem {
+ 		HRL_id id;
+@@ -4230,20 +4300,12 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
+ 
+ 	for (const DrawItem& item : visible)
+ 	{
+-		if (!wireframe)
++		// N'emettre glEnable/glDisable que lorsque l'etat change reellement.
++		const bool cull = !wireframe && !MaterialIsTwoSided(item.material);
++		if (cull != cullEnabled)
+ 		{
+-			if (MaterialIsTwoSided(item.material))
+-				glDisable(GL_CULL_FACE);
+-			else
+-			{
+-				glEnable(GL_CULL_FACE);
+-				glCullFace(GL_BACK);
+-			}
+-		}
+-		else
+-		{
+-			glDisable(GL_CULL_FACE);
+-			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
++			if (cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
++			cullEnabled = cull;
+ 		}
+ 		if (!BindMaterial(item.material, item.id, item.mesh, item.model))
+ 			continue;
+@@ -4285,17 +4347,7 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
+ 	}
+ 
+ 	glBindVertexArray(0);
+-	glPolygonMode(GL_FRONT, previousPolygonMode[0]);
+-	glPolygonMode(GL_BACK, previousPolygonMode[1]);
+-	if (previousCullEnabled)
+-	{
+-		glEnable(GL_CULL_FACE);
+-		glCullFace(previousCullFace);
+-	}
+-	else
+-	{
+-		glDisable(GL_CULL_FACE);
+-	}
++	RestoreOpaqueStageState(wireframe);
+ }
+ 
+ 
+@@ -4434,12 +4486,14 @@ static glm::mat4 MakeVFXSystemMatrix(const HRL_VFXSystem* system)
+ 	return m;
+ }
+ 
+-static glm::mat4 MakeVFXParticleModel(const HRL_VFXParticle& p, const glm::mat4& systemMatrix,
++// systemMatrix == nullptr : espace monde (pas de transformation). Le test
++// "matrice == identite" est fait une fois par emetteur et non par particule.
++static glm::mat4 MakeVFXParticleModel(const HRL_VFXParticle& p, const glm::mat4* systemMatrix,
+ 	const glm::mat4& billboardBasis, bool stretched, float stretch)
+ {
+ 	glm::vec3 worldPos = p.position;
+-	if (systemMatrix != glm::mat4(1.f))
+-		worldPos = glm::vec3(systemMatrix * glm::vec4(worldPos, 1.f));
++	if (systemMatrix)
++		worldPos = glm::vec3(*systemMatrix * glm::vec4(worldPos, 1.f));
+ 
+ 	glm::mat4 model = glm::translate(glm::mat4(1.f), worldPos);
+ 	glm::mat4 orient = billboardBasis;
+@@ -4569,9 +4623,12 @@ static void DrawVFX(const hrl_scene_t* scene)
+ 		std::vector<VFXRenderInstance> instances;
+ 	};
+ 
+-	std::vector<Batch> batches;
+-	batches.reserve(16);
+-	std::vector<std::pair<float, VFXRenderInstance>> sorted;
++	// Tampons persistants : plus d'allocation par frame ni de double copie des
++	// instances (on trie des indices, puis on remplit le lot dans l'ordre).
++	static std::vector<Batch> batches;
++	size_t batchCount = 0;
++	static std::vector<VFXRenderInstance> unsorted;
++	static std::vector<std::pair<float, uint32_t>> order;
+ 	const glm::mat4 inverseView = glm::inverse(ctx_->view_mat);
+ 	const glm::mat4 billboardBasis = glm::mat4(glm::mat3(inverseView));
+ 	const glm::vec3 cameraPos = ctx_->viewport->camera_->position_;
+@@ -4581,33 +4638,54 @@ static void DrawVFX(const hrl_scene_t* scene)
+ 		(void)sid;
+ 		if (!system || !system->enabled_) continue;
+ 		const glm::mat4 systemMatrix = MakeVFXSystemMatrix(system);
++		const bool systemIsIdentity = systemMatrix == glm::mat4(1.f);
+ 		for (const auto& [eid, emitter] : system->emitters_)
+ 		{
+ 			(void)eid;
+ 			if (!emitter || !emitter->enabled_ || emitter->render_mode_ == HRL_VFX_RENDER_MESH || emitter->particles_.empty()) continue;
+-			sorted.clear();
+-			sorted.reserve(emitter->particles_.size());
+-			for (const auto& particle : emitter->particles_)
+-			{
+-				VFXRenderInstance inst;
+-				inst.model = MakeVFXParticleModel(
+-					particle,
+-					emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL ? systemMatrix : glm::mat4(1.f),
+-					billboardBasis,
+-					emitter->render_mode_ == HRL_VFX_RENDER_STRETCHED_BILLBOARD,
+-					emitter->stretch_);
+-				inst.color = particle.color;
+-				const glm::vec3 pos = glm::vec3(inst.model[3]);
+-				sorted.emplace_back(glm::dot(pos - cameraPos, pos - cameraPos), inst);
+-			}
+-			if (emitter->blend_mode_ == HRL_VFX_BLEND_ALPHA)
+-				std::stable_sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+-			Batch batch;
++			const glm::mat4* particleSystemMatrix =
++				(emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL && !systemIsIdentity) ? &systemMatrix : nullptr;
++			const bool stretched = emitter->render_mode_ == HRL_VFX_RENDER_STRETCHED_BILLBOARD;
++
++			if (batchCount == batches.size())
++				batches.emplace_back();
++			Batch& batch = batches[batchCount];
+ 			batch.blend = emitter->blend_mode_;
+ 			batch.texture = ResolveVFXTexture(emitter);
+-			batch.instances.reserve(sorted.size());
+-			for (const auto& pair : sorted) batch.instances.push_back(pair.second);
+-			if (!batch.instances.empty()) batches.push_back(std::move(batch));
++			batch.instances.clear();
++
++			if (emitter->blend_mode_ == HRL_VFX_BLEND_ALPHA)
++			{
++				unsorted.clear();
++				order.clear();
++				unsorted.reserve(emitter->particles_.size());
++				order.reserve(emitter->particles_.size());
++				for (const auto& particle : emitter->particles_)
++				{
++					VFXRenderInstance inst;
++					inst.model = MakeVFXParticleModel(particle, particleSystemMatrix, billboardBasis, stretched, emitter->stretch_);
++					inst.color = particle.color;
++					const glm::vec3 pos = glm::vec3(inst.model[3]);
++					order.emplace_back(glm::dot(pos - cameraPos, pos - cameraPos), static_cast<uint32_t>(unsorted.size()));
++					unsorted.push_back(inst);
++				}
++				std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
++				batch.instances.reserve(order.size());
++				for (const auto& entry : order) batch.instances.push_back(unsorted[entry.second]);
++			}
++			else
++			{
++				// Additif / multiplicatif : l'ordre n'a pas d'importance, pas de tri.
++				batch.instances.reserve(emitter->particles_.size());
++				for (const auto& particle : emitter->particles_)
++				{
++					VFXRenderInstance inst;
++					inst.model = MakeVFXParticleModel(particle, particleSystemMatrix, billboardBasis, stretched, emitter->stretch_);
++					inst.color = particle.color;
++					batch.instances.push_back(inst);
++				}
++			}
++			if (!batch.instances.empty()) ++batchCount;
+ 		}
+ 	}
+ 
+@@ -4626,8 +4704,9 @@ static void DrawVFX(const hrl_scene_t* scene)
+ 	glDepthFunc(GL_LESS);
+ 	glDepthMask(GL_FALSE);
+ 
+-	for (auto& batch : batches)
++	for (size_t batchIndex = 0; batchIndex < batchCount; ++batchIndex)
+ 	{
++		const Batch& batch = batches[batchIndex];
+ 		if (batch.instances.empty()) continue;
+ 		glEnable(GL_BLEND);
+ 		switch (batch.blend)
+@@ -4694,7 +4773,8 @@ static void DrawVFX(const hrl_scene_t* scene)
+ 			if (!material || (material->shader_ != HRL_MESH_3D_SHADER))
+ 				continue;
+ 
+-			std::vector<std::pair<float, const HRL_VFXParticle*>> ordered;
++			static std::vector<std::pair<float, const HRL_VFXParticle*>> ordered;
++			ordered.clear();
+ 			ordered.reserve(emitter->particles_.size());
+ 			for (const auto& particle : emitter->particles_)
+ 			{
+@@ -4711,6 +4791,19 @@ static void DrawVFX(const hrl_scene_t* scene)
+ 			else if (emitter->blend_mode_ == HRL_VFX_BLEND_MULTIPLY) glBlendFunc(GL_DST_COLOR, GL_ZERO);
+ 			else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+ 
++			// Texture de surcharge resolue une fois par emetteur.
++			GLuint overrideTexture = 0;
++			if (emitter->texture_ != HRL_INVALID_ID && material->shader_ == HRL_MESH_3D_SHADER)
++			{
++				auto texIt = bck_->textures.find(emitter->texture_);
++				if (texIt != bck_->textures.end() && texIt->second)
++					overrideTexture = texIt->second->GetGL_ID();
++			}
++			// Le materiau est le meme pour toutes les particules : apres le premier
++			// BindMaterial, seuls les uniforms par objet changent (les valeurs
++			// identiques sont filtrees par GL33_Shader). Textures et VAO ne sont
++			// lies qu'une fois.
++			bool emitterStateBound = false;
+ 			for (const auto& entry : ordered)
+ 			{
+ 				const HRL_VFXParticle& particle = *entry.second;
+@@ -4730,21 +4823,23 @@ static void DrawVFX(const hrl_scene_t* scene)
+ 				if (!BindMaterial(material, emitter->id_, &mesh, model)) continue;
+ 				if (ctx_->shader) ctx_->shader->SetVec3("TintColor", glm::vec3(particle.color));
+ 
+-				if (emitter->texture_ != HRL_INVALID_ID && material->shader_ == HRL_MESH_3D_SHADER)
++				if (!emitterStateBound)
+ 				{
+-					auto texIt = bck_->textures.find(emitter->texture_);
+-					if (texIt != bck_->textures.end() && texIt->second)
++					if (overrideTexture != 0)
+ 					{
+ 						glActiveTexture(GL_TEXTURE0);
+-						glBindTexture(GL_TEXTURE_2D, texIt->second->GetGL_ID());
++						glBindTexture(GL_TEXTURE_2D, overrideTexture);
+ 					}
++					glBindVertexArray(gpu->vao);
++					emitterStateBound = true;
+ 				}
+-
+-
+-				glBindVertexArray(gpu->vao);
+ 				if (gpu->indexed && gpu->index_count > 0) glDrawElements(GL_TRIANGLES, gpu->index_count, GL_UNSIGNED_INT, nullptr);
+ 				else glDrawArrays(GL_TRIANGLES, 0, gpu->vertex_count);
+ 			}
++			// La texture de surcharge a remplace celle du materiau sur l'unite 0 :
++			// forcer un rebind complet si un autre emetteur reutilise ce materiau.
++			if (overrideTexture != 0)
++				ctx_->bound_material = nullptr;
+ 		}
+ 	}
+ 
+@@ -5923,51 +6018,12 @@ static glm::mat4 CalculateViewMatrix()
+ //LIGHTS
+ void GL33_UpdateLights(const std::vector<HRL_Light*>& _lights)
+ {
+-	//on commence par creer le tableau de GL_Lights
+-	GL_Light gpu_lights[MAX_LIGHTS]{};
+-	for (int i = 0; i < MAX_LIGHTS; ++i)
+-	{
+-		gpu_lights[i].shadowMatrix = glm::mat4(1.f);
+-		gpu_lights[i].shadowParams = glm::vec4(0.f, 0.f, -1.f, 0.f);
+-		gpu_lights[i].shadowStrength = 1.f;
+-	}
+-	size_t count = 0;
+-
+-	//on rempli le tableau
+-	for (const auto& light: _lights)
+-	{
+-		if (count >= MAX_LIGHTS)
+-		{
+-			break;
+-		}
+-
+-		gpu_lights[count].type = light->type_;
+-		gpu_lights[count].intensity = light->intensity_;
+-		gpu_lights[count].attenuation = light->attenuation_;
+-
+-		gpu_lights[count].innerCutoff = std::cos(glm::radians(light->innerCutoff));
+-
+-		gpu_lights[count].position = light->position_;
+-		gpu_lights[count].outerCutoff = std::cos(glm::radians(light->outerCutoff));
+-
+-		// yaw = rotation.y, pitch = rotation.x
+-		glm::vec3 dir;
+-		dir.x = cos(glm::radians(light->rotation_.y)) * cos(glm::radians(light->rotation_.x));
+-		dir.y = sin(glm::radians(light->rotation_.x));
+-		dir.z = sin(glm::radians(light->rotation_.y)) * cos(glm::radians(light->rotation_.x));
+-		gpu_lights[count].rotation = glm::normalize(dir);
+-
+-		gpu_lights[count].padding3 = 0.f;
+-
+-		gpu_lights[count].color = light->color_;
+-		gpu_lights[count].shadowStrength = light->shadow_strength_;
+-
+-		++count;
+-	}
+-
+-	//on passe les données à opengl
+-	glBindBuffer(GL_UNIFORM_BUFFER, bck_->ubo[UBO_LIGHTS]);
+-	glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)sizeof(gpu_lights), gpu_lights);
++	// Volontairement vide pour OpenGL : GL33_DrawScene -> UploadSceneLights()
++	// reconstruit et envoie l'UBO complet de la scene (lumieres + matrices
++	// d'ombre + emetteurs voxel) juste avant le rendu. L'ancien envoi fait ici
++	// (appele par HRL_EndFrame et par chaque setter de lumiere) etait
++	// systematiquement ecrase : ~40 Ko envoyes pour rien a chaque appel.
++	(void)_lights;
+ }
+ 
+ 
+@@ -6074,57 +6130,188 @@ static bool EnsureShadowResource(HRL_Light* light)
+ 	return true;
+ }
+ 
+-static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution,
+-	GL33_Shader* shader, bool pointLight, const glm::vec3& lightPosition,
+-	float farPlane, int face)
++// Un caster d'ombre prepare une seule fois par scene (matrice modele, bornes,
++// GPU, flag double face) au lieu d'etre recalcule pour chaque lumiere et
++// chaque face de cube map.
++struct ShadowCaster
+ {
+-	if (!scene || !shader)
+-		return;
++	HRL_id id = HRL_INVALID_ID;
++	HRL_Mesh* mesh = nullptr;
++	glm::mat4 model{1.f};
++	glm::vec3 center{0.f};
++	float radius = 0.f;
++	bool hasBounds = false;   // bounds_radius_ > 0 (sinon toujours considere visible)
++	bool twoSided = false;
++	const GL33_Backend::MeshGPU* staticGpu = nullptr;
++	GL33_Backend::SkeletalMeshGPU* skeletalGpu = nullptr;
++};
+ 
+-	GL33_Shader* activeShader = nullptr;
+-	const FrustumPlaneSet frustum = BuildFrustum(lightViewProjection);
++static void HashBytes(uint64_t& hash, const void* data, size_t size)
++{
++	const unsigned char* bytes = static_cast<const unsigned char*>(data);
++	for (size_t i = 0; i < size; ++i)
++	{
++		hash ^= static_cast<uint64_t>(bytes[i]);
++		hash *= 1099511628211ull;
++	}
++}
++
++template <typename T>
++static void HashValue(uint64_t& hash, const T& value)
++{
++	HashBytes(hash, &value, sizeof(T));
++}
++
++static void CollectShadowCasters(hrl_scene_t* scene, std::vector<ShadowCaster>& out)
++{
++	out.clear();
++	HRL_Context* context = GetPrivateContext();
+ 	for (const auto& [id, mesh] : scene->meshes)
+ 	{
+ 		if (!mesh || mesh->type_ == HRL_SPRITE)
+ 			continue;
+ 
+-		const bool skeletal = mesh->type_ == HRL_3D_SKELETAL_MESH;
+-		GL33_Backend::SkeletalMeshGPU* skeletalGpu = nullptr;
+-		const GL33_Backend::MeshLOD_GPU* staticGpu = nullptr;
+-		if (skeletal)
++		ShadowCaster caster;
++		caster.id = id;
++		caster.mesh = mesh;
++		if (mesh->type_ == HRL_3D_SKELETAL_MESH)
+ 		{
+ 			auto it = bck_->skeletal_meshes.find(id);
+ 			if (it == bck_->skeletal_meshes.end() || it->second.vao == 0)
+ 				continue;
+-			skeletalGpu = &it->second;
+-			UploadSkeletalBones(static_cast<HRL_SkeletalMesh*>(mesh), *skeletalGpu);
++			caster.skeletalGpu = &it->second;
++			UploadSkeletalBones(static_cast<HRL_SkeletalMesh*>(mesh), *caster.skeletalGpu);
+ 		}
+ 		else
+ 		{
+ 			auto it = bck_->meshes.find(id);
+ 			if (it == bck_->meshes.end())
+ 				continue;
+-			const glm::mat4 model = CalculateModelMatrix(mesh);
+-			if (pointLight)
+-			{
+-				const glm::vec3 center = glm::vec3(model * glm::vec4(mesh->bounds_center_, 1.f));
+-				const float maxScale = std::max({std::abs(mesh->scale_.x), std::abs(mesh->scale_.y), std::abs(mesh->scale_.z)});
+-				const float radius = mesh->bounds_radius_ * std::max(maxScale, 1e-6f);
+-				const float limit = farPlane + radius;
+-				if (glm::dot(center - lightPosition, center - lightPosition) > limit * limit)
+-					continue;
+-			}
+-			else if (!IsMeshVisible(mesh, model, frustum))
+-				continue;
+-			const int lodLevel = SelectMeshLOD(mesh, model, lightView, lightProjection, (float)shadowResolution);
+-			staticGpu = GetMeshLOD_GPU(it->second, lodLevel);
+-			if (!staticGpu)
++			caster.staticGpu = &it->second;
++		}
++
++		caster.model = CalculateModelMatrix(mesh);
++		caster.hasBounds = mesh->bounds_radius_ > 0.f;
++		caster.center = glm::vec3(caster.model * glm::vec4(mesh->bounds_center_, 1.f));
++		const float maxScale = std::max({std::abs(mesh->scale_.x), std::abs(mesh->scale_.y), std::abs(mesh->scale_.z)});
++		caster.radius = mesh->bounds_radius_ * std::max(maxScale, 1e-6f);
++		const auto materialIt = context->materials.find(mesh->material_);
++		caster.twoSided = materialIt != context->materials.end() && MaterialIsTwoSided(materialIt->second);
++		out.push_back(caster);
++	}
++}
++
++// Filtre les casters qui peuvent affecter une lumiere (meme regles que
++// l'ancien code : portee pour une point light, frustum pour les autres ;
++// les meshes skinnes ne sont jamais rejetes car leurs bornes ne suivent pas
++// l'animation).
++static void SelectLightCasters(const std::vector<ShadowCaster>& all, bool pointLight,
++	const glm::vec3& lightPosition, float farPlane, const FrustumPlaneSet& frustum,
++	std::vector<const ShadowCaster*>& out)
++{
++	out.clear();
++	for (const ShadowCaster& caster : all)
++	{
++		if (caster.skeletalGpu)
++		{
++			out.push_back(&caster);
++			continue;
++		}
++		if (pointLight)
++		{
++			const float limit = farPlane + caster.radius;
++			const glm::vec3 d = caster.center - lightPosition;
++			if (glm::dot(d, d) > limit * limit)
+ 				continue;
+ 		}
++		else if (caster.hasBounds && !SphereInsideFrustum(frustum, caster.center, caster.radius))
++			continue;
++		out.push_back(&caster);
++	}
++}
+ 
+-		const glm::mat4 model = CalculateModelMatrix(mesh);
+-		if (!skeletal && !pointLight && !IsMeshVisible(mesh, model, frustum))
++static uint64_t ComputeShadowSignature(const hrl_scene_t* scene, const HRL_Light* light,
++	const GL33_Backend::ShadowGPU& shadow, const std::vector<const ShadowCaster*>& casters)
++{
++	uint64_t hash = 1469598103934665603ull;
++	HashValue(hash, light->type_);
++	HashValue(hash, light->position_);
++	HashValue(hash, light->rotation_);
++	HashValue(hash, light->outerCutoff);
++	HashValue(hash, shadow.resolution);
++	HashValue(hash, shadow.fbo);
++	HashValue(hash, casters.size());
++	for (const ShadowCaster* caster : casters)
++	{
++		HashValue(hash, caster->id);
++		HashValue(hash, caster->model);
++		HashValue(hash, caster->twoSided);
++		if (caster->skeletalGpu)
++		{
++			HashValue(hash, caster->skeletalGpu->upload_serial);
++			HashValue(hash, static_cast<const HRL_SkeletalMesh*>(caster->mesh)->pose_serial_);
++		}
++		else if (caster->staticGpu)
++		{
++			HashValue(hash, caster->staticGpu->levels.size());
++			for (const auto& level : caster->staticGpu->levels)
++				HashValue(hash, level.upload_serial);
++			// Reglages qui influencent le choix du LOD dans la shadow map.
++			HashValue(hash, caster->mesh->lod_automatic_);
++			HashValue(hash, caster->mesh->lod_override_);
++			HashValue(hash, caster->mesh->lod_mode_);
++			HashValue(hash, caster->mesh->lod_screen_threshold_);
++			HashValue(hash, caster->mesh->lod_base_distance_);
++		}
++	}
++	// Les landscapes sont peu nombreux : on les inclut tous.
++	for (const auto& [id, landscape] : scene->landscapes)
++	{
++		if (!landscape)
+ 			continue;
++		HashValue(hash, id);
++		HashValue(hash, landscape->revision_);
++		HashValue(hash, landscape->position_);
++		HashValue(hash, landscape->rotation_);
++		HashValue(hash, landscape->scale_);
++		HashValue(hash, landscape->material_);
++		auto gpuIt = bck_->landscapes.find(id);
++		if (gpuIt != bck_->landscapes.end())
++			HashValue(hash, gpuIt->second.geometry.upload_serial);
++		auto matIt = GetPrivateContext()->materials.find(landscape->material_);
++		const bool twoSided = matIt != GetPrivateContext()->materials.end() && MaterialIsTwoSided(matIt->second);
++		HashValue(hash, twoSided);
++	}
++	return hash;
++}
++
++static void RenderShadowCasters(hrl_scene_t* scene, const std::vector<const ShadowCaster*>& casters,
++	const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution,
++	GL33_Shader* shader, bool pointLight, const glm::vec3& lightPosition,
++	float farPlane, int face)
++{
++	if (!scene || !shader)
++		return;
++
++	GL33_Shader* activeShader = nullptr;
++	const FrustumPlaneSet frustum = BuildFrustum(lightViewProjection);
++	// PrepareSceneShadows entre ici avec GL_CULL_FACE actif et glCullFace(GL_FRONT).
++	bool cullEnabled = true;
++	for (const ShadowCaster* caster : casters)
++	{
++		const bool skeletal = caster->skeletalGpu != nullptr;
++		const GL33_Backend::MeshLOD_GPU* staticGpu = nullptr;
++		if (!skeletal)
++		{
++			// Culling par face de cube map (ou frustum de la lumiere). Les
++			// meshes sans bornes restent toujours dessines, comme avant.
++			if (caster->hasBounds && !SphereInsideFrustum(frustum, caster->center, caster->radius))
++				continue;
++			const int lodLevel = SelectMeshLOD(caster->mesh, caster->model, lightView, lightProjection, (float)shadowResolution);
++			staticGpu = GetMeshLOD_GPU(*caster->staticGpu, lodLevel);
++			if (!staticGpu)
++				continue;
++		}
+ 
+ 		GL33_Shader* meshShader = shader;
+ 		if (skeletal)
+@@ -6140,25 +6327,22 @@ static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewPr
+ 			meshShader->SetFloat("farPlane", farPlane);
+ 			activeShader = meshShader;
+ 		}
+-		meshShader->SetMat4("model", model);
+-		const auto shadowMaterialIt = GetPrivateContext()->materials.find(mesh->material_);
+-		const bool shadowTwoSided = shadowMaterialIt != GetPrivateContext()->materials.end() && MaterialIsTwoSided(shadowMaterialIt->second);
+-		if (shadowTwoSided)
+-			glDisable(GL_CULL_FACE);
+-		else
++		meshShader->SetMat4("model", caster->model);
++		const bool cull = !caster->twoSided;
++		if (cull != cullEnabled)
+ 		{
+-			glEnable(GL_CULL_FACE);
+-			glCullFace(GL_FRONT);
++			if (cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
++			cullEnabled = cull;
+ 		}
+ 
+ 		if (skeletal)
+ 		{
+-			glBindBufferBase(GL_UNIFORM_BUFFER, 1, skeletalGpu->bone_ubo);
+-			glBindVertexArray(skeletalGpu->vao);
+-			if (skeletalGpu->indexed)
+-				glDrawElements(GL_TRIANGLES, skeletalGpu->index_count, GL_UNSIGNED_INT, nullptr);
++			glBindBufferBase(GL_UNIFORM_BUFFER, 1, caster->skeletalGpu->bone_ubo);
++			glBindVertexArray(caster->skeletalGpu->vao);
++			if (caster->skeletalGpu->indexed)
++				glDrawElements(GL_TRIANGLES, caster->skeletalGpu->index_count, GL_UNSIGNED_INT, nullptr);
+ 			else
+-				glDrawArrays(GL_TRIANGLES, 0, skeletalGpu->vertex_count);
++				glDrawArrays(GL_TRIANGLES, 0, caster->skeletalGpu->vertex_count);
+ 		}
+ 		else
+ 		{
+@@ -6169,6 +6353,9 @@ static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewPr
+ 				glDrawArrays(GL_TRIANGLES, 0, staticGpu->vertex_count);
+ 		}
+ 	}
++	// DrawLandscapeShadowCasters suppose le meme etat d'entree.
++	glEnable(GL_CULL_FACE);
++	glCullFace(GL_FRONT);
+ 	DrawLandscapeShadowCasters(scene, lightViewProjection, lightView, lightProjection, shadowResolution, pointLight, lightPosition, farPlane, face);
+ 	glBindVertexArray(0);
+ 	(void)face;
+@@ -6185,6 +6372,11 @@ static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id)
+ 		return;
+ 	activeSlots.clear();
+ 
++	// Casters prepares une fois pour toutes les lumieres de la scene.
++	static std::vector<ShadowCaster> allCasters;
++	static std::vector<const ShadowCaster*> lightCasters;
++	CollectShadowCasters(scene, allCasters);
++
+ 	int slot = 0;
+ 	for (const auto& [id, light] : scene->lights)
+ 	{
+@@ -6198,65 +6390,23 @@ static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id)
+ 			continue;
+ 
+ 		const int resolution = shadowIt->second.resolution;
+-		glBindFramebuffer(GL_FRAMEBUFFER, shadowIt->second.fbo);
+-		glViewport(0, 0, resolution, resolution);
+-		glEnable(GL_DEPTH_TEST);
+-		glDepthMask(GL_TRUE);
+-		glDepthFunc(GL_LESS);
+-		glDisable(GL_BLEND);
+-		glEnable(GL_CULL_FACE);
+-		glCullFace(GL_FRONT);
+-		// Point-light shadows use a manually computed linear radial depth in the
+-		// fragment shader. Large polygon offsets in this space can visibly detach
+-		// the shadow from the caster ("double"/ghosted silhouettes), especially
+-		// on animated meshes. Receiver-side bias is applied in the lighting shader.
+-		// Keep the existing polygon offset for projected 2D shadow maps.
+-		if (light->type_ == HRL_POINT_LIGHT)
+-			glDisable(GL_POLYGON_OFFSET_FILL);
+-		else
+-		{
+-			glEnable(GL_POLYGON_OFFSET_FILL);
+-			glPolygonOffset(2.0f, 4.0f);
+-		}
+-
+-		if (light->type_ == HRL_POINT_LIGHT)
++		const bool isPoint = light->type_ == HRL_POINT_LIGHT;
++
++		// Matrices de la lumiere (identiques a l'ancien code).
++		constexpr float pointNearPlane = 0.05f;
++		constexpr float pointFarPlane = 100.f;
++		glm::mat4 lightView(1.f);
++		glm::mat4 projection(1.f);
++		if (isPoint)
+ 		{
+-			constexpr float nearPlane = 0.05f;
+-			constexpr float farPlane = 100.f;
+-			const glm::mat4 projection = glm::perspective(glm::radians(90.f), 1.f, nearPlane, farPlane);
+-			const glm::vec3 pos = light->position_;
+-			const std::array<glm::vec3, 6> directions = {
+-				glm::vec3( 1, 0, 0), glm::vec3(-1, 0, 0),
+-				glm::vec3( 0, 1, 0), glm::vec3( 0,-1, 0),
+-				glm::vec3( 0, 0, 1), glm::vec3( 0, 0,-1)
+-			};
+-			const std::array<glm::vec3, 6> ups = {
+-				glm::vec3(0,-1,0), glm::vec3(0,-1,0),
+-				glm::vec3(0,0,1), glm::vec3(0,0,-1),
+-				glm::vec3(0,-1,0), glm::vec3(0,-1,0)
+-			};
+-			for (int face = 0; face < 6; ++face)
+-			{
+-				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+-					GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, shadowIt->second.depth_cube, 0);
+-				glClear(GL_DEPTH_BUFFER_BIT);
+-				const glm::mat4 view = glm::lookAt(pos, pos + directions[face], ups[face]);
+-				RenderShadowCasters(scene, projection * view, view, projection, resolution, bck_->shadow_point_shader, true, pos, farPlane, face);
+-			}
++			projection = glm::perspective(glm::radians(90.f), 1.f, pointNearPlane, pointFarPlane);
+ 		}
+ 		else
+ 		{
+ 			const glm::vec3 lightDir = GetLightDirection(light);
+-			glm::vec3 center(0.f);
+-			if (light->type_ == HRL_SPOT_LIGHT)
+-				center = light->position_;
+-			else
+-				center = glm::vec3(0.f);
+-
++			const glm::vec3 center = (light->type_ == HRL_SPOT_LIGHT) ? light->position_ : glm::vec3(0.f);
+ 			glm::vec3 up = std::abs(glm::dot(lightDir, glm::vec3(0,1,0))) > 0.98f
+ 				? glm::vec3(0,0,1) : glm::vec3(0,1,0);
+-			glm::mat4 lightView;
+-			glm::mat4 projection;
+ 			if (light->type_ == HRL_SPOT_LIGHT)
+ 			{
+ 				const float outerAngle = glm::clamp(light->outerCutoff, 1.f, 89.0f);
+@@ -6269,14 +6419,77 @@ static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id)
+ 				projection = glm::ortho(-60.f, 60.f, -60.f, 60.f, 0.1f, 200.f);
+ 				lightView = glm::lookAt(lightPosition, center, up);
+ 			}
+-			const glm::mat4 shadowClip = projection * lightView;
+-			// Shadow rasterization needs clip-space coordinates (-1..1). The 0..1
+-			// bias transform belongs only to the sampling matrix used by the lit shader.
+-			RenderShadowCasters(scene, shadowClip, lightView, projection, resolution, bck_->shadow_2d_shader, false, light->position_, 0.f, -1);
+ 		}
++		const glm::mat4 shadowClip = projection * lightView;
+ 
+-		glDisable(GL_POLYGON_OFFSET_FILL);
+-		glCullFace(GL_BACK);
++		SelectLightCasters(allCasters, isPoint, light->position_, pointFarPlane,
++			BuildFrustum(shadowClip), lightCasters);
++
++		// Le contenu de cette shadow map est-il deja a jour ? Deplacer un objet
++		// hors de la zone d'influence d'une lumiere ne la re-rend plus.
++		const uint64_t signature = ComputeShadowSignature(scene, light, shadowIt->second, lightCasters);
++		const bool upToDate = shadowIt->second.content_valid && shadowIt->second.content_signature == signature;
++
++		if (!upToDate)
++		{
++			glBindFramebuffer(GL_FRAMEBUFFER, shadowIt->second.fbo);
++			glViewport(0, 0, resolution, resolution);
++			glEnable(GL_DEPTH_TEST);
++			glDepthMask(GL_TRUE);
++			glDepthFunc(GL_LESS);
++			glDisable(GL_BLEND);
++			glEnable(GL_CULL_FACE);
++			glCullFace(GL_FRONT);
++			// Point-light shadows use a manually computed linear radial depth in the
++			// fragment shader. Large polygon offsets in this space can visibly detach
++			// the shadow from the caster ("double"/ghosted silhouettes), especially
++			// on animated meshes. Receiver-side bias is applied in the lighting shader.
++			// Keep the existing polygon offset for projected 2D shadow maps.
++			if (isPoint)
++				glDisable(GL_POLYGON_OFFSET_FILL);
++			else
++			{
++				glEnable(GL_POLYGON_OFFSET_FILL);
++				glPolygonOffset(2.0f, 4.0f);
++			}
++
++			if (isPoint)
++			{
++				const glm::vec3 pos = light->position_;
++				const std::array<glm::vec3, 6> directions = {
++					glm::vec3( 1, 0, 0), glm::vec3(-1, 0, 0),
++					glm::vec3( 0, 1, 0), glm::vec3( 0,-1, 0),
++					glm::vec3( 0, 0, 1), glm::vec3( 0, 0,-1)
++				};
++				const std::array<glm::vec3, 6> ups = {
++					glm::vec3(0,-1,0), glm::vec3(0,-1,0),
++					glm::vec3(0,0,1), glm::vec3(0,0,-1),
++					glm::vec3(0,-1,0), glm::vec3(0,-1,0)
++				};
++				for (int face = 0; face < 6; ++face)
++				{
++					glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
++						GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, shadowIt->second.depth_cube, 0);
++					glClear(GL_DEPTH_BUFFER_BIT);
++					const glm::mat4 view = glm::lookAt(pos, pos + directions[face], ups[face]);
++					RenderShadowCasters(scene, lightCasters, projection * view, view, projection, resolution,
++						bck_->shadow_point_shader, true, pos, pointFarPlane, face);
++				}
++			}
++			else
++			{
++				glClear(GL_DEPTH_BUFFER_BIT);
++				// Shadow rasterization needs clip-space coordinates (-1..1). The 0..1
++				// bias transform belongs only to the sampling matrix used by the lit shader.
++				RenderShadowCasters(scene, lightCasters, shadowClip, lightView, projection, resolution,
++					bck_->shadow_2d_shader, false, light->position_, 0.f, -1);
++			}
++
++			glDisable(GL_POLYGON_OFFSET_FILL);
++			glCullFace(GL_BACK);
++			shadowIt->second.content_signature = signature;
++			shadowIt->second.content_valid = true;
++		}
+ 		++slot;
+ 		activeSlots[id] = slot - 1;
+ 	}
+@@ -6375,76 +6588,147 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
+ 	if (!world || world->voxel_size_ <= 0.f)
+ 	{
+ 		voxelCache.lights.clear();
++		voxelCache.chunk_emitters.clear();
++		voxelCache.world = nullptr; // force un scan complet quand le monde redevient valide
+ 		voxelCache.valid = true;
+ 		voxelCache.geometry_revision = world ? world->voxel_revision_ : 0;
+ 		voxelCache.color_revision = world ? world->color_revision_ : 0;
+ 	}
+-	else if (!voxelCache.valid ||
+-		voxelCache.geometry_revision != world->voxel_revision_ ||
+-		voxelCache.color_revision != world->color_revision_)
++	else
+ 	{
+-		voxelCache.lights.clear();
+-		voxelCache.geometry_revision = world->voxel_revision_;
+-		voxelCache.color_revision = world->color_revision_;
+-		voxelCache.valid = true;
++		HRL_VoxelWorld* mutableWorld = scene->voxel_world;
++		using Candidate = GL33_Backend::VoxelEmitterCandidate;
+ 
+-		if (!world->type_emissive_colors_.empty())
++		// Scan d'un seul chunk : emetteurs = voxels dont le type a une couleur
++		// emissive non nulle (memes regles que l'ancien scan global).
++		const auto scanChunk = [world](uint64_t key, const HRL_VoxelWorld::VoxelChunk& chunk, std::vector<Candidate>& out)
+ 		{
+-			struct VoxelEmitterCandidate
+-			{
+-				float energy = 0.f;
+-				glm::vec3 position{0.f};
+-				glm::vec3 color{0.f};
+-			};
+-
+-			std::vector<VoxelEmitterCandidate> emitters;
+-			emitters.reserve(std::min(world->voxel_chunks_.size() * 4u, static_cast<size_t>(MAX_LIGHTS)));
+-			for (const auto& [key, chunk] : world->voxel_chunks_)
++			out.clear();
++			const int chunkX = static_cast<int32_t>(key >> 32u);
++			const int chunkY = static_cast<int32_t>(key & 0xffffffffu);
++			const int minX = chunkX * world->chunk_size_;
++			const int minY = chunkY * world->chunk_size_;
++			const int chunkW = std::min(world->chunk_size_, world->width_ - minX);
++			const int chunkH = std::min(world->chunk_size_, world->height_ - minY);
++			if (chunkW <= 0 || chunkH <= 0)
++				return;
++			for (int y = 0; y < chunkH; ++y)
+ 			{
+-				const int chunkX = static_cast<int32_t>(key >> 32u);
+-				const int chunkY = static_cast<int32_t>(key & 0xffffffffu);
+-				const int minX = chunkX * world->chunk_size_;
+-				const int minY = chunkY * world->chunk_size_;
+-				const int chunkW = std::min(world->chunk_size_, world->width_ - minX);
+-				const int chunkH = std::min(world->chunk_size_, world->height_ - minY);
+-				for (int y = 0; y < chunkH; ++y)
++				for (int x = 0; x < chunkW; ++x)
+ 				{
+-					for (int x = 0; x < chunkW; ++x)
+-					{
+-						const uint32_t type = chunk[static_cast<size_t>(y) * static_cast<size_t>(chunkW) +
+-							static_cast<size_t>(x)].type;
++					const size_t index = static_cast<size_t>(y) * static_cast<size_t>(chunkW) + static_cast<size_t>(x);
++					if (index >= chunk.size())
++						return;
++					const uint32_t type = chunk[index].type;
+ 					if (type == 0)
+ 						continue;
+-
+-					auto emissiveIt = world->type_emissive_colors_.find(type);
+-					if (emissiveIt == world->type_emissive_colors_.end())
+-						continue;
+-					auto baseIt = world->type_colors_.find(type);
+-					if (baseIt != world->type_colors_.end() && baseIt->second.a <= 0.001f)
++					// Tables directes (256 entrees) : pas de hash par voxel.
++					if (world->type_colors_[type].a <= 0.001f)
+ 						continue;
+-
+-					const glm::vec3 emissive = glm::max(emissiveIt->second, glm::vec3(0.f));
++					const glm::vec3 emissive = glm::max(world->type_emissive_colors_[type], glm::vec3(0.f));
+ 					const float energy = std::max({emissive.r, emissive.g, emissive.b});
+ 					if (energy <= 0.f)
+ 						continue;
+ 
+-					VoxelEmitterCandidate emitter;
++					Candidate emitter;
+ 					emitter.energy = energy;
+ 					emitter.color = emissive / energy;
+ 					emitter.position = glm::vec3(
+ 						(static_cast<float>(minX + x) + 0.5f) * world->voxel_size_,
+ 						(static_cast<float>(minY + y) + 0.5f) * world->voxel_size_,
+ 						0.5f * world->voxel_size_);
+-						emitters.push_back(emitter);
++					out.push_back(emitter);
++				}
++			}
++		};
++
++		bool changed = false;
++		const bool fullRebuild = !voxelCache.valid ||
++			voxelCache.world != world ||
++			voxelCache.geometry_revision != world->geometry_revision_ ||
++			voxelCache.color_revision != world->color_revision_;
++
++		if (world->emissive_type_count_ == 0)
++		{
++			// Aucun type emissif : rien a scanner.
++			if (!voxelCache.chunk_emitters.empty() || !voxelCache.lights.empty() || fullRebuild)
++				changed = true;
++			voxelCache.chunk_emitters.clear();
++			mutableWorld->light_dirty_chunks_.clear();
++		}
++		else if (fullRebuild)
++		{
++			voxelCache.chunk_emitters.clear();
++			for (const auto& [key, chunk] : world->voxel_chunks_)
++				scanChunk(key, chunk, voxelCache.chunk_emitters[key]);
++			mutableWorld->light_dirty_chunks_.clear();
++			changed = true;
++		}
++		else
++		{
++			// Chunks edites depuis la derniere mise a jour.
++			for (uint64_t key : world->light_dirty_chunks_)
++			{
++				const auto chunkIt = world->voxel_chunks_.find(key);
++				if (chunkIt == world->voxel_chunks_.end())
++					voxelCache.chunk_emitters.erase(key);
++				else
++					scanChunk(key, chunkIt->second, voxelCache.chunk_emitters[key]);
++				changed = true;
++			}
++			mutableWorld->light_dirty_chunks_.clear();
++
++			// Chunks charges paresseusement (streaming) ou supprimes : sans
++			// edition, ils n'apparaissent pas dans light_dirty_chunks_.
++			if (voxelCache.chunk_emitters.size() != world->voxel_chunks_.size())
++			{
++				for (const auto& [key, chunk] : world->voxel_chunks_)
++				{
++					if (voxelCache.chunk_emitters.find(key) == voxelCache.chunk_emitters.end())
++					{
++						scanChunk(key, chunk, voxelCache.chunk_emitters[key]);
++						changed = true;
+ 					}
+ 				}
++				for (auto it = voxelCache.chunk_emitters.begin(); it != voxelCache.chunk_emitters.end(); )
++				{
++					if (world->voxel_chunks_.find(it->first) == world->voxel_chunks_.end())
++					{
++						it = voxelCache.chunk_emitters.erase(it);
++						changed = true;
++					}
++					else
++						++it;
++				}
++			}
++		}
++
++		voxelCache.world = world;
++		voxelCache.geometry_revision = world->geometry_revision_;
++		voxelCache.color_revision = world->color_revision_;
++		voxelCache.valid = true;
++
++		if (changed)
++		{
++			voxelCache.lights.clear();
++			static std::vector<Candidate> emitters;
++			emitters.clear();
++			// Concatenation dans l'ordre de parcours de world->voxel_chunks_,
++			// exactement comme l'ancien scan global : le shader des meshes ne lit
++			// que les 32 premieres lumieres de l'UBO, l'ordre doit donc etre conserve.
++			for (const auto& [key, chunk] : world->voxel_chunks_)
++			{
++				(void)chunk;
++				const auto listIt = voxelCache.chunk_emitters.find(key);
++				if (listIt != voxelCache.chunk_emitters.end())
++					emitters.insert(emitters.end(), listIt->second.begin(), listIt->second.end());
+ 			}
+ 
+ 			const size_t maxEmitterCount = static_cast<size_t>(MAX_LIGHTS);
+ 			if (emitters.size() > maxEmitterCount)
+ 			{
+ 				std::nth_element(emitters.begin(), emitters.begin() + maxEmitterCount, emitters.end(),
+-					[](const VoxelEmitterCandidate& a, const VoxelEmitterCandidate& b)
++					[](const Candidate& a, const Candidate& b)
+ 					{ return a.energy > b.energy; });
+ 				emitters.resize(maxEmitterCount);
+ 			}
+@@ -6452,7 +6736,7 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
+ 			const float falloffDistance = std::max(world->voxel_size_ * 8.f, world->voxel_size_);
+ 			const float attenuation = 1.f / std::max(falloffDistance * falloffDistance, 1e-6f);
+ 			voxelCache.lights.reserve(emitters.size());
+-			for (const VoxelEmitterCandidate& emitter : emitters)
++			for (const Candidate& emitter : emitters)
+ 			{
+ 				GL_Light light{};
+ 				light.type = HRL_POINT_LIGHT;
+@@ -6500,6 +6784,13 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
+ 			voxelCache.revision = 1;
+ 	}
+ 
++	// La signature couvre exactement le contenu envoye (lumieres de la scene
++	// avec leurs donnees d'ombre + emetteurs voxel). Si l'UBO contient deja ces
++	// donnees pour cette scene, on evite de le reecrire.
++	if (bck_->light_ubo_valid && bck_->light_ubo_scene == scene_id &&
++		bck_->light_ubo_signature == voxelCache.signature)
++		return;
++
+ 	for (const GL_Light& light : voxelCache.lights)
+ 	{
+ 		if (count >= MAX_LIGHTS)
+@@ -6509,6 +6800,9 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
+ 
+ 	glBindBuffer(GL_UNIFORM_BUFFER, bck_->ubo[UBO_LIGHTS]);
+ 	glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)sizeof(gpu_lights), gpu_lights);
++	bck_->light_ubo_scene = scene_id;
++	bck_->light_ubo_signature = voxelCache.signature;
++	bck_->light_ubo_valid = true;
+ }
+ 
+ 
+@@ -6788,6 +7082,7 @@ static bool GL33_UploadMeshLOD(GL33_Backend::MeshLOD_GPU& gpu,
+ 
+ 	glGenVertexArrays(1, &gpu.vao);
+ 	glGenBuffers(1, &gpu.vbo);
++	gpu.upload_serial = ++bck_->gpu_upload_serial;
+ 	if (!gpu.vao || !gpu.vbo)
+ 	{
+ 		if (gpu.vao) glDeleteVertexArrays(1, &gpu.vao);
+@@ -7165,11 +7460,8 @@ static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const Frus
+ 	}
+ 
+ 	const bool wireframe = scene->debug_view == HRL_DEBUG_VIEW_WIREFRAME;
+-	GLint previousPolygonMode[2] = {GL_FILL, GL_FILL};
+-	glGetIntegerv(GL_POLYGON_MODE, previousPolygonMode);
+-	GLboolean previousCull = glIsEnabled(GL_CULL_FACE);
+-	GLint previousCullFace = GL_BACK;
+-	glGetIntegerv(GL_CULL_FACE_MODE, &previousCullFace);
++	// Etat de sortie deterministe (voir RestoreOpaqueStageState) au lieu de
++	// glGet*/glIsEnabled, qui peuvent bloquer le pipeline du driver.
+ 
+ 	glEnable(GL_DEPTH_TEST);
+ 	glDepthMask(GL_TRUE);
+@@ -7186,6 +7478,7 @@ static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const Frus
+ 		glCullFace(GL_BACK);
+ 		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+ 	}
++	bool cullEnabled = !wireframe;
+ 
+ 	for (const auto& [id, landscape] : scene->landscapes)
+ 	{
+@@ -7210,18 +7503,18 @@ static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const Frus
+ 		if (!BindLandscapeMaterial(id, material, landscape, model))
+ 			continue;
+ 
+-		const bool twoSided = MaterialIsTwoSided(material);
+-		if (wireframe || twoSided) glDisable(GL_CULL_FACE);
+-		else { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); }
++		const bool cull = !wireframe && !MaterialIsTwoSided(material);
++		if (cull != cullEnabled)
++		{
++			if (cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
++			cullEnabled = cull;
++		}
+ 		glBindVertexArray(gpu.geometry.vao);
+ 		glDrawElements(GL_TRIANGLES, gpu.geometry.index_count, GL_UNSIGNED_INT, nullptr);
+ 	}
+ 
+ 	glBindVertexArray(0);
+-	glPolygonMode(GL_FRONT, previousPolygonMode[0]);
+-	glPolygonMode(GL_BACK, previousPolygonMode[1]);
+-	glCullFace(previousCullFace);
+-	if (previousCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
++	RestoreOpaqueStageState(wireframe);
+ }
+ 
+ static void DrawLandscapeShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection,
+@@ -7295,6 +7588,7 @@ static bool GL33_UploadSkeletalMesh(GL33_Backend::SkeletalMeshGPU& gpu,
+ 	glGenVertexArrays(1, &gpu.vao);
+ 	glGenBuffers(1, &gpu.vbo);
+ 	glGenBuffers(1, &gpu.bone_ubo);
++	gpu.upload_serial = ++bck_->gpu_upload_serial;
+ 	if (!gpu.vao || !gpu.vbo || !gpu.bone_ubo)
+ 	{
+ 		if (gpu.vao) glDeleteVertexArrays(1, &gpu.vao);
+diff --git a/backend/opengl33/gl33_shader.cpp b/backend/opengl33/gl33_shader.cpp
+index 2406e54..4493aed 100644
+--- a/backend/opengl33/gl33_shader.cpp
++++ b/backend/opengl33/gl33_shader.cpp
+@@ -5,6 +5,7 @@
+ #include <unordered_map>
+ #include <string>
+ #include <limits>
++#include <cstring>
+ 
+ #include <glad/glad.h>
+ 
+@@ -137,48 +138,98 @@ uint64_t GL33_Shader::GetId() const
+   return id;
+ }
+ 
+-void GL33_Shader::SetInt(const std::string &name, int value)
++uint32_t GL33_Shader::s_value_generation_ = 1;
++
++void GL33_Shader::InvalidateAllValueCaches()
++{
++  ++s_value_generation_;
++  if (s_value_generation_ == 0)
++    s_value_generation_ = 1; // 0 est reserve a "aucune valeur"
++}
++
++GL33_Shader::UniformSlot* GL33_Shader::FindUniformSlot(const char* name)
+ {
+-  glUniform1i(FindUniformLocation(name), value);
++  if (!name)
++    return nullptr;
++  lookup_key_.assign(name);
++  auto it = uniform_indices_.find(lookup_key_);
++  if (it != uniform_indices_.end())
++    return &uniform_slots_[it->second];
++
++  // Premier acces a ce nom : une seule requete OpenGL, ensuite tout vient du cache.
++  UniformSlot slot;
++  slot.location = glGetUniformLocation(static_cast<GLuint>(id), name);
++  uniform_slots_.push_back(slot);
++  const uint32_t index = static_cast<uint32_t>(uniform_slots_.size() - 1);
++  uniform_indices_.emplace(lookup_key_, index);
++  return &uniform_slots_[index];
+ }
+ 
+-void GL33_Shader::SetUint(const std::string &name, uint32_t value)
++bool GL33_Shader::NeedsUpload(UniformSlot* slot, const void* value, size_t size)
+ {
+-  glUniform1ui(FindUniformLocation(name), value);
++  // Uniform absent du programme (optimise par le compilateur GLSL, ou nom
++  // inconnu) : glUniform*(-1) ne fait rien, inutile de l'appeler.
++  if (!slot || slot->location < 0)
++    return false;
++  if (slot->generation == s_value_generation_ && std::memcmp(slot->data, value, size) == 0)
++    return false;
++  std::memcpy(slot->data, value, size);
++  slot->generation = s_value_generation_;
++  return true;
+ }
+ 
+-void GL33_Shader::SetFloat(const std::string &name, float value)
++void GL33_Shader::SetInt(const char* name, int value)
+ {
+-  glUniform1f(FindUniformLocation(name), value);
++  UniformSlot* slot = FindUniformSlot(name);
++  if (NeedsUpload(slot, &value, sizeof(value)))
++    glUniform1i(slot->location, value);
+ }
+ 
+-void GL33_Shader::SetVec2(const std::string &name, const glm::vec2 &value)
++void GL33_Shader::SetUint(const char* name, uint32_t value)
+ {
+-  glUniform2f(FindUniformLocation(name), value.x, value.y);
++  UniformSlot* slot = FindUniformSlot(name);
++  if (NeedsUpload(slot, &value, sizeof(value)))
++    glUniform1ui(slot->location, value);
+ }
+ 
+-void GL33_Shader::SetVec3(const std::string &name, const glm::vec3 &value)
++void GL33_Shader::SetFloat(const char* name, float value)
+ {
+-  glUniform3f(FindUniformLocation(name), value.x, value.y, value.z);
++  UniformSlot* slot = FindUniformSlot(name);
++  if (NeedsUpload(slot, &value, sizeof(value)))
++    glUniform1f(slot->location, value);
+ }
+ 
+-void GL33_Shader::SetVec4(const std::string &name, const glm::vec4 &value)
++void GL33_Shader::SetVec2(const char* name, const glm::vec2 &value)
+ {
+-  glUniform4f(FindUniformLocation(name), value.x, value.y, value.z, value.w);
++  UniformSlot* slot = FindUniformSlot(name);
++  if (NeedsUpload(slot, glm::value_ptr(value), sizeof(float) * 2))
++    glUniform2f(slot->location, value.x, value.y);
+ }
+ 
+-void GL33_Shader::SetMat3(const std::string &name, const glm::mat3 &value)
++void GL33_Shader::SetVec3(const char* name, const glm::vec3 &value)
+ {
+-  glUniformMatrix3fv(FindUniformLocation(name), 1, GL_FALSE, glm::value_ptr(value));
++  UniformSlot* slot = FindUniformSlot(name);
++  if (NeedsUpload(slot, glm::value_ptr(value), sizeof(float) * 3))
++    glUniform3f(slot->location, value.x, value.y, value.z);
+ }
+ 
+-void GL33_Shader::SetMat4(const std::string &name, const glm::mat4 &value)
++void GL33_Shader::SetVec4(const char* name, const glm::vec4 &value)
+ {
+-  glUniformMatrix4fv(FindUniformLocation(name), 1, GL_FALSE, glm::value_ptr(value));
++  UniformSlot* slot = FindUniformSlot(name);
++  if (NeedsUpload(slot, glm::value_ptr(value), sizeof(float) * 4))
++    glUniform4f(slot->location, value.x, value.y, value.z, value.w);
+ }
+ 
+-GLint GL33_Shader::FindUniformLocation(const std::string &name)
++void GL33_Shader::SetMat3(const char* name, const glm::mat3 &value)
+ {
+-  auto [it, inserted] = uniform_locations_.try_emplace(name, glGetUniformLocation(id, name.c_str()));
+-  return it->second;
+-}
+\ No newline at end of file
++  UniformSlot* slot = FindUniformSlot(name);
++  if (NeedsUpload(slot, glm::value_ptr(value), sizeof(float) * 9))
++    glUniformMatrix3fv(slot->location, 1, GL_FALSE, glm::value_ptr(value));
++}
++
++void GL33_Shader::SetMat4(const char* name, const glm::mat4 &value)
++{
++  UniformSlot* slot = FindUniformSlot(name);
++  if (NeedsUpload(slot, glm::value_ptr(value), sizeof(float) * 16))
++    glUniformMatrix4fv(slot->location, 1, GL_FALSE, glm::value_ptr(value));
++}
+diff --git a/backend/opengl33/gl33_shader.h b/backend/opengl33/gl33_shader.h
+index 0de565d..e525984 100644
+--- a/backend/opengl33/gl33_shader.h
++++ b/backend/opengl33/gl33_shader.h
+@@ -8,6 +8,8 @@
+ 
+ #include <unordered_map>
+ #include <string>
++#include <vector>
++#include <cstdint>
+ 
+ class GL33_Shader final {
+ public:
+@@ -22,22 +24,55 @@ public:
+ 
+   void Use();
+ 
+-  void SetInt(const std::string &name, int value);
+-  void SetUint(const std::string &name, uint32_t value);
+-  void SetFloat(const std::string &name, float value);
+-  void SetVec2(const std::string &name, const glm::vec2 &value);
+-  void SetVec3(const std::string &name, const glm::vec3 &value);
+-  void SetVec4(const std::string &name, const glm::vec4 &value);
+-  void SetMat3(const std::string &name, const glm::mat3 &value);
+-  void SetMat4(const std::string &name, const glm::mat4 &value);
++  // Les surcharges const char* evitent la construction d'une std::string
++  // temporaire (allocation au-dela de 15 caracteres) a chaque appel.
++  void SetInt(const char* name, int value);
++  void SetUint(const char* name, uint32_t value);
++  void SetFloat(const char* name, float value);
++  void SetVec2(const char* name, const glm::vec2 &value);
++  void SetVec3(const char* name, const glm::vec3 &value);
++  void SetVec4(const char* name, const glm::vec4 &value);
++  void SetMat3(const char* name, const glm::mat3 &value);
++  void SetMat4(const char* name, const glm::mat4 &value);
++
++  void SetInt(const std::string &name, int value) { SetInt(name.c_str(), value); }
++  void SetUint(const std::string &name, uint32_t value) { SetUint(name.c_str(), value); }
++  void SetFloat(const std::string &name, float value) { SetFloat(name.c_str(), value); }
++  void SetVec2(const std::string &name, const glm::vec2 &value) { SetVec2(name.c_str(), value); }
++  void SetVec3(const std::string &name, const glm::vec3 &value) { SetVec3(name.c_str(), value); }
++  void SetVec4(const std::string &name, const glm::vec4 &value) { SetVec4(name.c_str(), value); }
++  void SetMat3(const std::string &name, const glm::mat3 &value) { SetMat3(name.c_str(), value); }
++  void SetMat4(const std::string &name, const glm::mat4 &value) { SetMat4(name.c_str(), value); }
++
++  /**
++   * Invalide le cache des valeurs d'uniformes de tous les shaders.
++   * Le renderer l'appelle au debut de chaque scene : si l'application modifie
++   * un uniform directement via glUniform* (programme obtenu avec
++   * HRL_GL_GetShaderGL_ID), la valeur HRL est renvoyee au plus tard a la
++   * scene suivante.
++   */
++  static void InvalidateAllValueCaches();
+ 
+ private:
++  struct UniformSlot {
++    GLint location = -1;
++    uint32_t generation = 0; // 0 = aucune valeur connue
++    float data[16] = {};
++  };
++
+   //optimisation pour éviter de glGetUniformLocation chaque fois
+-  GLint FindUniformLocation(const std::string& name);
+-  std::unordered_map<std::string, GLint> uniform_locations_;
++  UniformSlot* FindUniformSlot(const char* name);
++  // Retourne true si la valeur doit etre envoyee a OpenGL (et met le cache a jour).
++  bool NeedsUpload(UniformSlot* slot, const void* value, size_t size);
++
++  std::unordered_map<std::string, uint32_t> uniform_indices_;
++  std::vector<UniformSlot> uniform_slots_;
++  std::string lookup_key_; // tampon reutilise : pas d'allocation pour les recherches
++
++  static uint32_t s_value_generation_;
+ 
+   //id backend opengl
+   uint64_t id = 0;
+ };
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/core/object_types.h b/core/object_types.h
+index 658a6f3..8f262d0 100644
+--- a/core/object_types.h
++++ b/core/object_types.h
+@@ -10,6 +10,7 @@
+ #include <vector>
+ #include <cstdint>
+ #include <algorithm>
++#include <array>
+ 
+ #include <glm/glm.hpp>
+ #include <stb/stb_truetype.h>
+@@ -200,6 +201,12 @@ typedef struct {
+   // HRL_MaterialSetTexture() bindings remain non-owning for compatibility.
+   std::vector<HRL_id> owned_textures_;
+ 
++  // Copies en cache de intParams_[HRL_MATERIAL_PARAM_TWO_SIDED] et
++  // [HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED], tenues a jour par
++  // HRL_MaterialSetInt/Bool. Evitent une recherche par nom a chaque draw.
++  bool two_sided_ = false;
++  bool ss_displacement_enabled_ = false;
++
+   // User-owned opaque pointer associated with this material.
+   // HRL never allocates, frees, or dereferences this pointer.
+   void* user_handle_ = nullptr;
+@@ -610,17 +617,41 @@ struct HRL_VoxelWorld final {
+       static_cast<size_t>(localX)].type;
+   }
+ 
+-  std::unordered_map<HRL_VoxelType, glm::vec4> type_colors_;
++  // HRL_VoxelType tient sur un octet : des tables directes de 256 entrees
++  // remplacent les unordered_map (acces sans hash dans le maillage des chunks
++  // et dans la recherche des emetteurs). ~8 Ko par monde.
++  //  - couleur par defaut : blanc opaque (meme resultat qu'une entree absente) ;
++  //  - flags de collision par defaut : 0 ;
++  //  - emissif par defaut : noir (= pas d'emission).
++  static std::array<glm::vec4, 256> DefaultVoxelTypeColors()
++  {
++    std::array<glm::vec4, 256> colors;
++    colors.fill(glm::vec4(1.f));
++    return colors;
++  }
++  static std::array<glm::vec3, 256> DefaultVoxelEmissiveColors()
++  {
++    std::array<glm::vec3, 256> colors;
++    colors.fill(glm::vec3(0.f));
++    return colors;
++  }
++
++  std::array<glm::vec4, 256> type_colors_ = DefaultVoxelTypeColors();
+ 
+-  std::unordered_map<HRL_VoxelType, uint32_t> type_collision_flags_;
++  std::array<uint32_t, 256> type_collision_flags_{};
+ 
+-  // Sparse type-level emissive colors. Most voxel types have no entry, so
+-  // ordinary voxels pay no per-voxel memory cost for emission.
+-  std::unordered_map<HRL_VoxelType, glm::vec3> type_emissive_colors_;
++  std::array<glm::vec3, 256> type_emissive_colors_ = DefaultVoxelEmissiveColors();
++  // Nombre de types ayant une couleur emissive non nulle.
++  uint32_t emissive_type_count_ = 0;
+ 
+   // Chunks whose baked topology no longer matches the CPU data.
+   std::unordered_set<uint64_t> dirty_chunks_;
+ 
++  // Chunks edites depuis la derniere mise a jour des emetteurs voxel du
++  // renderer OpenGL : seuls ceux-ci sont rescannes (au lieu du monde entier
++  // a chaque edition). Taille bornee par le nombre de chunks.
++  std::unordered_set<uint64_t> light_dirty_chunks_;
++
+   // Chunks whose GPU representation needs rebuilding. This is deliberately
+   // separate from dirty_chunks_: the latter must remain dirty until the
+   // changes have actually been persisted to disk.
+diff --git a/hrl.cpp b/hrl.cpp
+index 9554ba6..82d256a 100644
+--- a/hrl.cpp
++++ b/hrl.cpp
+@@ -340,6 +340,55 @@ static void MarkAllScenesGILightingDirty()
+ 	}
+ }
+ 
++// La GI ne lit les materiaux que des meshes 3D statiques (voir
++// GL_33_GI::EnsureGeometryCache). Modifier un materiau ne doit donc invalider
++// que les scenes qui l'utilisent, et non toutes les sondes de toutes les scenes.
++static void MarkScenesUsingMaterialGILightingDirty(HRL_id materialId)
++{
++	for (auto& [sceneId, scene] : ctx_.scenes)
++	{
++		(void)sceneId;
++		if (!scene)
++			continue;
++		for (const auto& [meshId, mesh] : scene->meshes)
++		{
++			(void)meshId;
++			if (mesh && mesh->type_ == HRL_3D_MESH && mesh->material_ == materialId)
++			{
++				MarkSceneGILightingDirty(scene);
++				break;
++			}
++		}
++	}
++}
++
++// Ecrit un parametre de materiau. Retourne false si la valeur est inchangee :
++// beaucoup d'applications envoient leurs uniforms (temps, couleur...) a chaque
++// frame, ce qui reinitialisait jusqu'ici tout le cache de sondes GI.
++template <typename Map, typename Value>
++static bool AssignMaterialParam(Map& params, const char* name, const Value& value)
++{
++	if (!name)
++		return false;
++	auto [it, inserted] = params.try_emplace(name, value);
++	if (inserted)
++		return true;
++	if (it->second == value)
++		return false;
++	it->second = value;
++	return true;
++}
++
++static void UpdateMaterialIntFlags(HRL_Material* material, const char* name, int value)
++{
++	if (!material || !name)
++		return;
++	if (std::strcmp(name, HRL_MATERIAL_PARAM_TWO_SIDED) == 0)
++		material->two_sided_ = value != 0;
++	else if (std::strcmp(name, HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED) == 0)
++		material->ss_displacement_enabled_ = value != 0;
++}
++
+ 
+ namespace
+ {
+@@ -567,6 +616,59 @@ static void SimulateVFXEmitter(HRL_VFXEmitter* emitter, HRL_VFXSystem* system, f
+ 		}
+ 	}
+ 
++	// Tout ce qui ne depend pas de la particule est calcule une seule fois par
++	// emetteur (avant : recherches de courbes, matrice systeme + inverse et
++	// matrices de tous les meshes de collision recalculees pour CHAQUE particule).
++	const HRL_VFXCurve* colorCurve = FindVFXCurve(emitter->color_curve_);
++	const HRL_VFXCurve* sizeCurve = FindVFXCurve(emitter->size_curve_);
++	const HRL_VFXCurve* rotationCurve = FindVFXCurve(emitter->rotation_curve_);
++	const glm::vec3 baseAccel = emitter->gravity_ + emitter->force_;
++	const float noiseScale = emitter->noise_strength_ * emitter->noise_scroll_speed_;
++	const float dragFactor = std::max(0.f, 1.f - emitter->drag_ * dt);
++	const float restitution = glm::clamp(emitter->collision_restitution_, 0.f, 1.f);
++	const float frictionFactor = std::max(0.f, 1.f - glm::clamp(emitter->collision_friction_, 0.f, 1.f) * dt * 8.f);
++
++	struct CollisionSphere { glm::vec3 center; float radius; };
++	static thread_local std::vector<CollisionSphere> collisionSpheres;
++	collisionSpheres.clear();
++	bool collideWithScene = false;
++	glm::mat4 systemMatrix(1.f);
++	glm::mat4 worldToLocal(1.f);
++	if (emitter->collision_enabled_)
++	{
++		if (emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL)
++		{
++			systemMatrix = VFXSystemMatrix(system);
++			worldToLocal = glm::inverse(systemMatrix);
++		}
++		if (emitter->collision_scene_ != HRL_INVALID_ID)
++		{
++			collideWithScene = true;
++			auto collisionSceneIt = ctx_.scenes.find(emitter->collision_scene_);
++			if (collisionSceneIt != ctx_.scenes.end() && collisionSceneIt->second)
++			{
++				// Meme ordre d'iteration que l'ancien code (le premier contact gagne).
++				for (const auto& [meshId, mesh] : collisionSceneIt->second->meshes)
++				{
++					(void)meshId;
++					if (!mesh || mesh->type_ == HRL_SPRITE || mesh->bounds_radius_ <= 0.f) continue;
++					glm::mat4 meshMatrix(1.f);
++					meshMatrix = glm::translate(meshMatrix, mesh->position_);
++					meshMatrix = glm::translate(meshMatrix, mesh->pivot_point_);
++					meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.x), glm::vec3(1.f,0.f,0.f));
++					meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.y), glm::vec3(0.f,1.f,0.f));
++					meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.z), glm::vec3(0.f,0.f,1.f));
++					meshMatrix = glm::translate(meshMatrix, -mesh->pivot_point_);
++					meshMatrix = glm::scale(meshMatrix, mesh->scale_);
++					const float scale = std::max({std::abs(mesh->scale_.x), std::abs(mesh->scale_.y), std::abs(mesh->scale_.z)});
++					collisionSpheres.push_back({
++						glm::vec3(meshMatrix * glm::vec4(mesh->bounds_center_, 1.f)),
++						std::max(0.001f, mesh->bounds_radius_ * scale) });
++				}
++			}
++		}
++	}
++
+ 	for (auto& p : emitter->particles_)
+ 	{
+ 		if (p.lifetime <= 0.f) continue;
+@@ -574,72 +676,53 @@ static void SimulateVFXEmitter(HRL_VFXEmitter* emitter, HRL_VFXSystem* system, f
+ 		if (p.age >= p.lifetime) continue;
+ 		const float normalizedLife = glm::clamp(p.age / p.lifetime, 0.f, 1.f);
+ 
+-		glm::vec3 accel = emitter->gravity_ + emitter->force_;
++		glm::vec3 accel = baseAccel;
+ 		if (emitter->noise_strength_ > 0.f)
+ 		{
+ 			const float t = (system->time_ + p.age) * emitter->noise_frequency_ + static_cast<float>(p.seed % 97u);
+ 			accel += glm::vec3(
+ 				std::sin(t * 1.37f),
+ 				std::cos(t * 1.91f),
+-				std::sin(t * 2.43f + 0.7f)) * emitter->noise_strength_ * emitter->noise_scroll_speed_;
++				std::sin(t * 2.43f + 0.7f)) * noiseScale;
+ 		}
+ 		p.velocity += accel * dt;
+ 		if (emitter->drag_ > 0.f)
+-			p.velocity *= std::max(0.f, 1.f - emitter->drag_ * dt);
++			p.velocity *= dragFactor;
+ 		p.position += p.velocity * dt;
+ 		p.rotation = p.base_rotation + p.angular_velocity * p.age;
+ 
+ 		if (emitter->collision_enabled_)
+ 		{
+-			const bool localSimulation = emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL;
+-			const glm::mat4 systemMatrix = localSimulation ? VFXSystemMatrix(system) : glm::mat4(1.f);
+-			const glm::mat4 worldToLocal = localSimulation ? glm::inverse(systemMatrix) : glm::mat4(1.f);
+ 			glm::vec3 worldPosition = glm::vec3(systemMatrix * glm::vec4(p.position, 1.f));
+ 			glm::vec3 worldVelocity = VFXTransformDirection(systemMatrix, p.velocity) * glm::length(p.velocity);
+ 			bool hit = false;
+ 
+-			if (emitter->collision_scene_ != HRL_INVALID_ID)
++			if (collideWithScene)
+ 			{
+-				auto collisionSceneIt = ctx_.scenes.find(emitter->collision_scene_);
+-				if (collisionSceneIt != ctx_.scenes.end() && collisionSceneIt->second)
++				for (const CollisionSphere& sphere : collisionSpheres)
+ 				{
+-					for (const auto& [meshId, mesh] : collisionSceneIt->second->meshes)
++					const glm::vec3 delta = worldPosition - sphere.center;
++					const float distance2 = glm::dot(delta, delta);
++					if (distance2 < sphere.radius * sphere.radius)
+ 					{
+-						(void)meshId;
+-						if (!mesh || mesh->type_ == HRL_SPRITE || mesh->bounds_radius_ <= 0.f) continue;
+-						glm::mat4 meshMatrix(1.f);
+-						meshMatrix = glm::translate(meshMatrix, mesh->position_);
+-						meshMatrix = glm::translate(meshMatrix, mesh->pivot_point_);
+-						meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.x), glm::vec3(1.f,0.f,0.f));
+-						meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.y), glm::vec3(0.f,1.f,0.f));
+-						meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.z), glm::vec3(0.f,0.f,1.f));
+-						meshMatrix = glm::translate(meshMatrix, -mesh->pivot_point_);
+-						meshMatrix = glm::scale(meshMatrix, mesh->scale_);
+-						const glm::vec3 center = glm::vec3(meshMatrix * glm::vec4(mesh->bounds_center_, 1.f));
+-						const float scale = std::max({std::abs(mesh->scale_.x), std::abs(mesh->scale_.y), std::abs(mesh->scale_.z)});
+-						const float radius = std::max(0.001f, mesh->bounds_radius_ * scale);
+-						const glm::vec3 delta = worldPosition - center;
+-						const float distance = glm::length(delta);
+-						if (distance < radius)
+-						{
+-							const glm::vec3 normal = distance > 1e-5f ? delta / distance : glm::vec3(0.f,1.f,0.f);
+-							worldPosition = center + normal * radius;
+-							const float normalVelocity = glm::dot(worldVelocity, normal);
+-							if (normalVelocity < 0.f) worldVelocity -= (1.f + glm::clamp(emitter->collision_restitution_, 0.f, 1.f)) * normalVelocity * normal;
+-							const glm::vec3 tangent = worldVelocity - normal * glm::dot(worldVelocity, normal);
+-							worldVelocity = normal * glm::dot(worldVelocity, normal) + tangent * std::max(0.f, 1.f - glm::clamp(emitter->collision_friction_, 0.f, 1.f) * dt * 8.f);
+-							hit = true;
+-							break;
+-						}
++						const float distance = std::sqrt(distance2);
++						const glm::vec3 normal = distance > 1e-5f ? delta / distance : glm::vec3(0.f,1.f,0.f);
++						worldPosition = sphere.center + normal * sphere.radius;
++						const float normalVelocity = glm::dot(worldVelocity, normal);
++						if (normalVelocity < 0.f) worldVelocity -= (1.f + restitution) * normalVelocity * normal;
++						const glm::vec3 tangent = worldVelocity - normal * glm::dot(worldVelocity, normal);
++						worldVelocity = normal * glm::dot(worldVelocity, normal) + tangent * frictionFactor;
++						hit = true;
++						break;
+ 					}
+ 				}
+ 			}
+ 			else if (worldPosition.y < 0.f)
+ 			{
+ 				worldPosition.y = 0.f;
+-				if (worldVelocity.y < 0.f) worldVelocity.y = -worldVelocity.y * glm::clamp(emitter->collision_restitution_, 0.f, 1.f);
+-				worldVelocity.x *= std::max(0.f, 1.f - glm::clamp(emitter->collision_friction_, 0.f, 1.f) * dt * 8.f);
+-				worldVelocity.z *= std::max(0.f, 1.f - glm::clamp(emitter->collision_friction_, 0.f, 1.f) * dt * 8.f);
++				if (worldVelocity.y < 0.f) worldVelocity.y = -worldVelocity.y * restitution;
++				worldVelocity.x *= frictionFactor;
++				worldVelocity.z *= frictionFactor;
+ 				hit = true;
+ 			}
+ 
+@@ -651,15 +734,12 @@ static void SimulateVFXEmitter(HRL_VFXEmitter* emitter, HRL_VFXSystem* system, f
+ 			}
+ 		}
+ 
+-		const HRL_VFXCurve* colorCurve = FindVFXCurve(emitter->color_curve_);
+ 		if (colorCurve) p.color = EvalVFXColor(colorCurve, normalizedLife);
+-		const HRL_VFXCurve* sizeCurve = FindVFXCurve(emitter->size_curve_);
+ 		if (sizeCurve)
+ 		{
+ 			const float scale = std::max(0.f, EvalVFXFloat(sizeCurve, normalizedLife, 1.f));
+ 			p.size = emitter->particle_size_ * scale;
+ 		}
+-		const HRL_VFXCurve* rotationCurve = FindVFXCurve(emitter->rotation_curve_);
+ 		if (rotationCurve)
+ 		{
+ 			const float z = EvalVFXFloat(rotationCurve, normalizedLife, 0.f);
+@@ -1172,7 +1252,11 @@ void HRL_SetMeshPivotPoint(HRL_id _meshid, float x, float y, float z)
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshPivotPoint: invalid ID");
+ 		return;
+ 	}
+-	it->second->pivot_point_ = {x, y, z};
++	const glm::vec3 pivot(x, y, z);
++	// Valeur identique : ne pas invalider les ombres ni la GI (reconstruction CPU couteuse).
++	if (it->second->pivot_point_ == pivot)
++		return;
++	it->second->pivot_point_ = pivot;
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
+ 		MarkSceneGIGeometryDirty(scene_it->second);
+@@ -1232,6 +1316,8 @@ void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid)
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshMaterial: invalid ID");
+ 		return;
+ 	}
++	if (it->second->material_ == _matid)
++		return;
+ 	it->second->material_ = _matid;
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end() && it->second->type_ == HRL_3D_MESH)
+@@ -1270,7 +1356,13 @@ void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshLocation: invalid ID");
+ 		return;
+ 	}
+-	it->second->position_ = glm::vec3(x, y, z);
++	const glm::vec3 position(x, y, z);
++	// Beaucoup d'applications reecrivent la position a chaque frame : sans ce
++	// test, chaque appel relancait toutes les shadow maps et la reconstruction
++	// CPU du BVH de la GI, meme pour un objet immobile.
++	if (it->second->position_ == position)
++		return;
++	it->second->position_ = position;
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
+ 		MarkSceneGIGeometryDirty(scene_it->second);
+@@ -1299,7 +1391,10 @@ void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll)
+ 		return;
+ 	}
+ 	//glm attend : X-pitch, Y-yaw, Z-roll.
+-	it->second->rotation_ = glm::vec3(pitch, yaw, roll);
++	const glm::vec3 rotation(pitch, yaw, roll);
++	if (it->second->rotation_ == rotation)
++		return;
++	it->second->rotation_ = rotation;
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
+ 		MarkSceneGIGeometryDirty(scene_it->second);
+@@ -1313,7 +1408,10 @@ void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z)
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshScale: invalid ID");
+ 		return;
+ 	}
+-	it->second->scale_ = glm::vec3(x, y, z);
++	const glm::vec3 scale(x, y, z);
++	if (it->second->scale_ == scale)
++		return;
++	it->second->scale_ = scale;
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
+ 		MarkSceneGIGeometryDirty(scene_it->second);
+@@ -1722,6 +1820,8 @@ void HRL_SetLightColor(HRL_id _lightid, float x, float y, float z)
+ 		return;
+ 	}
+ 	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
++	if (it->second->color_ == glm::vec3(x, y, z))
++		return; // inchange : pas d'invalidation GI ni de re-upload
+ 	it->second->color_ = glm::vec4(x, y, z, 0.f);
+ 
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+@@ -1739,6 +1839,8 @@ void HRL_SetLightIntensity(HRL_id _lightid, float i)
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightIntensity: invalid ID");
+ 		return;
+ 	}
++	if (it->second->intensity_ == i)
++		return;
+ 	it->second->intensity_ = i;
+ 
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+@@ -1756,6 +1858,8 @@ void HRL_SetLightAttenuation(HRL_id _lightid, float a)
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightAttenuation: invalid ID");
+ 		return;
+ 	}
++	if (it->second->attenuation_ == a)
++		return;
+ 	it->second->attenuation_ = a;
+ 
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+@@ -1774,6 +1878,8 @@ void HRL_SetLightLocation(HRL_id _lightid, float x, float y, float z)
+ 		return;
+ 	}
+ 	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
++	if (it->second->position_ == glm::vec3(x, y, z))
++		return; // evite de recalculer toutes les shadow maps pour rien
+ 	it->second->position_ = glm::vec4(x, y, z, 0.f);
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
+@@ -1790,6 +1896,8 @@ void HRL_SetLightRotation(HRL_id _lightid, float pitch, float yaw, float roll)
+ 		return;
+ 	}
+ 	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
++	if (it->second->rotation_ == glm::vec3(pitch, yaw, roll))
++		return;
+ 	it->second->rotation_ = glm::vec4(pitch, yaw, roll, 0.f);
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
+@@ -1805,6 +1913,8 @@ void HRL_SetLightCastShadows(HRL_id _lightid, int _enable)
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightCastShadows: invalid ID");
+ 		return;
+ 	}
++	if (it->second->cast_shadows_ == (_enable != HRL_FALSE))
++		return;
+ 	it->second->cast_shadows_ = (_enable != HRL_FALSE);
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
+@@ -1824,13 +1934,14 @@ void HRL_SetLightShadowBias(HRL_id _lightid, float _bias)
+ 		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetLightShadowBias: bias must be finite and non-negative");
+ 		return;
+ 	}
++	if (it->second->shadow_bias_ == _bias)
++		return;
+ 	it->second->shadow_bias_ = _bias;
++	// Le biais est applique cote recepteur (shader d'eclairage, via l'UBO des
++	// lumieres envoye a chaque frame) : inutile de re-rendre les shadow maps.
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end())
+-	{
+ 		MarkSceneGILightingDirty(scene_it->second);
+-		scene_it->second->shadows_dirty = true;
+-	}
+ }
+ 
+ void HRL_SetLightShadowStrength(HRL_id _lightid, float _strength)
+@@ -1846,6 +1957,8 @@ void HRL_SetLightShadowStrength(HRL_id _lightid, float _strength)
+ 		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetLightShadowStrength: strength must be finite and in [0, 1]");
+ 		return;
+ 	}
++	if (it->second->shadow_strength_ == _strength)
++		return;
+ 	it->second->shadow_strength_ = _strength;
+ 	MarkSceneGILightingDirty(ctx_.scenes.at(it->second->scene_));
+ 	UpdateSceneLights(it->second->scene_);
+@@ -1881,6 +1994,8 @@ void HRL_SetSpotLightInnerCutoff(HRL_id _lightid, float inner_cutoff)
+ 		return;
+ 	}
+ 
++	if (it->second->innerCutoff == inner_cutoff)
++		return;
+ 	it->second->innerCutoff = inner_cutoff;
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
+@@ -1902,6 +2017,8 @@ void HRL_SetSpotLightOuterCutoff(HRL_id _lightid, float outer_cutoff)
+ 		return;
+ 	}
+ 
++	if (it->second->outerCutoff == outer_cutoff)
++		return;
+ 	it->second->outerCutoff = outer_cutoff;
+ 	auto scene_it = ctx_.scenes.find(it->second->scene_);
+ 	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
+@@ -2141,6 +2258,7 @@ static void MarkVoxelChunkDirty(HRL_VoxelWorld* world, int voxelX, int voxelY)
+ 	const int chunkY = voxelY / world->chunk_size_;
+ 	world->dirty_chunks_.insert(VoxelChunkKey(chunkX, chunkY));
+ 	world->render_dirty_chunks_.insert(VoxelChunkKey(chunkX, chunkY));
++	world->light_dirty_chunks_.insert(VoxelChunkKey(chunkX, chunkY));
+ 
+ 	// Keep local voxel edits separate from the global geometry revision.
+ 	// Otherwise changing one voxel makes every visible chunk look stale.
+@@ -2909,12 +3027,17 @@ void HRL_SetVoxelTypeColor(HRL_id _sceneid, uint32_t _type, float _r, float _g,
+ 	// Base color is display color only. Values above 1 are intentionally ignored
+ 	// instead of implicitly turning the voxel into an emitter. Emission is
+ 	// configured independently with HRL_SetVoxelTypeEmissiveColor().
+-	world->type_colors_[_type] = glm::vec4(
++	const glm::vec4 color(
+ 		glm::clamp(_r, 0.0f, 1.0f),
+ 		glm::clamp(_g, 0.0f, 1.0f),
+ 		glm::clamp(_b, 0.0f, 1.0f),
+ 		glm::clamp(_a, 0.0f, 1.0f)
+ 	);
++	// Un changement de couleur reconstruit tous les chunks visibles : ne rien
++	// invalider si la couleur est deja celle-ci.
++	if (world->type_colors_[_type] == color)
++		return;
++	world->type_colors_[_type] = color;
+ 	++world->color_revision_;
+ }
+ 
+@@ -2946,10 +3069,17 @@ void HRL_SetVoxelTypeEmissiveColor(HRL_id _sceneid, uint32_t _type, float _r, fl
+ 		std::max(_b, 0.0f)
+ 	);
+ 
+-	if (std::max(emissive.r, std::max(emissive.g, emissive.b)) <= 0.0f)
+-		world->type_emissive_colors_.erase(_type);
+-	else
+-		world->type_emissive_colors_[_type] = emissive;
++	const bool wasEmissive = std::max(world->type_emissive_colors_[_type].r,
++		std::max(world->type_emissive_colors_[_type].g, world->type_emissive_colors_[_type].b)) > 0.0f;
++	const bool isEmissive = std::max(emissive.r, std::max(emissive.g, emissive.b)) > 0.0f;
++	const glm::vec3 stored = isEmissive ? emissive : glm::vec3(0.0f);
++	if (world->type_emissive_colors_[_type] == stored)
++		return; // inchange : pas de reconstruction des chunks ni des emetteurs
++	world->type_emissive_colors_[_type] = stored;
++	if (isEmissive && !wasEmissive)
++		++world->emissive_type_count_;
++	else if (!isEmissive && wasEmissive && world->emissive_type_count_ > 0)
++		--world->emissive_type_count_;
+ 
+ 	// Emissive geometry and global emitter lists are rebuilt with the same
+ 	// revision used by the baked voxel colors.
+@@ -3241,12 +3371,14 @@ int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size)
+ 	const auto colors = std::move(world->type_colors_);
+ 	const auto collisionFlags = std::move(world->type_collision_flags_);
+ 	const auto emissiveColors = std::move(world->type_emissive_colors_);
++	const uint32_t emissiveTypeCount = world->emissive_type_count_;
+ 	const uint64_t geometryRevision = world->geometry_revision_;
+ 	const uint64_t voxelRevision = world->voxel_revision_;
+ 	const uint64_t colorRevision = world->color_revision_;
+ 	newWorld->type_colors_ = colors;
+ 	newWorld->type_collision_flags_ = collisionFlags;
+ 	newWorld->type_emissive_colors_ = emissiveColors;
++	newWorld->emissive_type_count_ = emissiveTypeCount;
+ 	newWorld->geometry_revision_ = geometryRevision + 1;
+ 	newWorld->voxel_revision_ = voxelRevision + 1;
+ 	newWorld->color_revision_ = colorRevision;
+@@ -3504,10 +3636,7 @@ void HRL_SetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type, uint32_t _f
+ 
+ 	EnsureVoxelWorld(_sceneid);
+ 	HRL_VoxelWorld* world = it->second->voxel_world;
+-	if (_flags == 0u)
+-		world->type_collision_flags_.erase(_type);
+-	else
+-		world->type_collision_flags_[_type] = _flags;
++	world->type_collision_flags_[_type] = _flags;
+ }
+ 
+ uint32_t HRL_GetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type)
+@@ -3526,8 +3655,7 @@ uint32_t HRL_GetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type)
+ 	if (!world)
+ 		return 0u;
+ 
+-	auto flagsIt = world->type_collision_flags_.find(_type);
+-	return flagsIt != world->type_collision_flags_.end() ? flagsIt->second : 0u;
++	return world->type_collision_flags_[_type];
+ }
+ 
+ namespace
+@@ -3536,8 +3664,7 @@ namespace
+ 	{
+ 		if (!_world || _type == 0)
+ 			return 0u;
+-		auto it = _world->type_collision_flags_.find(_type);
+-		return it != _world->type_collision_flags_.end() ? it->second : 0u;
++		return _world->type_collision_flags_[_type];
+ 	}
+ 
+ 	static void HRL_RecordVoxelCollisionType(
+@@ -4241,8 +4368,10 @@ void HRL_MaterialSetInt(HRL_id _matid, const char* _uniformName, int a)
+ 		return;
+ 	}
+ 	//si la clée n'existe pas, elle est créée
+-	it->second->intParams_[_uniformName] = a;
+-	MarkAllScenesGILightingDirty();
++	if (!AssignMaterialParam(it->second->intParams_, _uniformName, a))
++		return;
++	UpdateMaterialIntFlags(it->second, _uniformName, a);
++	MarkScenesUsingMaterialGILightingDirty(_matid);
+ }
+ 
+ void HRL_MaterialSetTexture(HRL_id _matid, const char* _uniformName, HRL_id _textureid)
+@@ -4255,8 +4384,9 @@ void HRL_MaterialSetTexture(HRL_id _matid, const char* _uniformName, HRL_id _tex
+ 	}
+ 
+ 	//on vérifie que la texture existe au moment de RHI_BindMaterial, car ici on a pas acces aux textures
+-	it_mat->second->textureParams_[_uniformName] = _textureid;
+-	MarkAllScenesGILightingDirty();
++	if (!AssignMaterialParam(it_mat->second->textureParams_, _uniformName, _textureid))
++		return;
++	MarkScenesUsingMaterialGILightingDirty(_matid);
+ }
+ 
+ void HRL_MaterialSetBool(HRL_id _matid, const char* _uniformName, int a)
+@@ -4267,8 +4397,10 @@ void HRL_MaterialSetBool(HRL_id _matid, const char* _uniformName, int a)
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetBool: invalid ID");
+ 		return;
+ 	}
+-	it->second->intParams_[_uniformName] = a;
+-	MarkAllScenesGILightingDirty();
++	if (!AssignMaterialParam(it->second->intParams_, _uniformName, a))
++		return;
++	UpdateMaterialIntFlags(it->second, _uniformName, a);
++	MarkScenesUsingMaterialGILightingDirty(_matid);
+ }
+ 
+ void HRL_MaterialSetFloat(HRL_id _matid, const char* _uniformName, float a)
+@@ -4279,8 +4411,9 @@ void HRL_MaterialSetFloat(HRL_id _matid, const char* _uniformName, float a)
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetFloat: invalid ID");
+ 		return;
+ 	}
+-	it->second->floatParams_[_uniformName] = a;
+-	MarkAllScenesGILightingDirty();
++	if (!AssignMaterialParam(it->second->floatParams_, _uniformName, a))
++		return;
++	MarkScenesUsingMaterialGILightingDirty(_matid);
+ }
+ 
+ void HRL_MaterialSetVec2(HRL_id _matid, const char* _uniformName, float x, float y)
+@@ -4291,8 +4424,9 @@ void HRL_MaterialSetVec2(HRL_id _matid, const char* _uniformName, float x, float
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec2: invalid ID");
+ 		return;
+ 	}
+-	it->second->vec2Params_[_uniformName] = glm::vec2(x, y);
+-	MarkAllScenesGILightingDirty();
++	if (!AssignMaterialParam(it->second->vec2Params_, _uniformName, glm::vec2(x, y)))
++		return;
++	MarkScenesUsingMaterialGILightingDirty(_matid);
+ }
+ 
+ void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float x, float y, float z)
+@@ -4303,8 +4437,9 @@ void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float x, float
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec3: invalid ID");
+ 		return;
+ 	}
+-	it->second->vec3Params_[_uniformName] = glm::vec3(x, y, z);
+-	MarkAllScenesGILightingDirty();
++	if (!AssignMaterialParam(it->second->vec3Params_, _uniformName, glm::vec3(x, y, z)))
++		return;
++	MarkScenesUsingMaterialGILightingDirty(_matid);
+ }
+ 
+ void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float y, float z, float w)
+@@ -4315,8 +4450,9 @@ void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float
+ 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec4: invalid ID");
+ 		return;
+ 	}
+-	it->second->vec4Params_[_uniformName] = glm::vec4(x, y, z, w);
+-	MarkAllScenesGILightingDirty();
++	if (!AssignMaterialParam(it->second->vec4Params_, _uniformName, glm::vec4(x, y, z, w)))
++		return;
++	MarkScenesUsingMaterialGILightingDirty(_matid);
+ }
+ 
+ 

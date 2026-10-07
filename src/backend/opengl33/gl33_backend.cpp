@@ -64,7 +64,7 @@ HRL_vtable GetOpenGL33Backend()
 	vtable.RHI_GetViewMatrix = GL33_GetViewMatrix;
 	vtable.RHI_GetModelMatrix = GL33_GetModelMatrix;
 
-	vtable.RHI_DrawDebug = GL33_DrawDebug;
+	vtable.RHI_DrawDebug = GL33_DrawDebugAfterScene;
 
 	vtable.RHI_IsValidTexture = GL33_IsValidTexture;
 	vtable.RHI_IsValidShader = GL33_IsValidShader;

@@ -340,6 +340,55 @@ static void MarkAllScenesGILightingDirty()
 	}
 }
 
+// La GI ne lit les materiaux que des meshes 3D statiques (voir
+// GL_33_GI::EnsureGeometryCache). Modifier un materiau ne doit donc invalider
+// que les scenes qui l'utilisent, et non toutes les sondes de toutes les scenes.
+static void MarkScenesUsingMaterialGILightingDirty(HRL_id materialId)
+{
+	for (auto& [sceneId, scene] : ctx_.scenes)
+	{
+		(void)sceneId;
+		if (!scene)
+			continue;
+		for (const auto& [meshId, mesh] : scene->meshes)
+		{
+			(void)meshId;
+			if (mesh && mesh->type_ == HRL_3D_MESH && mesh->material_ == materialId)
+			{
+				MarkSceneGILightingDirty(scene);
+				break;
+			}
+		}
+	}
+}
+
+// Ecrit un parametre de materiau. Retourne false si la valeur est inchangee :
+// beaucoup d'applications envoient leurs uniforms (temps, couleur...) a chaque
+// frame, ce qui reinitialisait jusqu'ici tout le cache de sondes GI.
+template <typename Map, typename Value>
+static bool AssignMaterialParam(Map& params, const char* name, const Value& value)
+{
+	if (!name)
+		return false;
+	auto [it, inserted] = params.try_emplace(name, value);
+	if (inserted)
+		return true;
+	if (it->second == value)
+		return false;
+	it->second = value;
+	return true;
+}
+
+static void UpdateMaterialIntFlags(HRL_Material* material, const char* name, int value)
+{
+	if (!material || !name)
+		return;
+	if (std::strcmp(name, HRL_MATERIAL_PARAM_TWO_SIDED) == 0)
+		material->two_sided_ = value != 0;
+	else if (std::strcmp(name, HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED) == 0)
+		material->ss_displacement_enabled_ = value != 0;
+}
+
 
 namespace
 {
@@ -567,6 +616,59 @@ static void SimulateVFXEmitter(HRL_VFXEmitter* emitter, HRL_VFXSystem* system, f
 		}
 	}
 
+	// Tout ce qui ne depend pas de la particule est calcule une seule fois par
+	// emetteur (avant : recherches de courbes, matrice systeme + inverse et
+	// matrices de tous les meshes de collision recalculees pour CHAQUE particule).
+	const HRL_VFXCurve* colorCurve = FindVFXCurve(emitter->color_curve_);
+	const HRL_VFXCurve* sizeCurve = FindVFXCurve(emitter->size_curve_);
+	const HRL_VFXCurve* rotationCurve = FindVFXCurve(emitter->rotation_curve_);
+	const glm::vec3 baseAccel = emitter->gravity_ + emitter->force_;
+	const float noiseScale = emitter->noise_strength_ * emitter->noise_scroll_speed_;
+	const float dragFactor = std::max(0.f, 1.f - emitter->drag_ * dt);
+	const float restitution = glm::clamp(emitter->collision_restitution_, 0.f, 1.f);
+	const float frictionFactor = std::max(0.f, 1.f - glm::clamp(emitter->collision_friction_, 0.f, 1.f) * dt * 8.f);
+
+	struct CollisionSphere { glm::vec3 center; float radius; };
+	static thread_local std::vector<CollisionSphere> collisionSpheres;
+	collisionSpheres.clear();
+	bool collideWithScene = false;
+	glm::mat4 systemMatrix(1.f);
+	glm::mat4 worldToLocal(1.f);
+	if (emitter->collision_enabled_)
+	{
+		if (emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL)
+		{
+			systemMatrix = VFXSystemMatrix(system);
+			worldToLocal = glm::inverse(systemMatrix);
+		}
+		if (emitter->collision_scene_ != HRL_INVALID_ID)
+		{
+			collideWithScene = true;
+			auto collisionSceneIt = ctx_.scenes.find(emitter->collision_scene_);
+			if (collisionSceneIt != ctx_.scenes.end() && collisionSceneIt->second)
+			{
+				// Meme ordre d'iteration que l'ancien code (le premier contact gagne).
+				for (const auto& [meshId, mesh] : collisionSceneIt->second->meshes)
+				{
+					(void)meshId;
+					if (!mesh || mesh->type_ == HRL_SPRITE || mesh->bounds_radius_ <= 0.f) continue;
+					glm::mat4 meshMatrix(1.f);
+					meshMatrix = glm::translate(meshMatrix, mesh->position_);
+					meshMatrix = glm::translate(meshMatrix, mesh->pivot_point_);
+					meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.x), glm::vec3(1.f,0.f,0.f));
+					meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.y), glm::vec3(0.f,1.f,0.f));
+					meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.z), glm::vec3(0.f,0.f,1.f));
+					meshMatrix = glm::translate(meshMatrix, -mesh->pivot_point_);
+					meshMatrix = glm::scale(meshMatrix, mesh->scale_);
+					const float scale = std::max({std::abs(mesh->scale_.x), std::abs(mesh->scale_.y), std::abs(mesh->scale_.z)});
+					collisionSpheres.push_back({
+						glm::vec3(meshMatrix * glm::vec4(mesh->bounds_center_, 1.f)),
+						std::max(0.001f, mesh->bounds_radius_ * scale) });
+				}
+			}
+		}
+	}
+
 	for (auto& p : emitter->particles_)
 	{
 		if (p.lifetime <= 0.f) continue;
@@ -574,72 +676,53 @@ static void SimulateVFXEmitter(HRL_VFXEmitter* emitter, HRL_VFXSystem* system, f
 		if (p.age >= p.lifetime) continue;
 		const float normalizedLife = glm::clamp(p.age / p.lifetime, 0.f, 1.f);
 
-		glm::vec3 accel = emitter->gravity_ + emitter->force_;
+		glm::vec3 accel = baseAccel;
 		if (emitter->noise_strength_ > 0.f)
 		{
 			const float t = (system->time_ + p.age) * emitter->noise_frequency_ + static_cast<float>(p.seed % 97u);
 			accel += glm::vec3(
 				std::sin(t * 1.37f),
 				std::cos(t * 1.91f),
-				std::sin(t * 2.43f + 0.7f)) * emitter->noise_strength_ * emitter->noise_scroll_speed_;
+				std::sin(t * 2.43f + 0.7f)) * noiseScale;
 		}
 		p.velocity += accel * dt;
 		if (emitter->drag_ > 0.f)
-			p.velocity *= std::max(0.f, 1.f - emitter->drag_ * dt);
+			p.velocity *= dragFactor;
 		p.position += p.velocity * dt;
 		p.rotation = p.base_rotation + p.angular_velocity * p.age;
 
 		if (emitter->collision_enabled_)
 		{
-			const bool localSimulation = emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL;
-			const glm::mat4 systemMatrix = localSimulation ? VFXSystemMatrix(system) : glm::mat4(1.f);
-			const glm::mat4 worldToLocal = localSimulation ? glm::inverse(systemMatrix) : glm::mat4(1.f);
 			glm::vec3 worldPosition = glm::vec3(systemMatrix * glm::vec4(p.position, 1.f));
 			glm::vec3 worldVelocity = VFXTransformDirection(systemMatrix, p.velocity) * glm::length(p.velocity);
 			bool hit = false;
 
-			if (emitter->collision_scene_ != HRL_INVALID_ID)
+			if (collideWithScene)
 			{
-				auto collisionSceneIt = ctx_.scenes.find(emitter->collision_scene_);
-				if (collisionSceneIt != ctx_.scenes.end() && collisionSceneIt->second)
+				for (const CollisionSphere& sphere : collisionSpheres)
 				{
-					for (const auto& [meshId, mesh] : collisionSceneIt->second->meshes)
+					const glm::vec3 delta = worldPosition - sphere.center;
+					const float distance2 = glm::dot(delta, delta);
+					if (distance2 < sphere.radius * sphere.radius)
 					{
-						(void)meshId;
-						if (!mesh || mesh->type_ == HRL_SPRITE || mesh->bounds_radius_ <= 0.f) continue;
-						glm::mat4 meshMatrix(1.f);
-						meshMatrix = glm::translate(meshMatrix, mesh->position_);
-						meshMatrix = glm::translate(meshMatrix, mesh->pivot_point_);
-						meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.x), glm::vec3(1.f,0.f,0.f));
-						meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.y), glm::vec3(0.f,1.f,0.f));
-						meshMatrix = glm::rotate(meshMatrix, glm::radians(mesh->rotation_.z), glm::vec3(0.f,0.f,1.f));
-						meshMatrix = glm::translate(meshMatrix, -mesh->pivot_point_);
-						meshMatrix = glm::scale(meshMatrix, mesh->scale_);
-						const glm::vec3 center = glm::vec3(meshMatrix * glm::vec4(mesh->bounds_center_, 1.f));
-						const float scale = std::max({std::abs(mesh->scale_.x), std::abs(mesh->scale_.y), std::abs(mesh->scale_.z)});
-						const float radius = std::max(0.001f, mesh->bounds_radius_ * scale);
-						const glm::vec3 delta = worldPosition - center;
-						const float distance = glm::length(delta);
-						if (distance < radius)
-						{
-							const glm::vec3 normal = distance > 1e-5f ? delta / distance : glm::vec3(0.f,1.f,0.f);
-							worldPosition = center + normal * radius;
-							const float normalVelocity = glm::dot(worldVelocity, normal);
-							if (normalVelocity < 0.f) worldVelocity -= (1.f + glm::clamp(emitter->collision_restitution_, 0.f, 1.f)) * normalVelocity * normal;
-							const glm::vec3 tangent = worldVelocity - normal * glm::dot(worldVelocity, normal);
-							worldVelocity = normal * glm::dot(worldVelocity, normal) + tangent * std::max(0.f, 1.f - glm::clamp(emitter->collision_friction_, 0.f, 1.f) * dt * 8.f);
-							hit = true;
-							break;
-						}
+						const float distance = std::sqrt(distance2);
+						const glm::vec3 normal = distance > 1e-5f ? delta / distance : glm::vec3(0.f,1.f,0.f);
+						worldPosition = sphere.center + normal * sphere.radius;
+						const float normalVelocity = glm::dot(worldVelocity, normal);
+						if (normalVelocity < 0.f) worldVelocity -= (1.f + restitution) * normalVelocity * normal;
+						const glm::vec3 tangent = worldVelocity - normal * glm::dot(worldVelocity, normal);
+						worldVelocity = normal * glm::dot(worldVelocity, normal) + tangent * frictionFactor;
+						hit = true;
+						break;
 					}
 				}
 			}
 			else if (worldPosition.y < 0.f)
 			{
 				worldPosition.y = 0.f;
-				if (worldVelocity.y < 0.f) worldVelocity.y = -worldVelocity.y * glm::clamp(emitter->collision_restitution_, 0.f, 1.f);
-				worldVelocity.x *= std::max(0.f, 1.f - glm::clamp(emitter->collision_friction_, 0.f, 1.f) * dt * 8.f);
-				worldVelocity.z *= std::max(0.f, 1.f - glm::clamp(emitter->collision_friction_, 0.f, 1.f) * dt * 8.f);
+				if (worldVelocity.y < 0.f) worldVelocity.y = -worldVelocity.y * restitution;
+				worldVelocity.x *= frictionFactor;
+				worldVelocity.z *= frictionFactor;
 				hit = true;
 			}
 
@@ -651,15 +734,12 @@ static void SimulateVFXEmitter(HRL_VFXEmitter* emitter, HRL_VFXSystem* system, f
 			}
 		}
 
-		const HRL_VFXCurve* colorCurve = FindVFXCurve(emitter->color_curve_);
 		if (colorCurve) p.color = EvalVFXColor(colorCurve, normalizedLife);
-		const HRL_VFXCurve* sizeCurve = FindVFXCurve(emitter->size_curve_);
 		if (sizeCurve)
 		{
 			const float scale = std::max(0.f, EvalVFXFloat(sizeCurve, normalizedLife, 1.f));
 			p.size = emitter->particle_size_ * scale;
 		}
-		const HRL_VFXCurve* rotationCurve = FindVFXCurve(emitter->rotation_curve_);
 		if (rotationCurve)
 		{
 			const float z = EvalVFXFloat(rotationCurve, normalizedLife, 0.f);
@@ -1172,7 +1252,11 @@ void HRL_SetMeshPivotPoint(HRL_id _meshid, float x, float y, float z)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshPivotPoint: invalid ID");
 		return;
 	}
-	it->second->pivot_point_ = {x, y, z};
+	const glm::vec3 pivot(x, y, z);
+	// Valeur identique : ne pas invalider les ombres ni la GI (reconstruction CPU couteuse).
+	if (it->second->pivot_point_ == pivot)
+		return;
+	it->second->pivot_point_ = pivot;
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
 		MarkSceneGIGeometryDirty(scene_it->second);
@@ -1232,6 +1316,8 @@ void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshMaterial: invalid ID");
 		return;
 	}
+	if (it->second->material_ == _matid)
+		return;
 	it->second->material_ = _matid;
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ == HRL_3D_MESH)
@@ -1270,7 +1356,13 @@ void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshLocation: invalid ID");
 		return;
 	}
-	it->second->position_ = glm::vec3(x, y, z);
+	const glm::vec3 position(x, y, z);
+	// Beaucoup d'applications reecrivent la position a chaque frame : sans ce
+	// test, chaque appel relancait toutes les shadow maps et la reconstruction
+	// CPU du BVH de la GI, meme pour un objet immobile.
+	if (it->second->position_ == position)
+		return;
+	it->second->position_ = position;
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
 		MarkSceneGIGeometryDirty(scene_it->second);
@@ -1299,7 +1391,10 @@ void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll)
 		return;
 	}
 	//glm attend : X-pitch, Y-yaw, Z-roll.
-	it->second->rotation_ = glm::vec3(pitch, yaw, roll);
+	const glm::vec3 rotation(pitch, yaw, roll);
+	if (it->second->rotation_ == rotation)
+		return;
+	it->second->rotation_ = rotation;
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
 		MarkSceneGIGeometryDirty(scene_it->second);
@@ -1313,7 +1408,10 @@ void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetMeshScale: invalid ID");
 		return;
 	}
-	it->second->scale_ = glm::vec3(x, y, z);
+	const glm::vec3 scale(x, y, z);
+	if (it->second->scale_ == scale)
+		return;
+	it->second->scale_ = scale;
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
 		MarkSceneGIGeometryDirty(scene_it->second);
@@ -1722,6 +1820,8 @@ void HRL_SetLightColor(HRL_id _lightid, float x, float y, float z)
 		return;
 	}
 	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
+	if (it->second->color_ == glm::vec3(x, y, z))
+		return; // inchange : pas d'invalidation GI ni de re-upload
 	it->second->color_ = glm::vec4(x, y, z, 0.f);
 
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
@@ -1739,6 +1839,8 @@ void HRL_SetLightIntensity(HRL_id _lightid, float i)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightIntensity: invalid ID");
 		return;
 	}
+	if (it->second->intensity_ == i)
+		return;
 	it->second->intensity_ = i;
 
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
@@ -1756,6 +1858,8 @@ void HRL_SetLightAttenuation(HRL_id _lightid, float a)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightAttenuation: invalid ID");
 		return;
 	}
+	if (it->second->attenuation_ == a)
+		return;
 	it->second->attenuation_ = a;
 
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
@@ -1774,6 +1878,8 @@ void HRL_SetLightLocation(HRL_id _lightid, float x, float y, float z)
 		return;
 	}
 	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
+	if (it->second->position_ == glm::vec3(x, y, z))
+		return; // evite de recalculer toutes les shadow maps pour rien
 	it->second->position_ = glm::vec4(x, y, z, 0.f);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
@@ -1790,6 +1896,8 @@ void HRL_SetLightRotation(HRL_id _lightid, float pitch, float yaw, float roll)
 		return;
 	}
 	//rappel : la derniere valeur ne compte pas, elle est juste la pour des raisons techniques
+	if (it->second->rotation_ == glm::vec3(pitch, yaw, roll))
+		return;
 	it->second->rotation_ = glm::vec4(pitch, yaw, roll, 0.f);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
@@ -1805,6 +1913,8 @@ void HRL_SetLightCastShadows(HRL_id _lightid, int _enable)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetLightCastShadows: invalid ID");
 		return;
 	}
+	if (it->second->cast_shadows_ == (_enable != HRL_FALSE))
+		return;
 	it->second->cast_shadows_ = (_enable != HRL_FALSE);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
@@ -1824,13 +1934,14 @@ void HRL_SetLightShadowBias(HRL_id _lightid, float _bias)
 		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetLightShadowBias: bias must be finite and non-negative");
 		return;
 	}
+	if (it->second->shadow_bias_ == _bias)
+		return;
 	it->second->shadow_bias_ = _bias;
+	// Le biais est applique cote recepteur (shader d'eclairage, via l'UBO des
+	// lumieres envoye a chaque frame) : inutile de re-rendre les shadow maps.
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end())
-	{
 		MarkSceneGILightingDirty(scene_it->second);
-		scene_it->second->shadows_dirty = true;
-	}
 }
 
 void HRL_SetLightShadowStrength(HRL_id _lightid, float _strength)
@@ -1846,6 +1957,8 @@ void HRL_SetLightShadowStrength(HRL_id _lightid, float _strength)
 		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetLightShadowStrength: strength must be finite and in [0, 1]");
 		return;
 	}
+	if (it->second->shadow_strength_ == _strength)
+		return;
 	it->second->shadow_strength_ = _strength;
 	MarkSceneGILightingDirty(ctx_.scenes.at(it->second->scene_));
 	UpdateSceneLights(it->second->scene_);
@@ -1881,6 +1994,8 @@ void HRL_SetSpotLightInnerCutoff(HRL_id _lightid, float inner_cutoff)
 		return;
 	}
 
+	if (it->second->innerCutoff == inner_cutoff)
+		return;
 	it->second->innerCutoff = inner_cutoff;
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
@@ -1902,6 +2017,8 @@ void HRL_SetSpotLightOuterCutoff(HRL_id _lightid, float outer_cutoff)
 		return;
 	}
 
+	if (it->second->outerCutoff == outer_cutoff)
+		return;
 	it->second->outerCutoff = outer_cutoff;
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end()) { MarkSceneGILightingDirty(scene_it->second); scene_it->second->shadows_dirty = true; }
@@ -2141,6 +2258,34 @@ static void MarkVoxelChunkDirty(HRL_VoxelWorld* world, int voxelX, int voxelY)
 	const int chunkY = voxelY / world->chunk_size_;
 	world->dirty_chunks_.insert(VoxelChunkKey(chunkX, chunkY));
 	world->render_dirty_chunks_.insert(VoxelChunkKey(chunkX, chunkY));
+	world->light_dirty_chunks_.insert(VoxelChunkKey(chunkX, chunkY));
+
+	// En SMOOTH/BLOCKY, la forme d'un voxel depend de ses voisins (y compris
+	// diagonaux) et un chunk dessine aussi la bordure de ses voisins : un voxel
+	// edite sur le bord d'un chunk doit reconstruire le ou les chunks adjacents.
+	if (world->render_mode_ != HRL_VOXEL_FLAT)
+	{
+		const int localX = voxelX - chunkX * world->chunk_size_;
+		const int localY = voxelY - chunkY * world->chunk_size_;
+		const int chunkW = std::min(world->chunk_size_, world->width_ - chunkX * world->chunk_size_);
+		const int chunkH = std::min(world->chunk_size_, world->height_ - chunkY * world->chunk_size_);
+		const int dxMin = localX == 0 ? -1 : 0;
+		const int dxMax = localX == chunkW - 1 ? 1 : 0;
+		const int dyMin = localY == 0 ? -1 : 0;
+		const int dyMax = localY == chunkH - 1 ? 1 : 0;
+		for (int dy = dyMin; dy <= dyMax; ++dy)
+		{
+			for (int dx = dxMin; dx <= dxMax; ++dx)
+			{
+				const int nx = chunkX + dx;
+				const int ny = chunkY + dy;
+				if ((dx == 0 && dy == 0) || nx < 0 || ny < 0 ||
+					nx * world->chunk_size_ >= world->width_ || ny * world->chunk_size_ >= world->height_)
+					continue;
+				world->render_dirty_chunks_.insert(VoxelChunkKey(nx, ny));
+			}
+		}
+	}
 
 	// Keep local voxel edits separate from the global geometry revision.
 	// Otherwise changing one voxel makes every visible chunk look stale.
@@ -2153,8 +2298,14 @@ static void MarkVoxelChunkDirty(HRL_VoxelWorld* world, int voxelX, int voxelY)
 }
 
 static constexpr uint32_t kVoxelWorldSaveMagic = 0x31564C48u; // "HLV1" on little-endian files.
-static constexpr uint16_t kVoxelWorldSaveVersion = 1u;
-static constexpr size_t kVoxelWorldSaveHeaderSize = 28u;
+// Version 2 : la taille physique d'un voxel n'est plus enregistree (c'est un
+// reglage d'affichage de la scene, modifiable a tout moment avec
+// HRL_SetVoxelPhysicalSize). Les fichiers version 1 restent lisibles ; leur
+// taille enregistree est ignoree.
+static constexpr uint16_t kVoxelWorldSaveVersion = 2u;
+static constexpr uint16_t kVoxelWorldSaveVersionWithVoxelSize = 1u;
+static constexpr size_t kVoxelWorldSaveHeaderSize = 24u;       // version 2
+static constexpr size_t kVoxelWorldSaveHeaderSizeV1 = 28u;     // version 1 (avec taille de voxel)
 static constexpr uint32_t kVoxelWorldDeltaMagic = 0x31504448u; // "HDP1" little-endian.
 static constexpr uint16_t kVoxelWorldDeltaVersion = 1u;
 static constexpr uint8_t kVoxelWorldDeltaDeleteEncoding = 0xffu;
@@ -2469,8 +2620,7 @@ static bool VoxelSaveBuildChunk(
 
 static bool VoxelSaveBuildAll(const HRL_VoxelWorld* world, std::vector<uint8_t>& out)
 {
-	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->chunk_size_ <= 0 ||
-		!std::isfinite(world->voxel_size_) || world->voxel_size_ <= 0.f)
+	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->chunk_size_ <= 0)
 		return false;
 
 	const uint64_t chunkColumns64 =
@@ -2489,10 +2639,9 @@ static bool VoxelSaveBuildAll(const HRL_VoxelWorld* world, std::vector<uint8_t>&
 	writer.WriteU16(0u);
 	writer.WriteU32(static_cast<uint32_t>(world->width_));
 	writer.WriteU32(static_cast<uint32_t>(world->height_));
-	writer.WriteF32(world->voxel_size_);
 	writer.WriteU32(static_cast<uint32_t>(world->chunk_size_));
 
-	const size_t chunkCountOffset = 24u;
+	const size_t chunkCountOffset = 20u;
 	writer.WriteU32(0u);
 
 	uint32_t nonEmptyChunks = 0;
@@ -2736,6 +2885,11 @@ void HRL_SetVoxelPhysicalSize(HRL_id _sceneid, float _size)
 
 	EnsureVoxelWorld(_sceneid);
 	HRL_VoxelWorld* world = it->second->voxel_world;
+	if (world->voxel_size_ == _size)
+		return;
+	// Modifiable a tout moment : les chunks visibles sont reconstruits a la
+	// prochaine frame, les emetteurs voxel et les conversions de coordonnees
+	// suivent immediatement. Les donnees voxel ne changent pas.
 	world->voxel_size_ = _size;
 	++world->geometry_revision_;
 	++world->voxel_revision_;
@@ -2909,13 +3063,53 @@ void HRL_SetVoxelTypeColor(HRL_id _sceneid, uint32_t _type, float _r, float _g, 
 	// Base color is display color only. Values above 1 are intentionally ignored
 	// instead of implicitly turning the voxel into an emitter. Emission is
 	// configured independently with HRL_SetVoxelTypeEmissiveColor().
-	world->type_colors_[_type] = glm::vec4(
+	const glm::vec4 color(
 		glm::clamp(_r, 0.0f, 1.0f),
 		glm::clamp(_g, 0.0f, 1.0f),
 		glm::clamp(_b, 0.0f, 1.0f),
 		glm::clamp(_a, 0.0f, 1.0f)
 	);
+	// Un changement de couleur reconstruit tous les chunks visibles : ne rien
+	// invalider si la couleur est deja celle-ci.
+	if (world->type_colors_[_type] == color)
+		return;
+	world->type_colors_[_type] = color;
 	++world->color_revision_;
+}
+
+void HRL_SetVoxelRenderMode(HRL_id _sceneid, HRL_EVoxelRenderMode _mode)
+{
+	if (_mode != HRL_VOXEL_FLAT && _mode != HRL_VOXEL_SMOOTH && _mode != HRL_VOXEL_BLOCKY)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetVoxelRenderMode: invalid render mode");
+		return;
+	}
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVoxelRenderMode: invalid scene ID");
+		return;
+	}
+
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	if (world->render_mode_ == _mode)
+		return;
+	world->render_mode_ = _mode;
+	// Toute la geometrie affichee change : reconstruction des chunks visibles.
+	++world->geometry_revision_;
+}
+
+HRL_EVoxelRenderMode HRL_GetVoxelRenderMode(HRL_id _sceneid)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetVoxelRenderMode: invalid scene ID");
+		return HRL_VOXEL_FLAT;
+	}
+	const HRL_VoxelWorld* world = it->second->voxel_world;
+	return world ? world->render_mode_ : HRL_VOXEL_FLAT;
 }
 
 void HRL_SetVoxelTypeEmissiveColor(HRL_id _sceneid, uint32_t _type, float _r, float _g, float _b)
@@ -2946,14 +3140,83 @@ void HRL_SetVoxelTypeEmissiveColor(HRL_id _sceneid, uint32_t _type, float _r, fl
 		std::max(_b, 0.0f)
 	);
 
-	if (std::max(emissive.r, std::max(emissive.g, emissive.b)) <= 0.0f)
-		world->type_emissive_colors_.erase(_type);
-	else
-		world->type_emissive_colors_[_type] = emissive;
+	const bool wasEmissive = std::max(world->type_emissive_colors_[_type].r,
+		std::max(world->type_emissive_colors_[_type].g, world->type_emissive_colors_[_type].b)) > 0.0f;
+	const bool isEmissive = std::max(emissive.r, std::max(emissive.g, emissive.b)) > 0.0f;
+	const glm::vec3 stored = isEmissive ? emissive : glm::vec3(0.0f);
+	if (world->type_emissive_colors_[_type] == stored)
+		return; // inchange : pas de reconstruction des chunks ni des emetteurs
+	world->type_emissive_colors_[_type] = stored;
+	if (isEmissive && !wasEmissive)
+		++world->emissive_type_count_;
+	else if (!isEmissive && wasEmissive && world->emissive_type_count_ > 0)
+		--world->emissive_type_count_;
 
 	// Emissive geometry and global emitter lists are rebuilt with the same
 	// revision used by the baked voxel colors.
 	++world->color_revision_;
+}
+
+void HRL_SetVoxelTypeTexture(HRL_id _sceneid, uint32_t _type, HRL_id _texture, float _tileVoxels)
+{
+	if (_type == 0 || _type > HRL_VOXEL_TYPE_MAX)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_WARNING,
+			"HRL_SetVoxelTypeTexture: voxel type must be in range 1..255");
+		return;
+	}
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVoxelTypeTexture: invalid scene ID");
+		return;
+	}
+	if (!std::isfinite(_tileVoxels) || _tileVoxels <= 0.f)
+		_tileVoxels = 1.f;
+
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	if (world->type_textures_[_type] == _texture && world->type_texture_tiles_[_type] == _tileVoxels)
+		return;
+
+	const bool layoutChanged = world->type_textures_[_type] != _texture;
+	world->type_textures_[_type] = _texture;
+	world->type_texture_tiles_[_type] = _tileVoxels;
+
+	if (layoutChanged)
+	{
+		// Couches attribuees dans l'ordre croissant des types textures.
+		int16_t layer = 0;
+		world->textured_type_count_ = 0;
+		for (size_t t = 0; t < world->type_textures_.size(); ++t)
+		{
+			if (t != 0 && world->type_textures_[t] != HRL_INVALID_ID)
+			{
+				world->type_texture_layers_[t] = layer++;
+				++world->textured_type_count_;
+			}
+			else
+				world->type_texture_layers_[t] = static_cast<int16_t>(-1);
+		}
+		// La couche est dans les sommets des chunks : reconstruction.
+		++world->color_revision_;
+	}
+	++world->texture_revision_;
+}
+
+void HRL_SetVoxelEmissiveLighting(HRL_id _sceneid, int _enabled, float _intensity, float _falloff)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetVoxelEmissiveLighting: invalid scene ID");
+		return;
+	}
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	world->emissive_lighting_enabled_ = _enabled != HRL_FALSE;
+	world->emissive_light_intensity_ = std::isfinite(_intensity) ? std::max(_intensity, 0.f) : 1.f;
+	world->emissive_light_falloff_ = (std::isfinite(_falloff) && _falloff > 0.f) ? std::min(_falloff, 4096.f) : 8.f;
 }
 
 int HRL_LoadVoxelWorld(HRL_id _sceneid, const HRL_Voxel* _voxels, size_t _count)
@@ -3098,22 +3361,37 @@ int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size)
 	VoxelSaveReader reader(bytes, _size);
 	uint32_t magic = 0, width = 0, height = 0, chunkSize = 0, chunkCount = 0;
 	uint16_t version = 0, flags = 0;
-	float voxelSize = 0.f;
 	if (!reader.ReadU32(magic) || !reader.ReadU16(version) || !reader.ReadU16(flags) ||
-		!reader.ReadU32(width) || !reader.ReadU32(height) || !reader.ReadF32(voxelSize) ||
-		!reader.ReadU32(chunkSize) || !reader.ReadU32(chunkCount))
+		!reader.ReadU32(width) || !reader.ReadU32(height))
 	{
 		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: truncated header");
 		return HRL_FALSE;
 	}
-	if (magic != kVoxelWorldSaveMagic || version != kVoxelWorldSaveVersion || flags != 0u)
+	if (magic != kVoxelWorldSaveMagic ||
+		(version != kVoxelWorldSaveVersion && version != kVoxelWorldSaveVersionWithVoxelSize) || flags != 0u)
 	{
 		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: unsupported voxel world format");
 		return HRL_FALSE;
 	}
-	if (width == 0 || height == 0 || chunkSize == 0 || !std::isfinite(voxelSize) || voxelSize <= 0.f)
+	if (version == kVoxelWorldSaveVersionWithVoxelSize)
 	{
-		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid world dimensions or voxel size");
+		// Ancien format : la taille de voxel enregistree est lue puis ignoree ;
+		// le monde charge garde la taille actuelle de la scene.
+		float ignoredVoxelSize = 0.f;
+		if (_size < kVoxelWorldSaveHeaderSizeV1 || !reader.ReadF32(ignoredVoxelSize))
+		{
+			SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: truncated header");
+			return HRL_FALSE;
+		}
+	}
+	if (!reader.ReadU32(chunkSize) || !reader.ReadU32(chunkCount))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: truncated header");
+		return HRL_FALSE;
+	}
+	if (width == 0 || height == 0 || chunkSize == 0)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_LoadVoxelWorldBuffer: invalid world dimensions");
 		return HRL_FALSE;
 	}
 	if (width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
@@ -3139,7 +3417,6 @@ int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size)
 	HRL_VoxelWorld* newWorld = new HRL_VoxelWorld();
 	newWorld->width_ = static_cast<int>(width);
 	newWorld->height_ = static_cast<int>(height);
-	newWorld->voxel_size_ = voxelSize;
 	newWorld->chunk_size_ = static_cast<int>(chunkSize);
 	newWorld->serialized_source_.assign(bytes, bytes + _size);
 
@@ -3241,12 +3518,19 @@ int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size)
 	const auto colors = std::move(world->type_colors_);
 	const auto collisionFlags = std::move(world->type_collision_flags_);
 	const auto emissiveColors = std::move(world->type_emissive_colors_);
+	const uint32_t emissiveTypeCount = world->emissive_type_count_;
+	const HRL_EVoxelRenderMode renderMode = world->render_mode_;
+	// La taille physique n'est pas dans le fichier : on garde celle de la scene.
+	const float voxelSize = world->voxel_size_;
 	const uint64_t geometryRevision = world->geometry_revision_;
 	const uint64_t voxelRevision = world->voxel_revision_;
 	const uint64_t colorRevision = world->color_revision_;
 	newWorld->type_colors_ = colors;
 	newWorld->type_collision_flags_ = collisionFlags;
 	newWorld->type_emissive_colors_ = emissiveColors;
+	newWorld->emissive_type_count_ = emissiveTypeCount;
+	newWorld->render_mode_ = renderMode;
+	newWorld->voxel_size_ = voxelSize;
 	newWorld->geometry_revision_ = geometryRevision + 1;
 	newWorld->voxel_revision_ = voxelRevision + 1;
 	newWorld->color_revision_ = colorRevision;
@@ -3276,9 +3560,7 @@ int HRL_SaveVoxelWorldAllFile(HRL_id _sceneid, const char* _path)
 	}
 
 	HRL_VoxelWorld* world = it->second->voxel_world;
-	if (!world || world->width_ <= 0 || world->height_ <= 0 ||
-		world->chunk_size_ <= 0 || !std::isfinite(world->voxel_size_) ||
-		world->voxel_size_ <= 0.0f)
+	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->chunk_size_ <= 0)
 	{
 		SetErrorCode(HRL_INVALID_OPERATION, HRL_SEVERITY_WARNING,
 			"HRL_SaveVoxelWorldAllFile: voxel world is not valid for serialization");
@@ -3504,10 +3786,7 @@ void HRL_SetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type, uint32_t _f
 
 	EnsureVoxelWorld(_sceneid);
 	HRL_VoxelWorld* world = it->second->voxel_world;
-	if (_flags == 0u)
-		world->type_collision_flags_.erase(_type);
-	else
-		world->type_collision_flags_[_type] = _flags;
+	world->type_collision_flags_[_type] = _flags;
 }
 
 uint32_t HRL_GetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type)
@@ -3526,8 +3805,7 @@ uint32_t HRL_GetVoxelTypeCollisionFlags(HRL_id _sceneid, uint32_t _type)
 	if (!world)
 		return 0u;
 
-	auto flagsIt = world->type_collision_flags_.find(_type);
-	return flagsIt != world->type_collision_flags_.end() ? flagsIt->second : 0u;
+	return world->type_collision_flags_[_type];
 }
 
 namespace
@@ -3536,8 +3814,7 @@ namespace
 	{
 		if (!_world || _type == 0)
 			return 0u;
-		auto it = _world->type_collision_flags_.find(_type);
-		return it != _world->type_collision_flags_.end() ? it->second : 0u;
+		return _world->type_collision_flags_[_type];
 	}
 
 	static void HRL_RecordVoxelCollisionType(
@@ -4241,8 +4518,10 @@ void HRL_MaterialSetInt(HRL_id _matid, const char* _uniformName, int a)
 		return;
 	}
 	//si la clée n'existe pas, elle est créée
-	it->second->intParams_[_uniformName] = a;
-	MarkAllScenesGILightingDirty();
+	if (!AssignMaterialParam(it->second->intParams_, _uniformName, a))
+		return;
+	UpdateMaterialIntFlags(it->second, _uniformName, a);
+	MarkScenesUsingMaterialGILightingDirty(_matid);
 }
 
 void HRL_MaterialSetTexture(HRL_id _matid, const char* _uniformName, HRL_id _textureid)
@@ -4255,8 +4534,9 @@ void HRL_MaterialSetTexture(HRL_id _matid, const char* _uniformName, HRL_id _tex
 	}
 
 	//on vérifie que la texture existe au moment de RHI_BindMaterial, car ici on a pas acces aux textures
-	it_mat->second->textureParams_[_uniformName] = _textureid;
-	MarkAllScenesGILightingDirty();
+	if (!AssignMaterialParam(it_mat->second->textureParams_, _uniformName, _textureid))
+		return;
+	MarkScenesUsingMaterialGILightingDirty(_matid);
 }
 
 void HRL_MaterialSetBool(HRL_id _matid, const char* _uniformName, int a)
@@ -4267,8 +4547,10 @@ void HRL_MaterialSetBool(HRL_id _matid, const char* _uniformName, int a)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetBool: invalid ID");
 		return;
 	}
-	it->second->intParams_[_uniformName] = a;
-	MarkAllScenesGILightingDirty();
+	if (!AssignMaterialParam(it->second->intParams_, _uniformName, a))
+		return;
+	UpdateMaterialIntFlags(it->second, _uniformName, a);
+	MarkScenesUsingMaterialGILightingDirty(_matid);
 }
 
 void HRL_MaterialSetFloat(HRL_id _matid, const char* _uniformName, float a)
@@ -4279,8 +4561,9 @@ void HRL_MaterialSetFloat(HRL_id _matid, const char* _uniformName, float a)
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetFloat: invalid ID");
 		return;
 	}
-	it->second->floatParams_[_uniformName] = a;
-	MarkAllScenesGILightingDirty();
+	if (!AssignMaterialParam(it->second->floatParams_, _uniformName, a))
+		return;
+	MarkScenesUsingMaterialGILightingDirty(_matid);
 }
 
 void HRL_MaterialSetVec2(HRL_id _matid, const char* _uniformName, float x, float y)
@@ -4291,8 +4574,9 @@ void HRL_MaterialSetVec2(HRL_id _matid, const char* _uniformName, float x, float
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec2: invalid ID");
 		return;
 	}
-	it->second->vec2Params_[_uniformName] = glm::vec2(x, y);
-	MarkAllScenesGILightingDirty();
+	if (!AssignMaterialParam(it->second->vec2Params_, _uniformName, glm::vec2(x, y)))
+		return;
+	MarkScenesUsingMaterialGILightingDirty(_matid);
 }
 
 void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float x, float y, float z)
@@ -4303,8 +4587,9 @@ void HRL_MaterialSetVec3(HRL_id _matid, const char* _uniformName, float x, float
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec3: invalid ID");
 		return;
 	}
-	it->second->vec3Params_[_uniformName] = glm::vec3(x, y, z);
-	MarkAllScenesGILightingDirty();
+	if (!AssignMaterialParam(it->second->vec3Params_, _uniformName, glm::vec3(x, y, z)))
+		return;
+	MarkScenesUsingMaterialGILightingDirty(_matid);
 }
 
 void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float y, float z, float w)
@@ -4315,8 +4600,9 @@ void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float
 		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetVec4: invalid ID");
 		return;
 	}
-	it->second->vec4Params_[_uniformName] = glm::vec4(x, y, z, w);
-	MarkAllScenesGILightingDirty();
+	if (!AssignMaterialParam(it->second->vec4Params_, _uniformName, glm::vec4(x, y, z, w)))
+		return;
+	MarkScenesUsingMaterialGILightingDirty(_matid);
 }
 
 

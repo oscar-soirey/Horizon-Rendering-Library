@@ -56,6 +56,28 @@ uniform vec3  CamPos;           // position de la caméra en world-space
 uniform float BrightThreshold;  // luminance seuil pour l'extraction bloom
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Lumière des voxels émissifs (HRL_SetVoxelEmissiveLighting) : champ de
+//  lumière calculé une fois par viewport, une seule lecture de texture quel
+//  que soit le nombre d'émetteurs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+uniform sampler2D VoxelLightField;
+uniform int   VoxelLightEnabled;
+uniform vec4  VoxelLightRegion;   // xy : min monde, zw : 1 / taille monde
+uniform float VoxelLightFalloff;  // atténuation hors du plan des voxels (Z)
+
+vec3 SampleVoxelLight(vec3 worldPos)
+{
+    if (VoxelLightEnabled == 0)
+        return vec3(0.0);
+    vec2 luv = (worldPos.xy - VoxelLightRegion.xy) * VoxelLightRegion.zw;
+    if (luv.x < 0.0 || luv.y < 0.0 || luv.x > 1.0 || luv.y > 1.0)
+        return vec3(0.0);
+    float z = worldPos.z / max(VoxelLightFalloff, 1e-4);
+    return max(texture(VoxelLightField, luv).rgb, vec3(0.0)) / (1.0 + z * z);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Uniforms brouillard  (TODO : migrer vers un UBO FogBlock)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -310,6 +332,9 @@ void main()
                                lightColor) * attenuation * spotFactor;
         }
     }
+
+    // ── Voxels émissifs (diffus, tous les émetteurs autour) ───────────────────
+    result += (1.0 - metallic) * SampleVoxelLight(fragPos);
 
     // ── Composition finale ────────────────────────────────────────────────────
     result *= albedo * TintColor;

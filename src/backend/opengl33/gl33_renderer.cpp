@@ -45,9 +45,8 @@ static void InitTextureAndBindToFBO(GLuint _texture, GLuint _fbo, int width, int
 static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* mesh, const glm::mat4& model);
 static bool MaterialIsTwoSided(const HRL_Material* material)
 {
-	if (!material) return false;
-	auto it = material->intParams_.find(HRL_MATERIAL_PARAM_TWO_SIDED);
-	return it != material->intParams_.end() && it->second != 0;
+	// Flag maintenu par HRL_MaterialSetInt/Bool : pas de hash de chaine par draw.
+	return material && material->two_sided_;
 }
 
 static bool MaterialUsesScreenSpaceDisplacement(const HRL_Material* material);
@@ -100,10 +99,9 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id);
 static void DestroyLightShadowResources(HRL_id light_id);
 static void DestroyMSAAResources(GL_Scene* scene);
 static bool CreateMSAAResources(GL_Scene* scene, int samples);
-static void ResolveSceneMSAA(GL_Scene* scene);
+static void ResolveSceneMSAA(GL_Scene* scene, int x, int y, int width, int height);
 static glm::vec3 GetLightDirection(const HRL_Light* light);
 static bool EnsureShadowResource(HRL_Light* light);
-static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution, GL33_Shader* shader, bool pointLight, const glm::vec3& lightPosition, float farPlane, int face);
 static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum);
 static void DrawLandscapeShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution, bool pointLight, const glm::vec3& lightPosition, float farPlane, int face);
 
@@ -117,6 +115,7 @@ static const char* kVoxel2DVertexShader = R"GLSL(#version 330 core
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;
+layout(location = 3) in float aLayer;
 
 uniform mat4 model;
 uniform mat4 view;
@@ -125,6 +124,7 @@ uniform mat4 projection;
 out vec3 fragPos;
 out vec3 worldNormal;
 out vec4 voxelColor;
+flat out int voxelLayer;
 
 void main()
 {
@@ -132,6 +132,7 @@ void main()
     fragPos = worldPos.xyz;
     worldNormal = normalize(mat3(model) * aNormal);
     voxelColor = aColor;
+    voxelLayer = int(floor(aLayer + 0.5));
     gl_Position = projection * view * worldPos;
 }
 )GLSL";
@@ -163,6 +164,20 @@ const int FOG_EXP2   = 0x0092;
 in vec3 fragPos;
 in vec3 worldNormal;
 in vec4 voxelColor;
+flat in int voxelLayer;
+
+// Textures of the voxel types (HRL_SetVoxelTypeTexture) : one layer per
+// textured type. VoxelTexTiles[layer / 4][layer % 4] : world size of one copy.
+uniform sampler2DArray VoxelTextures;
+uniform int VoxelTexturesEnabled;
+uniform vec4 VoxelTexTiles[64];
+
+// Light of the emissive voxels (HRL_SetVoxelEmissiveLighting) : GPU light
+// field built once per viewport, whatever the number of emitters.
+uniform sampler2D VoxelLightField;
+uniform int VoxelLightEnabled;
+uniform vec4 VoxelLightRegion;   // xy : world min, zw : 1 / world size
+uniform float VoxelLightFalloff;
 
 uniform vec3 CamPos;
 uniform float BrightThreshold;
@@ -502,20 +517,38 @@ vec3 EvaluateVoxelLightNoShadow(Light light, vec3 albedo, vec3 N)
     return albedo * lightColor * NdotL * attenuation;
 }
 
+vec3 SampleVoxelLight(vec3 worldPos)
+{
+    if (VoxelLightEnabled == 0)
+        return vec3(0.0);
+    vec2 uv = (worldPos.xy - VoxelLightRegion.xy) * VoxelLightRegion.zw;
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0)
+        return vec3(0.0);
+    float z = worldPos.z / max(VoxelLightFalloff, 1e-4);
+    return max(texture(VoxelLightField, uv).rgb, vec3(0.0)) / (1.0 + z * z);
+}
+
 void main()
 {
-    float alpha = clamp(voxelColor.a, 0.0, 1.0);
+    vec4 texel = vec4(1.0);
+    if (VoxelTexturesEnabled != 0 && voxelLayer >= 0)
+    {
+        float tile = max(VoxelTexTiles[voxelLayer >> 2][voxelLayer & 3], 1e-6);
+        texel = texture(VoxelTextures, vec3(fragPos.xy / tile, float(voxelLayer)));
+    }
+
+    float alpha = clamp(voxelColor.a * texel.a, 0.0, 1.0);
     if (alpha <= 0.001)
         discard;
 
-    vec3 baseColor = clamp(voxelColor.rgb, vec3(0.0), vec3(1.0));
+    vec3 baseColor = clamp(voxelColor.rgb * texel.rgb, vec3(0.0), vec3(1.0));
 
     // Emissive voxels are rendered in a separate sparse geometry pass. This
     // keeps the regular voxel vertices small and avoids storing an emissive
     // color for non-emissive voxels.
     if (VoxelEmissionPass != 0)
     {
-        vec3 emission = max(voxelColor.rgb, vec3(0.0));
+        vec3 emission = max(voxelColor.rgb, vec3(0.0)) * texel.rgb;
         // Keep emissive color HDR all the way through the scene buffer.
         // Display compression is performed once, globally, after bloom.
         FragColor = vec4(emission, alpha);
@@ -531,7 +564,8 @@ void main()
 
     vec3 N = normalize(gl_FrontFacing ? worldNormal : -worldNormal);
 
-    vec3 lighting = vec3(0.0);
+    // Emissive voxels : every emitter around, one texture read.
+    vec3 lighting = baseColor * SampleVoxelLight(fragPos);
     if (VoxelShadowLightCount == 0)
     {
         for (int i = 0; i < VoxelLightCount; ++i)
@@ -591,6 +625,11 @@ void main()
 #define SHADOW_2D_TEXTURE_UNIT_BASE 6
 #define SHADOW_CUBE_TEXTURE_UNIT_BASE 10
 #define ENVIRONMENT_TEXTURE_UNIT 14
+// Voxel light field (sprites, meshes, voxels). Needs 17 texture units : the
+// field is disabled on a GPU that has only the 16 required by OpenGL 3.3.
+#define VOXEL_LIGHT_FIELD_TEXTURE_UNIT 16
+// Texture array of the voxel types (voxel shader only, no material there).
+#define VOXEL_TEXTURE_ARRAY_UNIT 0
 #define MAX_SHADOW_SLOTS 4
 #define MAX_SPRITE_BATCH_INSTANCES 16384
 
@@ -619,6 +658,9 @@ struct GL33_Backend {
 		GLsizei vertex_count = 0;
 		GLsizei index_count = 0;
 		bool indexed = false;
+		// Numero unique attribue a chaque upload (les noms GL peuvent etre
+		// recycles apres glDelete*). Sert a detecter un changement de geometrie.
+		uint64_t upload_serial = 0;
 	};
 	struct MeshGPU {
 		std::vector<MeshLOD_GPU> levels;
@@ -657,20 +699,75 @@ struct GL33_Backend {
 	// to be rediscovered every frame. Rebuild this cache only when voxel data or
 	// voxel lighting configuration changes. This is critical for large worlds:
 	// a 4096x4096 empty world must not mean scanning 16.7M voxels every frame.
+	struct VoxelEmitterCandidate
+	{
+		float energy = 0.f;
+		glm::vec3 position{0.f};
+		glm::vec3 color{0.f};
+	};
 	struct VoxelLightCache
 	{
+		// Emetteurs candidats par chunk (liste vide = chunk scanne sans emetteur).
+		// Une edition ne rescanne que le chunk touche, plus le monde entier.
+		std::unordered_map<uint64_t, std::vector<VoxelEmitterCandidate>> chunk_emitters;
+		const HRL_VoxelWorld* world = nullptr;
 		uint64_t geometry_revision = 0;
 		uint64_t color_revision = 0;
 		uint64_t revision = 0;
 		uint64_t signature = 0;
 		bool valid = false;
 		int scene_light_count = 0;
+		int scene_shadow_light_count = 0;
 		std::array<GL_Light, 32> scene_lights{};
 		std::vector<GL_Light> lights;
 	};
 	std::unordered_map<HRL_id, VoxelLightCache> voxel_light_cache;
 
+	// Contenu actuel de ubo[UBO_LIGHTS] (scene + signature du VoxelLightCache).
+	// UploadSceneLights ne reecrit les ~40 Ko de l'UBO que s'ils changent.
+	// Framebuffer cible des passes d'overlay (gizmos, textes, messages, widgets) :
+	// le FBO de la scene en cours, pour qu'elles fassent partie de l'image finale
+	// de la scene, qu'elle soit affichee a l'ecran ou non.
+	GLuint overlay_fbo = 0;
+
+	HRL_id light_ubo_scene = HRL_INVALID_ID;
+	uint64_t light_ubo_signature = 0;
+	bool light_ubo_valid = false;
+
 	GL33_Shader* voxel_shader = nullptr;
+
+	// Light of the emissive voxels : a GPU light field rebuilt for each
+	// viewport (emission -> downsample pyramid -> weighted upsample), read by
+	// the voxel, sprite and mesh shaders. Its cost does not depend on the
+	// number of emitters. See BuildVoxelLightField().
+	struct VoxelLightField
+	{
+		GL33_Shader* emit_shader = nullptr;
+		GL33_Shader* down_shader = nullptr;
+		GL33_Shader* up_shader = nullptr;
+		GLuint fbo = 0;
+		std::vector<GLuint> down;       // level 0 : emission, then box-filtered halves
+		std::vector<GLuint> up;         // accumulated light, level 0 is the result
+		std::vector<glm::ivec2> sizes;
+		bool supported = false;
+		// Valid for the viewport being drawn.
+		bool active = false;
+		glm::vec4 region{0.f, 0.f, 1.f, 1.f}; // world min xy, 1 / world size
+		float falloff_world = 1.f;
+	} voxel_light_field;
+
+	// Texture array of the textured voxel types, per scene.
+	struct VoxelTextureArray
+	{
+		GLuint texture = 0;
+		uint64_t revision = 0;
+		int width = 0;
+		int height = 0;
+		int layers = 0;
+		bool complete = false;   // false : a texture was missing, retried later
+		uint32_t retry_counter = 0;
+	};
+	std::unordered_map<HRL_id, VoxelTextureArray> voxel_texture_arrays;
 
 	struct SkeletalMeshGPU {
 		GLuint vao = 0;
@@ -682,6 +779,7 @@ struct GL33_Backend {
 		HRL_uint bone_count = 0;
 		bool indexed = false;
 		uint64_t uploaded_pose_serial = 0;
+		uint64_t upload_serial = 0;
 	};
 	std::unordered_map<HRL_id, SkeletalMeshGPU> skeletal_meshes;
 
@@ -733,8 +831,14 @@ struct GL33_Backend {
 		GLuint depth_cube = 0;
 		int resolution = 0;
 		bool is_point = false;
+		// Empreinte de tout ce qui a ete rendu dans cette shadow map (parametres
+		// de la lumiere + casters dans sa zone d'influence). Si elle n'a pas
+		// change, la shadow map est reutilisee telle quelle.
+		uint64_t content_signature = 0;
+		bool content_valid = false;
 	};
 	std::unordered_map<HRL_id, ShadowGPU> shadow_maps;
+	uint64_t gpu_upload_serial = 0;
 	std::unordered_map<HRL_id, std::unordered_map<HRL_id, int>> active_shadow_slots_by_scene;
 
 	int antialiasing_samples = 1;
@@ -2011,18 +2115,49 @@ static bool IsMeshVisible(const HRL_Mesh* mesh, const glm::mat4& model, const Fr
 	return SphereInsideFrustum(frustum, center, radius);
 }
 
+// Etat laisse par les passes opaques (landscapes, meshes). Remplace l'ancienne
+// "restauration" basee sur glGet* : en profil core, glPolygonMode(GL_FRONT/
+// GL_BACK, ...) est de toute facon invalide (GL_INVALID_ENUM) et ne restaurait
+// rien. On laisse un etat connu : remplissage plein (les passes 2D suivantes
+// en ont besoin) et culling arriere sauf en vue fil de fer.
+static void RestoreOpaqueStageState(bool wireframe)
+{
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	if (wireframe)
+		glDisable(GL_CULL_FACE);
+	else
+	{
+		glEnable(GL_CULL_FACE);
+		glCullFace(GL_BACK);
+	}
+}
+
 static bool IsFiniteBounds(const HRL_Mesh* mesh)
 {
 	return mesh && std::isfinite(mesh->bounds_center_.x) && std::isfinite(mesh->bounds_center_.y) &&
 		std::isfinite(mesh->bounds_center_.z) && std::isfinite(mesh->bounds_radius_);
 }
 
+// Sommet voxel compact : 28 octets au lieu de 40 (couche de texture incluse). Le monde voxel est dans le
+// plan Z=0 avec une normale constante (0,0,1) : la position est envoyee en 2
+// composantes (OpenGL complete z=0, w=1) et la normale passe par une valeur
+// d'attribut generique (glVertexAttrib3f) au lieu d'etre dupliquee par sommet.
+// Le shader voxel est inchange.
 struct GL33_VoxelVertex
 {
-	float position[3];
-	float normal[3];
+	float position[2];
 	float color[4];
+	// Couche du texture array des voxels (HRL_SetVoxelTypeTexture), -1 : aucune.
+	float layer;
 };
+
+// Couche de texture d'un type (-1 : couleur seule).
+static float GetVoxelTypeTextureLayer(const HRL_VoxelWorld* world, uint32_t type)
+{
+	if (!world || type == 0 || type > HRL_VOXEL_TYPE_MAX)
+		return -1.f;
+	return static_cast<float>(world->type_texture_layers_[type]);
+}
 
 static uint64_t MakeVoxelChunkKey(int chunkX, int chunkY)
 {
@@ -2070,8 +2205,9 @@ static glm::mat4 CalculateVoxelViewportView(const HRL_Viewport* viewport)
 	);
 }
 
-static bool CollectVoxelVisibleChunksForViewport(const HRL_VoxelWorld* world,
-	const HRL_Viewport* viewport, std::unordered_set<uint64_t>& desired)
+// Rectangle (monde) du plan Z=0 vu par la camera d'un viewport.
+static bool ComputeVoxelViewWorldRect(const HRL_VoxelWorld* world, const HRL_Viewport* viewport,
+	float& minWorldX, float& minWorldY, float& maxWorldX, float& maxWorldY)
 {
 	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->chunk_size_ <= 0 ||
 		world->voxel_size_ <= 0.f || !viewport || !viewport->camera_)
@@ -2104,10 +2240,10 @@ static bool CollectVoxelVisibleChunksForViewport(const HRL_VoxelWorld* world,
 		}
 	}
 
-	float minWorldX = std::numeric_limits<float>::max();
-	float minWorldY = std::numeric_limits<float>::max();
-	float maxWorldX = std::numeric_limits<float>::lowest();
-	float maxWorldY = std::numeric_limits<float>::lowest();
+	minWorldX = std::numeric_limits<float>::max();
+	minWorldY = std::numeric_limits<float>::max();
+	maxWorldX = std::numeric_limits<float>::lowest();
+	maxWorldY = std::numeric_limits<float>::lowest();
 	bool foundIntersection = false;
 
 	auto includePoint = [&](const glm::vec3& point)
@@ -2146,6 +2282,39 @@ static bool CollectVoxelVisibleChunksForViewport(const HRL_VoxelWorld* world,
 
 	if (!foundIntersection)
 		return false;
+	return true;
+}
+
+// Portee (voxels) de la lumiere des voxels emissifs : 0 si elle est coupee.
+static float VoxelLightReachVoxels(const HRL_VoxelWorld* world)
+{
+	if (!world || !world->emissive_lighting_enabled_ || world->emissive_type_count_ == 0 ||
+		world->emissive_light_intensity_ <= 0.f)
+		return 0.f;
+	return std::min(world->emissive_light_falloff_ * 3.5f, 1024.f);
+}
+
+// Chunks charges autour de la vue : au moins un, plus si la lumiere des
+// emetteurs porte plus loin (ils doivent etre charges pour eclairer).
+static int VoxelStreamMarginChunks(const HRL_VoxelWorld* world)
+{
+	const float reach = VoxelLightReachVoxels(world);
+	if (!world || world->chunk_size_ <= 0 || reach <= 0.f)
+		return VOXEL_CHUNK_STREAM_MARGIN;
+	const int chunks = static_cast<int>(std::ceil(reach / static_cast<float>(world->chunk_size_)));
+	return std::clamp(chunks, VOXEL_CHUNK_STREAM_MARGIN, 8);
+}
+
+static bool CollectVoxelVisibleChunksForViewport(const HRL_VoxelWorld* world,
+	const HRL_Viewport* viewport, std::unordered_set<uint64_t>& desired)
+{
+	if (!world || world->width_ <= 0 || world->height_ <= 0 || world->chunk_size_ <= 0 ||
+		world->voxel_size_ <= 0.f || !viewport || !viewport->camera_)
+		return false;
+
+	float minWorldX, minWorldY, maxWorldX, maxWorldY;
+	if (!ComputeVoxelViewWorldRect(world, viewport, minWorldX, minWorldY, maxWorldX, maxWorldY))
+		return false;
 
 	const float worldWidth = static_cast<float>(world->width_) * world->voxel_size_;
 	const float worldHeight = static_cast<float>(world->height_) * world->voxel_size_;
@@ -2167,10 +2336,11 @@ static bool CollectVoxelVisibleChunksForViewport(const HRL_VoxelWorld* world,
 	int maxChunkX = static_cast<int>(std::floor(maxVoxelX / static_cast<float>(world->chunk_size_)));
 	int maxChunkY = static_cast<int>(std::floor(maxVoxelY / static_cast<float>(world->chunk_size_)));
 
-	minChunkX = std::max(0, minChunkX - VOXEL_CHUNK_STREAM_MARGIN);
-	minChunkY = std::max(0, minChunkY - VOXEL_CHUNK_STREAM_MARGIN);
-	maxChunkX = std::min(chunkCountX - 1, maxChunkX + VOXEL_CHUNK_STREAM_MARGIN);
-	maxChunkY = std::min(chunkCountY - 1, maxChunkY + VOXEL_CHUNK_STREAM_MARGIN);
+	const int margin = VoxelStreamMarginChunks(world);
+	minChunkX = std::max(0, minChunkX - margin);
+	minChunkY = std::max(0, minChunkY - margin);
+	maxChunkX = std::min(chunkCountX - 1, maxChunkX + margin);
+	maxChunkY = std::min(chunkCountY - 1, maxChunkY + margin);
 	if (minChunkX > maxChunkX || minChunkY > maxChunkY)
 		return false;
 
@@ -2184,11 +2354,9 @@ static glm::vec4 GetVoxelTypeColor(const HRL_VoxelWorld* world, uint32_t type)
 {
     if (!world || type == 0)
         return glm::vec4(1.f);
-    const auto it = world->type_colors_.find(type);
-    if (it == world->type_colors_.end())
+    if (type > HRL_VOXEL_TYPE_MAX)
         return glm::vec4(1.f);
-
-    const glm::vec4 color = it->second;
+    const glm::vec4 color = world->type_colors_[type];
     return glm::vec4(
         glm::clamp(color.r, 0.f, 1.f),
         glm::clamp(color.g, 0.f, 1.f),
@@ -2200,13 +2368,14 @@ static glm::vec3 GetVoxelTypeEmissiveColor(const HRL_VoxelWorld* world, uint32_t
 {
     if (!world || type == 0)
         return glm::vec3(0.f);
-    const auto it = world->type_emissive_colors_.find(type);
-    return it == world->type_emissive_colors_.end() ? glm::vec3(0.f) : glm::max(it->second, glm::vec3(0.f));
+    if (type > HRL_VOXEL_TYPE_MAX)
+        return glm::vec3(0.f);
+    return glm::max(world->type_emissive_colors_[type], glm::vec3(0.f));
 }
 
 static void AppendVoxelQuad(std::vector<GL33_VoxelVertex>& vertices,
     std::vector<HRL_uint>& indices, float x0, float x1, float y0, float y1,
-    const glm::vec4& color)
+    const glm::vec4& color, float layer)
 {
     const HRL_uint base = static_cast<HRL_uint>(vertices.size());
     const float rgba[4] = {color.r, color.g, color.b, color.a};
@@ -2218,14 +2387,522 @@ static void AppendVoxelQuad(std::vector<GL33_VoxelVertex>& vertices,
         GL33_VoxelVertex vertex{};
         vertex.position[0] = position[0];
         vertex.position[1] = position[1];
-        vertex.position[2] = position[2];
-        vertex.normal[0] = 0.f;
-        vertex.normal[1] = 0.f;
-        vertex.normal[2] = 1.f;
         std::copy(std::begin(rgba), std::end(rgba), std::begin(vertex.color));
+        vertex.layer = layer;
         vertices.push_back(vertex);
     }
     indices.insert(indices.end(), {base, base + 1u, base + 2u, base + 2u, base + 3u, base});
+}
+
+// ---------------------------------------------------------------------------
+// Modes de surface SMOOTH / BLOCKY (HRL_SetVoxelRenderMode)
+// ---------------------------------------------------------------------------
+// Les deux modes ont besoin des voxels voisins, y compris ceux des chunks
+// adjacents : on copie les types dans une grille locale entouree d'une bordure
+// d'un voxel. Hors du monde, on recopie le voxel de bord le plus proche : les
+// bords du monde restent droits (pas de biseau ni de pente contre le cadre).
+
+struct VoxelPoint { float x; float y; };
+
+struct VoxelPaddedGrid
+{
+    int originX = 0; // coordonnee globale de la colonne 0 de la grille
+    int originY = 0;
+    int width = 0;
+    int height = 0;
+    std::vector<uint8_t> types;
+
+    uint8_t At(int gx, int gy) const
+    {
+        return types[static_cast<size_t>(gy - originY) * static_cast<size_t>(width) +
+            static_cast<size_t>(gx - originX)];
+    }
+};
+
+static void FillVoxelPaddedGrid(const HRL_VoxelWorld* world, int x0, int y0, int x1, int y1, VoxelPaddedGrid& grid)
+{
+    // Grille couvrant les voxels globaux [x0, x1) x [y0, y1).
+    grid.originX = x0;
+    grid.originY = y0;
+    grid.width = x1 - x0;
+    grid.height = y1 - y0;
+    grid.types.assign(static_cast<size_t>(grid.width) * static_cast<size_t>(grid.height), 0u);
+
+    const int cs = world->chunk_size_;
+    for (int gy = std::max(0, y0); gy < std::min(world->height_, y1); ++gy)
+    {
+        int cachedChunkX = std::numeric_limits<int>::min();
+        const HRL_VoxelWorld::VoxelChunk* chunk = nullptr;
+        const int cy = gy / cs;
+        const int ly = gy - cy * cs;
+        int chunkW = 0;
+        for (int gx = std::max(0, x0); gx < std::min(world->width_, x1); ++gx)
+        {
+            const int cx = gx / cs;
+            if (cx != cachedChunkX)
+            {
+                // Au plus 3 chunks par ligne : une recherche par changement de chunk.
+                cachedChunkX = cx;
+                chunk = world->FindVoxelChunk(cx, cy);
+                chunkW = std::min(cs, world->width_ - cx * cs);
+            }
+            if (!chunk)
+                continue;
+            const size_t index = static_cast<size_t>(ly) * static_cast<size_t>(chunkW) +
+                static_cast<size_t>(gx - cx * cs);
+            if (index < chunk->size())
+                grid.types[static_cast<size_t>(gy - y0) * static_cast<size_t>(grid.width) +
+                    static_cast<size_t>(gx - x0)] = (*chunk)[index].type;
+        }
+    }
+
+    // Echantillons hors du monde : copie du voxel de bord (coordonnees bornees).
+    // La position bornee est toujours dans la grille (bordure d'un voxel).
+    for (int gy = y0; gy < y1; ++gy)
+    {
+        for (int gx = x0; gx < x1; ++gx)
+        {
+            if (gx >= 0 && gy >= 0 && gx < world->width_ && gy < world->height_)
+                continue;
+            const int cx = std::clamp(gx, std::max(0, x0), std::min(world->width_, x1) - 1);
+            const int cy = std::clamp(gy, std::max(0, y0), std::min(world->height_, y1) - 1);
+            grid.types[static_cast<size_t>(gy - y0) * static_cast<size_t>(grid.width) + static_cast<size_t>(gx - x0)] =
+                grid.types[static_cast<size_t>(cy - y0) * static_cast<size_t>(grid.width) + static_cast<size_t>(cx - x0)];
+        }
+    }
+}
+
+static int ClipConvexToBox(const VoxelPoint* in, int count, float minX, float minY, float maxX, float maxY, VoxelPoint* out);
+
+static void AppendVoxelPolygon(std::vector<GL33_VoxelVertex>& vertices, std::vector<HRL_uint>& indices,
+    const VoxelPoint* points, int count, const glm::vec4& color, float layer)
+{
+    if (count < 3)
+        return;
+    const HRL_uint base = static_cast<HRL_uint>(vertices.size());
+    for (int i = 0; i < count; ++i)
+    {
+        GL33_VoxelVertex vertex{};
+        vertex.position[0] = points[i].x;
+        vertex.position[1] = points[i].y;
+        vertex.color[0] = color.r;
+        vertex.color[1] = color.g;
+        vertex.color[2] = color.b;
+        vertex.color[3] = color.a;
+        vertex.layer = layer;
+        vertices.push_back(vertex);
+    }
+    // Polygones convexes : triangulation en eventail.
+    for (int i = 1; i + 1 < count; ++i)
+        indices.insert(indices.end(), {base, base + static_cast<HRL_uint>(i), base + static_cast<HRL_uint>(i + 1)});
+}
+
+// Ecrit un polygone (coordonnees monde) dans le maillage de base et, si le type
+// est emissif, dans le maillage emissif (memes regles que le mode FLAT).
+struct VoxelMeshSink
+{
+    const HRL_VoxelWorld* world;
+    std::vector<GL33_VoxelVertex>& vertices;
+    std::vector<HRL_uint>& indices;
+    std::vector<GL33_VoxelVertex>& emissiveVertices;
+    std::vector<HRL_uint>& emissiveIndices;
+    // Decoupe au rectangle du monde (cellules SMOOTH a cheval sur le bord).
+    bool clipToWorld = false;
+    float worldMaxX = 0.f;
+    float worldMaxY = 0.f;
+
+    void Emit(uint32_t type, const VoxelPoint* inPoints, int inCount)
+    {
+        VoxelPoint clipped[16];
+        const VoxelPoint* points = inPoints;
+        int count = inCount;
+        if (clipToWorld)
+        {
+            count = ClipConvexToBox(inPoints, inCount, 0.f, 0.f, worldMaxX, worldMaxY, clipped);
+            points = clipped;
+            if (count < 3)
+                return;
+        }
+        const glm::vec4 baseColor = GetVoxelTypeColor(world, type);
+        const float layer = GetVoxelTypeTextureLayer(world, type);
+        AppendVoxelPolygon(vertices, indices, points, count, baseColor, layer);
+        const glm::vec3 emissive = GetVoxelTypeEmissiveColor(world, type);
+        if (baseColor.a > 0.001f && std::max(emissive.r, std::max(emissive.g, emissive.b)) > 0.f)
+            AppendVoxelPolygon(emissiveVertices, emissiveIndices, points, count, glm::vec4(emissive, baseColor.a), layer);
+    }
+
+    void EmitRect(uint32_t type, float x0, float x1, float y0, float y1)
+    {
+        const VoxelPoint quad[4] = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
+        Emit(type, quad, 4);
+    }
+};
+
+// Fusion gloutonne de cellules pleines de meme type en rectangles (comme le
+// mode FLAT) : l'interieur du terrain reste a 2 triangles par rectangle.
+static void EmitMergedRects(const std::vector<uint8_t>& mergeTypes, int w, int h,
+    float originX, float originY, float cellSize, VoxelMeshSink& sink)
+{
+    static std::vector<uint8_t> used;
+    used.assign(mergeTypes.size(), 0u);
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            const size_t start = static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x);
+            const uint8_t type = mergeTypes[start];
+            if (type == 0 || used[start])
+                continue;
+            int rectW = 1;
+            while (x + rectW < w)
+            {
+                const size_t idx = start + static_cast<size_t>(rectW);
+                if (used[idx] || mergeTypes[idx] != type)
+                    break;
+                ++rectW;
+            }
+            int rectH = 1;
+            while (y + rectH < h)
+            {
+                bool canExtend = true;
+                for (int xx = x; xx < x + rectW; ++xx)
+                {
+                    const size_t idx = static_cast<size_t>(y + rectH) * static_cast<size_t>(w) + static_cast<size_t>(xx);
+                    if (used[idx] || mergeTypes[idx] != type)
+                    {
+                        canExtend = false;
+                        break;
+                    }
+                }
+                if (!canExtend)
+                    break;
+                ++rectH;
+            }
+            for (int yy = y; yy < y + rectH; ++yy)
+                for (int xx = x; xx < x + rectW; ++xx)
+                    used[static_cast<size_t>(yy) * static_cast<size_t>(w) + static_cast<size_t>(xx)] = 1u;
+            sink.EmitRect(type,
+                originX + static_cast<float>(x) * cellSize, originX + static_cast<float>(x + rectW) * cellSize,
+                originY + static_cast<float>(y) * cellSize, originY + static_cast<float>(y + rectH) * cellSize);
+        }
+    }
+}
+
+// BLOCKY : chaque coin dont l'un des deux cotes est expose (voisin vide) est
+// coupe a 45 degres sur 25 % de la largeur du voxel. Un cote expose est donc
+// plat sur ses 50 % centraux et en pente sur 25 % a chaque extremite.
+// Entre deux types pleins, la regle est symetrique : une frontiere droite reste
+// droite, et seul un coin "en escalier" (ses deux voisins de cote, autour de ce
+// coin, sont d'un autre type) est chanfreine ; le triangle retire est alors
+// rempli par le type voisin, il n'y a donc jamais de trou entre deux types.
+static void BuildVoxelChunkBlocky(const HRL_VoxelWorld* world, const VoxelPaddedGrid& grid,
+    int startX, int startY, int localW, int localH, VoxelMeshSink& sink)
+{
+    const float vs = world->voxel_size_;
+    const float cut = 0.25f * vs;
+    static std::vector<uint8_t> interior;
+    interior.assign(static_cast<size_t>(localW) * static_cast<size_t>(localH), 0u);
+
+    // Decide si le coin d'un voxel de type t, dont les voisins de cote autour
+    // de ce coin sont 'vertical' et 'horizontal', est coupe et a qui revient
+    // le triangle retire (0 = vide).
+    struct CornerCut { bool cut; uint8_t owner; };
+    auto corner = [](uint8_t t, uint8_t vertical, uint8_t horizontal) -> CornerCut {
+        if (vertical == 0 || horizontal == 0)
+            return {true, 0u};
+        if (vertical != t && horizontal != t)
+            return {true, vertical}; // voisins de types differents : priorite au vertical
+        return {false, 0u};
+    };
+
+    for (int ly = 0; ly < localH; ++ly)
+    {
+        for (int lx = 0; lx < localW; ++lx)
+        {
+            const int gx = startX + lx;
+            const int gy = startY + ly;
+            const uint8_t type = grid.At(gx, gy);
+            if (type == 0)
+                continue;
+            const uint8_t left = grid.At(gx - 1, gy);
+            const uint8_t right = grid.At(gx + 1, gy);
+            const uint8_t bottom = grid.At(gx, gy - 1);
+            const uint8_t top = grid.At(gx, gy + 1);
+            const CornerCut bl = corner(type, bottom, left);
+            const CornerCut br = corner(type, bottom, right);
+            const CornerCut tr = corner(type, top, right);
+            const CornerCut tl = corner(type, top, left);
+            if (!bl.cut && !br.cut && !tr.cut && !tl.cut)
+            {
+                // Aucun coin coupe : carre plein, fusionne avec ses voisins.
+                interior[static_cast<size_t>(ly) * static_cast<size_t>(localW) + static_cast<size_t>(lx)] = type;
+                continue;
+            }
+
+            const float x0 = static_cast<float>(gx) * vs;
+            const float y0 = static_cast<float>(gy) * vs;
+            const float x1 = x0 + vs;
+            const float y1 = y0 + vs;
+            VoxelPoint points[8];
+            int n = 0;
+            // Parcours CCW : bas-gauche, bas-droite, haut-droite, haut-gauche.
+            if (bl.cut) { points[n++] = {x0, y0 + cut}; points[n++] = {x0 + cut, y0}; }
+            else points[n++] = {x0, y0};
+            if (br.cut) { points[n++] = {x1 - cut, y0}; points[n++] = {x1, y0 + cut}; }
+            else points[n++] = {x1, y0};
+            if (tr.cut) { points[n++] = {x1, y1 - cut}; points[n++] = {x1 - cut, y1}; }
+            else points[n++] = {x1, y1};
+            if (tl.cut) { points[n++] = {x0 + cut, y1}; points[n++] = {x0, y1 - cut}; }
+            else points[n++] = {x0, y1};
+            sink.Emit(type, points, n);
+
+            // Triangles des coins coupes contre un autre type : remplis par lui.
+            if (bl.owner) { const VoxelPoint t3[3] = {{x0, y0}, {x0 + cut, y0}, {x0, y0 + cut}}; sink.Emit(bl.owner, t3, 3); }
+            if (br.owner) { const VoxelPoint t3[3] = {{x1, y0}, {x1, y0 + cut}, {x1 - cut, y0}}; sink.Emit(br.owner, t3, 3); }
+            if (tr.owner) { const VoxelPoint t3[3] = {{x1, y1}, {x1 - cut, y1}, {x1, y1 - cut}}; sink.Emit(tr.owner, t3, 3); }
+            if (tl.owner) { const VoxelPoint t3[3] = {{x0, y1}, {x0, y1 - cut}, {x0 + cut, y1}}; sink.Emit(tl.owner, t3, 3); }
+        }
+    }
+
+    EmitMergedRects(interior, localW, localH,
+        static_cast<float>(startX) * vs, static_cast<float>(startY) * vs, vs, sink);
+}
+
+// Decoupe un polygone convexe par une boite alignee (Sutherland-Hodgman).
+static int ClipConvexToBox(const VoxelPoint* in, int count, float minX, float minY, float maxX, float maxY, VoxelPoint* out)
+{
+    VoxelPoint bufferA[16];
+    VoxelPoint bufferB[16];
+    int n = std::min(count, 16);
+    for (int i = 0; i < n; ++i)
+        bufferA[i] = in[i];
+    VoxelPoint* src = bufferA;
+    VoxelPoint* dst = bufferB;
+    for (int plane = 0; plane < 4 && n > 0; ++plane)
+    {
+        auto inside = [&](const VoxelPoint& p) {
+            switch (plane)
+            {
+            case 0: return p.x >= minX;
+            case 1: return p.x <= maxX;
+            case 2: return p.y >= minY;
+            default: return p.y <= maxY;
+            }
+        };
+        auto intersect = [&](const VoxelPoint& a, const VoxelPoint& b) {
+            float t = 0.f;
+            switch (plane)
+            {
+            case 0: t = (minX - a.x) / (b.x - a.x); break;
+            case 1: t = (maxX - a.x) / (b.x - a.x); break;
+            case 2: t = (minY - a.y) / (b.y - a.y); break;
+            default: t = (maxY - a.y) / (b.y - a.y); break;
+            }
+            return VoxelPoint{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t};
+        };
+        int m = 0;
+        for (int i = 0; i < n && m < 15; ++i)
+        {
+            const VoxelPoint& cur = src[i];
+            const VoxelPoint& prev = src[(i + n - 1) % n];
+            const bool curIn = inside(cur);
+            const bool prevIn = inside(prev);
+            if (curIn)
+            {
+                if (!prevIn) dst[m++] = intersect(prev, cur);
+                dst[m++] = cur;
+            }
+            else if (prevIn)
+                dst[m++] = intersect(prev, cur);
+        }
+        std::swap(src, dst);
+        n = m;
+    }
+    for (int i = 0; i < n; ++i)
+        out[i] = src[i];
+    return n;
+}
+
+// SMOOTH : marching squares sur une grille dont les echantillons sont les
+// centres des voxels. Le contour passe au milieu de deux centres, c'est-a-dire
+// exactement sur la frontiere des voxels : les surfaces planes ne bougent pas,
+// les escaliers deviennent des pentes a 45 degres.
+static void BuildVoxelChunkSmooth(const HRL_VoxelWorld* world, const VoxelPaddedGrid& grid,
+    int startX, int startY, int endX, int endY, VoxelMeshSink& sink)
+{
+    const float vs = world->voxel_size_;
+    // Une cellule (i, j) a pour coins les centres des voxels (i..i+1, j..j+1).
+    // Ce chunk possede les cellules i dans [startX - 1, endX - 1), plus la
+    // derniere colonne (endX - 1) s'il touche le bord droit du monde ; idem en Y.
+    // L'union sur tous les chunks couvre le monde sans recouvrement.
+    const int cellX0 = startX - 1;
+    const int cellY0 = startY - 1;
+    const int cellX1 = endX - 1 + (endX >= world->width_ ? 1 : 0);
+    const int cellY1 = endY - 1 + (endY >= world->height_ ? 1 : 0);
+    const int cellsW = cellX1 - cellX0;
+    const int cellsH = cellY1 - cellY0;
+    if (cellsW <= 0 || cellsH <= 0)
+        return;
+
+    static std::vector<uint8_t> uniform;
+    uniform.assign(static_cast<size_t>(cellsW) * static_cast<size_t>(cellsH), 0u);
+
+    for (int j = cellY0; j < cellY1; ++j)
+    {
+        for (int i = cellX0; i < cellX1; ++i)
+        {
+            // Coins dans l'ordre CCW : bas-gauche, bas-droite, haut-droite, haut-gauche.
+            const uint8_t t[4] = { grid.At(i, j), grid.At(i + 1, j), grid.At(i + 1, j + 1), grid.At(i, j + 1) };
+            const int mask = (t[0] ? 1 : 0) | (t[1] ? 2 : 0) | (t[2] ? 4 : 0) | (t[3] ? 8 : 0);
+            if (mask == 0)
+                continue;
+            if (mask == 15 && t[0] == t[1] && t[1] == t[2] && t[2] == t[3])
+            {
+                uniform[static_cast<size_t>(j - cellY0) * static_cast<size_t>(cellsW) +
+                    static_cast<size_t>(i - cellX0)] = t[0];
+                continue;
+            }
+
+            const float ox = (static_cast<float>(i) + 0.5f) * vs;
+            const float oy = (static_cast<float>(j) + 0.5f) * vs;
+            const float h = 0.5f * vs;
+            const VoxelPoint corner[4] = {{ox, oy}, {ox + vs, oy}, {ox + vs, oy + vs}, {ox, oy + vs}};
+            const VoxelPoint mid[4] = {{ox + h, oy}, {ox + vs, oy + h}, {ox + h, oy + vs}, {ox, oy + h}}; // bas, droite, haut, gauche
+
+            // Polygones (convexes) de la partie pleine de la cellule.
+            VoxelPoint polys[2][8];
+            int polyCount[2] = {0, 0};
+            int numPolys = 0;
+            if (mask == 5 || mask == 10)
+            {
+                // Selle : deux coins opposes pleins. On garde deux triangles
+                // separes (des voxels en diagonale ne se touchent que par un coin).
+                for (int k = 0; k < 4; ++k)
+                {
+                    if (!t[k])
+                        continue;
+                    VoxelPoint* p = polys[numPolys];
+                    p[0] = corner[k];
+                    p[1] = mid[k];               // arete sortante du coin k
+                    p[2] = mid[(k + 3) % 4];     // arete entrante du coin k
+                    polyCount[numPolys++] = 3;
+                }
+            }
+            else
+            {
+                // Parcours CCW du bord de la cellule : coin plein -> sommet,
+                // changement plein/vide sur une arete -> milieu de l'arete.
+                VoxelPoint* p = polys[0];
+                int n = 0;
+                for (int k = 0; k < 4; ++k)
+                {
+                    if (t[k])
+                        p[n++] = corner[k];
+                    if ((t[k] != 0) != (t[(k + 1) % 4] != 0))
+                        p[n++] = mid[k];
+                }
+                polyCount[0] = n;
+                numPolys = 1;
+            }
+
+            // Un seul type parmi les coins pleins : polygones emis tels quels.
+            uint8_t singleType = 0;
+            bool mixed = false;
+            for (int k = 0; k < 4; ++k)
+            {
+                if (!t[k]) continue;
+                if (singleType == 0) singleType = t[k];
+                else if (singleType != t[k]) mixed = true;
+            }
+            if (!mixed)
+            {
+                for (int k = 0; k < numPolys; ++k)
+                    sink.Emit(singleType, polys[k], polyCount[k]);
+                continue;
+            }
+
+            // Plusieurs types : la frontiere entre deux types suit le meme
+            // contour que la frontiere avec le vide (diagonales a 45 degres).
+            // Chaque quart de cellule (le quart du voxel q le plus proche du
+            // coin commun aux 4 voxels) est coupe par sa diagonale en :
+            //  - un triangle "interieur" (cote centre du voxel) -> type de q ;
+            //  - un triangle "exterieur" (cote coin commun), attribue comme le
+            //    ferait le marching squares binaire, generalise aux types :
+            //    q le garde s'il a un voisin de cote du meme type ; sinon, si
+            //    ses deux voisins de cote sont du meme type, ce type le prend
+            //    (le coin isole de q est chanfreine) ; sinon q le garde s'il est
+            //    plein et touche de la matiere ; un quart vide entre deux
+            //    voisins pleins est comble (priorite au voisin vertical).
+            // Avec un seul type, cette regle redonne exactement le contour du
+            // marching squares ; la silhouette exterieure ne change donc pas.
+            const VoxelPoint center{ox + h, oy + h};
+            for (int q = 0; q < 4; ++q)
+            {
+                const uint8_t tq = t[q];
+                const uint8_t vertical = t[q ^ 3];
+                const uint8_t horizontal = t[q ^ 1];
+                uint8_t outer = 0;
+                if (tq && (vertical == tq || horizontal == tq))
+                    outer = tq;
+                else if (vertical && vertical == horizontal)
+                    outer = vertical;
+                else if (tq && (vertical || horizontal))
+                    outer = tq;
+                else if (!tq && vertical && horizontal)
+                    outer = vertical;
+
+                const VoxelPoint& c = corner[q];
+                const VoxelPoint& m0 = mid[q];
+                const VoxelPoint& m1 = mid[(q + 3) % 4];
+                if (tq && outer == tq)
+                {
+                    const VoxelPoint quad[4] = {c, m0, center, m1};
+                    sink.Emit(tq, quad, 4);
+                    continue;
+                }
+                if (tq)
+                {
+                    const VoxelPoint inner[3] = {c, m0, m1};
+                    sink.Emit(tq, inner, 3);
+                }
+                if (outer)
+                {
+                    const VoxelPoint outerTri[3] = {m0, center, m1};
+                    sink.Emit(outer, outerTri, 3);
+                }
+            }
+        }
+    }
+
+    EmitMergedRects(uniform, cellsW, cellsH,
+        (static_cast<float>(cellX0) + 0.5f) * vs, (static_cast<float>(cellY0) + 0.5f) * vs, vs, sink);
+}
+
+static bool BuildVoxelChunkGeometryShaped(const HRL_VoxelWorld* world, int chunkX, int chunkY,
+    std::vector<GL33_VoxelVertex>& vertices, std::vector<HRL_uint>& indices,
+    std::vector<GL33_VoxelVertex>& emissiveVertices, std::vector<HRL_uint>& emissiveIndices)
+{
+    const int startX = chunkX * world->chunk_size_;
+    const int startY = chunkY * world->chunk_size_;
+    if (startX < 0 || startY < 0 || startX >= world->width_ || startY >= world->height_)
+        return false;
+    const int endX = std::min(startX + world->chunk_size_, world->width_);
+    const int endY = std::min(startY + world->chunk_size_, world->height_);
+
+    static VoxelPaddedGrid grid;
+    FillVoxelPaddedGrid(world, startX - 1, startY - 1, endX + 1, endY + 1, grid);
+
+    VoxelMeshSink sink{world, vertices, indices, emissiveVertices, emissiveIndices};
+    // Seules les cellules SMOOTH des chunks au bord du monde peuvent deborder.
+    sink.clipToWorld = world->render_mode_ == HRL_VOXEL_SMOOTH &&
+        (startX == 0 || startY == 0 || endX >= world->width_ || endY >= world->height_);
+    sink.worldMaxX = static_cast<float>(world->width_) * world->voxel_size_;
+    sink.worldMaxY = static_cast<float>(world->height_) * world->voxel_size_;
+    if (world->render_mode_ == HRL_VOXEL_BLOCKY)
+        BuildVoxelChunkBlocky(world, grid, startX, startY, endX - startX, endY - startY, sink);
+    else
+        BuildVoxelChunkSmooth(world, grid, startX, startY, endX, endY, sink);
+    return true;
 }
 
 static bool BuildVoxelChunkGeometry(const HRL_VoxelWorld* world, int chunkX, int chunkY,
@@ -2238,6 +2915,10 @@ static bool BuildVoxelChunkGeometry(const HRL_VoxelWorld* world, int chunkX, int
     emissiveIndices.clear();
     if (!world || world->chunk_size_ <= 0 || world->width_ <= 0 || world->height_ <= 0)
         return false;
+
+    if (world->render_mode_ != HRL_VOXEL_FLAT)
+        return BuildVoxelChunkGeometryShaped(world, chunkX, chunkY,
+            vertices, indices, emissiveVertices, emissiveIndices);
 
     // Missing sparse chunks are completely empty.
     if (!world->FindVoxelChunk(chunkX, chunkY))
@@ -2253,7 +2934,9 @@ static bool BuildVoxelChunkGeometry(const HRL_VoxelWorld* world, int chunkX, int
         return true;
 
     const size_t cellCount = static_cast<size_t>(localWidth) * static_cast<size_t>(localHeight);
-    std::vector<uint8_t> used(cellCount, 0u);
+    // Tampon reutilise entre les reconstructions (thread GL unique).
+    static std::vector<uint8_t> used;
+    used.assign(cellCount, 0u);
     const size_t reserveCells = std::min(cellCount, static_cast<size_t>(1024));
     vertices.reserve(reserveCells * 2u + 4u);
     indices.reserve(reserveCells * 3u + 6u);
@@ -2265,14 +2948,14 @@ static bool BuildVoxelChunkGeometry(const HRL_VoxelWorld* world, int chunkX, int
     if (!chunk)
         return true;
 
-    auto voxelAt = [world, chunk](int x, int y) -> uint32_t {
-        const int cx = x / world->chunk_size_;
-        const int cy = y / world->chunk_size_;
-        const int localX = x - cx * world->chunk_size_;
-        const int localY = y - cy * world->chunk_size_;
-        const int localWidth = std::min(world->chunk_size_, world->width_ - cx * world->chunk_size_);
-        return (*chunk)[static_cast<size_t>(localY) * static_cast<size_t>(localWidth) +
-            static_cast<size_t>(localX)].type;
+    if (chunk->size() < cellCount)
+        return false;
+    // Toutes les lectures restent dans ce chunk : indexation locale directe
+    // (l'ancienne version refaisait deux divisions par voxel lu).
+    const HRL_Voxel* cells = chunk->data();
+    auto voxelAt = [cells, startX, startY, localWidth](int x, int y) -> uint32_t {
+        return cells[static_cast<size_t>(y - startY) * static_cast<size_t>(localWidth) +
+            static_cast<size_t>(x - startX)].type;
     };
 
     for (int y = 0; y < localHeight; ++y)
@@ -2325,12 +3008,13 @@ static bool BuildVoxelChunkGeometry(const HRL_VoxelWorld* world, int chunkX, int
             const float y0 = static_cast<float>(startY + y) * world->voxel_size_;
             const float y1 = static_cast<float>(startY + y + rectHeight) * world->voxel_size_;
             const glm::vec4 baseColor = GetVoxelTypeColor(world, type);
-            AppendVoxelQuad(vertices, indices, x0, x1, y0, y1, baseColor);
+            const float layer = GetVoxelTypeTextureLayer(world, type);
+            AppendVoxelQuad(vertices, indices, x0, x1, y0, y1, baseColor, layer);
 
             const glm::vec3 emissive = GetVoxelTypeEmissiveColor(world, type);
             if (baseColor.a > 0.001f && std::max(emissive.r, std::max(emissive.g, emissive.b)) > 0.f)
                 AppendVoxelQuad(emissiveVertices, emissiveIndices,
-                    x0, x1, y0, y1, glm::vec4(emissive, baseColor.a));
+                    x0, x1, y0, y1, glm::vec4(emissive, baseColor.a), layer);
         }
     }
     return true;
@@ -2354,30 +3038,47 @@ static bool UploadVoxelSubmeshGPU(GLuint& vao, GLuint& vbo, GLuint& ebo,
     const std::vector<GL33_VoxelVertex>& vertices, const std::vector<HRL_uint>& indices)
 {
     if (vertices.empty() || indices.empty())
+    {
+        // Les objets GL existants sont conserves pour une prochaine edition ;
+        // un compteur nul suffit pour que le chunk ne soit pas dessine.
+        vertexCount = 0;
+        indexCount = 0;
         return true;
+    }
     if (indices.size() > static_cast<size_t>(std::numeric_limits<GLsizei>::max()) ||
         vertices.size() > static_cast<size_t>(std::numeric_limits<GLsizei>::max()))
         return false;
 
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glGenBuffers(1, &ebo);
-    if (!vao || !vbo || !ebo)
+    // Reutilise le VAO/VBO/EBO du chunk : une edition ne fait plus
+    // glDelete* + glGen* + reconfiguration complete des attributs.
+    const bool created = vao == 0;
+    if (created)
     {
-        DestroyVoxelSubmeshGPU(vao, vbo, ebo, vertexCount, indexCount);
-        return false;
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glGenBuffers(1, &ebo);
+        if (!vao || !vbo || !ebo)
+        {
+            DestroyVoxelSubmeshGPU(vao, vbo, ebo, vertexCount, indexCount);
+            return false;
+        }
     }
 
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(GL33_VoxelVertex)), vertices.data(), GL_STATIC_DRAW);
-    const GLsizei stride = static_cast<GLsizei>(sizeof(GL33_VoxelVertex));
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, position)));
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, normal)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, color)));
-    glEnableVertexAttribArray(2);
+    if (created)
+    {
+        const GLsizei stride = static_cast<GLsizei>(sizeof(GL33_VoxelVertex));
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, position)));
+        glEnableVertexAttribArray(0);
+        // Attribut 1 (normale) : pas de tableau, valeur generique fixee au dessin.
+        glDisableVertexAttribArray(1);
+        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, color)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void*>(offsetof(GL33_VoxelVertex, layer)));
+        glEnableVertexAttribArray(3);
+    }
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indices.size() * sizeof(HRL_uint)), indices.data(), GL_STATIC_DRAW);
     glBindVertexArray(0);
@@ -2404,14 +3105,18 @@ static void DestroyVoxelChunkGPU(GL33_Backend::VoxelChunkGPU& gpu)
 
 static bool RebuildVoxelChunk(const HRL_VoxelWorld* world, int chunkX, int chunkY, GL33_Backend::VoxelChunkGPU& gpu)
 {
-    std::vector<GL33_VoxelVertex> vertices;
-    std::vector<HRL_uint> indices;
-    std::vector<GL33_VoxelVertex> emissiveVertices;
-    std::vector<HRL_uint> emissiveIndices;
+    // Tampons CPU reutilises d'une reconstruction a l'autre (thread GL unique).
+    static std::vector<GL33_VoxelVertex> vertices;
+    static std::vector<HRL_uint> indices;
+    static std::vector<GL33_VoxelVertex> emissiveVertices;
+    static std::vector<HRL_uint> emissiveIndices;
     if (!BuildVoxelChunkGeometry(world, chunkX, chunkY, vertices, indices, emissiveVertices, emissiveIndices))
         return false;
 
-    DestroyVoxelChunkGPU(gpu);
+    // Les buffers GL sont mis a jour en place. L'UBO de lumieres du chunk est
+    // conserve, mais sa liste est recalculee (les bornes du chunk peuvent avoir
+    // change avec la taille des voxels/chunks).
+    gpu.light_revision = 0;
     if (!UploadVoxelSubmeshGPU(gpu.vao, gpu.vbo, gpu.ebo, gpu.vertex_count, gpu.index_count, vertices, indices))
     {
         DestroyVoxelChunkGPU(gpu);
@@ -2473,8 +3178,32 @@ static void SyncVoxelChunks(HRL_id sceneId, const hrl_scene_t* scene)
 		// by CollectVoxelVisibleChunksForViewport).
 		HRL_EnsureVoxelChunkLoaded(world, chunkX, chunkY);
 
+		// SMOOTH/BLOCKY lisent les voxels des 8 chunks voisins : ils doivent etre
+		// charges avant le maillage, sinon leur bordure serait vue comme vide.
+		bool hasGeometrySource = world->FindVoxelChunk(chunkX, chunkY) != nullptr;
+		if (world->render_mode_ != HRL_VOXEL_FLAT)
+		{
+			for (int dy = -1; dy <= 1; ++dy)
+			{
+				for (int dx = -1; dx <= 1; ++dx)
+				{
+					if (dx == 0 && dy == 0)
+						continue;
+					const int nx = chunkX + dx;
+					const int ny = chunkY + dy;
+					if (nx < 0 || ny < 0 || nx * world->chunk_size_ >= world->width_ || ny * world->chunk_size_ >= world->height_)
+						continue;
+					HRL_EnsureVoxelChunkLoaded(world, nx, ny);
+					// En SMOOTH, un chunk vide dessine quand meme la demi-bordure
+					// des voxels de ses voisins (cellules a cheval sur la frontiere).
+					if (world->render_mode_ == HRL_VOXEL_SMOOTH && world->FindVoxelChunk(nx, ny))
+						hasGeometrySource = true;
+				}
+			}
+		}
+
 		// Empty chunks have no GPU representation.
-		if (!world->FindVoxelChunk(chunkX, chunkY))
+		if (!hasGeometrySource)
 		{
 			if (it != chunks.end())
 			{
@@ -2521,57 +3250,555 @@ static void SyncVoxelChunks(HRL_id sceneId, const hrl_scene_t* scene)
 	}
 }
 
-static bool VoxelLightCanAffectChunk(const GL_Light& light, const glm::vec3& center, float radius)
+// =============================================================================
+// Voxel textures : one GL_TEXTURE_2D_ARRAY per scene, one layer per textured
+// type (HRL_SetVoxelTypeTexture). Rebuilt only when the texture list changes.
+// =============================================================================
+
+static void DestroyVoxelTextureArray(HRL_id scene_id)
 {
-	if (light.type != HRL_POINT_LIGHT && light.type != HRL_SPOT_LIGHT)
-		return true;
+	if (!bck_)
+		return;
+	auto it = bck_->voxel_texture_arrays.find(scene_id);
+	if (it == bck_->voxel_texture_arrays.end())
+		return;
+	if (it->second.texture)
+		glDeleteTextures(1, &it->second.texture);
+	bck_->voxel_texture_arrays.erase(it);
+}
 
-	// Keep the same attenuation model as EvaluateVoxelLight(). We only reject
-	// contributions that are below the HDR precision/noise floor. This is a
-	// conservative visibility test, not a fixed light-count approximation.
-	const float maxContribution = std::max({ light.color.r, light.color.g, light.color.b, 0.f }) *
-		std::max(light.intensity, 0.f);
-	if (maxContribution <= 0.f)
-		return false;
-
-	constexpr float contributionFloor = 1e-4f;
-	const float attenuation = std::max(light.attenuation, 0.f);
-	float range = 1000000.f;
-	if (attenuation > 1e-8f)
+// Returns the texture array to use (0 : no textured type).
+static GLuint EnsureVoxelTextureArray(HRL_id scene_id, const HRL_VoxelWorld* world)
+{
+	if (!world || world->textured_type_count_ == 0)
 	{
-		const float requiredDenominator = maxContribution / contributionFloor;
-		if (requiredDenominator <= 1.f)
-			range = 0.f;
-		else
-			range = std::sqrt((requiredDenominator - 1.f) / attenuation);
+		DestroyVoxelTextureArray(scene_id);
+		return 0;
 	}
 
-	const float d = glm::length(light.position - center);
-	return d <= range + radius;
+	auto& ta = bck_->voxel_texture_arrays[scene_id];
+	if (ta.texture && ta.revision == world->texture_revision_)
+	{
+		// A texture created asynchronously may arrive later : retry from time to time.
+		if (ta.complete || (++ta.retry_counter % 30u) != 0u)
+			return ta.texture;
+	}
+
+	struct Source { int layer; const GL33_Texture* texture; };
+	std::vector<Source> sources;
+	sources.reserve(world->textured_type_count_);
+	int layers = 0;
+	int width = 1;
+	int height = 1;
+	bool complete = true;
+	for (size_t type = 1; type < world->type_textures_.size(); ++type)
+	{
+		const int layer = world->type_texture_layers_[type];
+		if (layer < 0)
+			continue;
+		layers = std::max(layers, layer + 1);
+		const GL33_Texture* texture = nullptr;
+		auto texIt = bck_->textures.find(world->type_textures_[type]);
+		if (texIt != bck_->textures.end() && texIt->second &&
+			texIt->second->GetWidth() > 0 && texIt->second->GetHeight() > 0 &&
+			!texIt->second->GetCpuRGBA().empty())
+		{
+			texture = texIt->second;
+			width = std::max(width, static_cast<int>(texture->GetWidth()));
+			height = std::max(height, static_cast<int>(texture->GetHeight()));
+		}
+		else
+			complete = false;
+		sources.push_back({ layer, texture });
+	}
+	if (layers <= 0)
+	{
+		DestroyVoxelTextureArray(scene_id);
+		return 0;
+	}
+	width = std::min(width, 256);
+	height = std::min(height, 256);
+
+	if (!ta.texture)
+		glGenTextures(1, &ta.texture);
+	glActiveTexture(GL_TEXTURE0 + VOXEL_TEXTURE_ARRAY_UNIT);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, ta.texture);
+	if (ta.width != width || ta.height != height || ta.layers != layers)
+	{
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, width, height, layers, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		ta.width = width;
+		ta.height = height;
+		ta.layers = layers;
+	}
+
+	// Nearest resampling on the CPU (pixel art stays sharp), white if missing.
+	static std::vector<unsigned char> pixels;
+	pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+	for (const Source& src : sources)
+	{
+		if (!src.texture)
+		{
+			std::fill(pixels.begin(), pixels.end(), static_cast<unsigned char>(255));
+		}
+		else
+		{
+			const int sw = static_cast<int>(src.texture->GetWidth());
+			const int sh = static_cast<int>(src.texture->GetHeight());
+			const std::vector<unsigned char>& rgba = src.texture->GetCpuRGBA();
+			for (int y = 0; y < height; ++y)
+			{
+				const int sy = std::min(sh - 1, (y * sh) / height);
+				for (int x = 0; x < width; ++x)
+				{
+					const int sx = std::min(sw - 1, (x * sw) / width);
+					const size_t from = (static_cast<size_t>(sy) * static_cast<size_t>(sw) + static_cast<size_t>(sx)) * 4u;
+					const size_t to = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4u;
+					if (from + 3u < rgba.size())
+						std::memcpy(&pixels[to], &rgba[from], 4u);
+				}
+			}
+		}
+		glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, src.layer, width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+	}
+
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+
+	ta.revision = world->texture_revision_;
+	ta.complete = complete;
+	ta.retry_counter = 0;
+	return ta.texture;
 }
 
-static void EnsureVoxelChunkLightUBO(GL33_Backend::VoxelChunkGPU& gpu, const GL_Light* lights, int count, uint64_t revision)
+
+// =============================================================================
+// Emissive voxel lighting : GPU light field
+// -----------------------------------------------------------------------------
+// The previous system turned the brightest emissive voxels into point lights
+// (at most 256, every fragment looping over them). Now, for each viewport :
+//
+//   1. the emissive geometry of the loaded chunks is drawn into a small
+//      texture covering the view + the light reach (1 texel = 1 voxel, or
+//      more voxels when the view is very large) ;
+//   2. a box-filtered pyramid of that emission is built (each level halves) ;
+//   3. the levels are added back from the coarsest one, each with a weight
+//      (and a tent upsample) : level l holds the energy of blocks of 2^l
+//      texels, so the sum reproduces the falloff of a point light
+//        f(d) = (0.5 / sqrt(d^2 + 0.25)) / (1 + (d^2 + 0.25) / F^2)
+//      (F : HRL_SetVoxelEmissiveLighting falloff, the attenuation of the old
+//      voxel point lights, Lambert term included).
+//
+// The shaders read the result with a single texture fetch. The cost depends
+// only on the size of the view, never on the number of emissive voxels. The
+// region is snapped to the coarsest texel so the light does not shimmer when
+// the camera moves. Light is not occluded (like the old voxel lights).
+// =============================================================================
+
+static const char* kVoxelLightFullscreenVS = R"GLSL(#version 330 core
+out vec2 uv;
+void main()
 {
-    if (!gpu.light_ubo)
-    {
-        glGenBuffers(1, &gpu.light_ubo);
-        glBindBuffer(GL_UNIFORM_BUFFER, gpu.light_ubo);
-        glBufferData(GL_UNIFORM_BUFFER, MAX_LIGHTS * sizeof(GL_Light), nullptr, GL_STATIC_DRAW);
-        gpu.light_revision = 0;
-        gpu.light_count = 0;
-    }
-
-    if (gpu.light_revision != revision || gpu.light_count != count)
-    {
-        glBindBuffer(GL_UNIFORM_BUFFER, gpu.light_ubo);
-        if (count > 0)
-            glBufferSubData(GL_UNIFORM_BUFFER, 0, static_cast<GLsizeiptr>(count * sizeof(GL_Light)), lights);
-        gpu.light_revision = revision;
-        gpu.light_count = count;
-    }
-
-    glBindBufferBase(GL_UNIFORM_BUFFER, 0, gpu.light_ubo);
+    vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+    uv = p * 0.5 + 0.5;
+    gl_Position = vec4(p, 0.0, 1.0);
 }
+)GLSL";
+
+static const char* kVoxelLightEmitVS = R"GLSL(#version 330 core
+layout(location = 0) in vec2 aPosition;
+layout(location = 2) in vec4 aColor;
+uniform vec4 Region; // xy : world min, zw : 1 / world size
+out vec3 emission;
+void main()
+{
+    vec2 uv = (aPosition - Region.xy) * Region.zw;
+    emission = max(aColor.rgb, vec3(0.0)) * clamp(aColor.a, 0.0, 1.0);
+    gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+}
+)GLSL";
+
+static const char* kVoxelLightEmitFS = R"GLSL(#version 330 core
+in vec3 emission;
+out vec4 FragColor;
+void main()
+{
+    FragColor = vec4(emission, 1.0);
+}
+)GLSL";
+
+// Half-size downsample : 4 bilinear taps one source texel around the
+// destination center (a 4x4 tent). Smoother than a 2x2 box, so the light of an
+// emitter barely depends on where it sits in the coarse texels.
+static const char* kVoxelLightDownFS = R"GLSL(#version 330 core
+in vec2 uv;
+uniform sampler2D Src;
+uniform vec2 SrcTexel;
+out vec4 FragColor;
+void main()
+{
+    vec3 sum = texture(Src, uv + vec2(-1.0, -1.0) * SrcTexel).rgb;
+    sum += texture(Src, uv + vec2( 1.0, -1.0) * SrcTexel).rgb;
+    sum += texture(Src, uv + vec2(-1.0,  1.0) * SrcTexel).rgb;
+    sum += texture(Src, uv + vec2( 1.0,  1.0) * SrcTexel).rgb;
+    FragColor = vec4(sum * 0.25, 1.0);
+}
+)GLSL";
+
+static const char* kVoxelLightUpFS = R"GLSL(#version 330 core
+in vec2 uv;
+uniform sampler2D Cur;
+uniform sampler2D Low;
+uniform int HasLow;
+uniform float Weight;
+uniform vec2 LowTexel;
+out vec4 FragColor;
+void main()
+{
+    vec3 light = Weight * texture(Cur, uv).rgb;
+    if (HasLow != 0)
+    {
+        // 3x3 tent of the coarser accumulated level.
+        vec3 sum = vec3(0.0);
+        sum += texture(Low, uv + vec2(-1.0, -1.0) * LowTexel).rgb;
+        sum += texture(Low, uv + vec2( 0.0, -1.0) * LowTexel).rgb * 2.0;
+        sum += texture(Low, uv + vec2( 1.0, -1.0) * LowTexel).rgb;
+        sum += texture(Low, uv + vec2(-1.0,  0.0) * LowTexel).rgb * 2.0;
+        sum += texture(Low, uv).rgb * 4.0;
+        sum += texture(Low, uv + vec2( 1.0,  0.0) * LowTexel).rgb * 2.0;
+        sum += texture(Low, uv + vec2(-1.0,  1.0) * LowTexel).rgb;
+        sum += texture(Low, uv + vec2( 0.0,  1.0) * LowTexel).rgb * 2.0;
+        sum += texture(Low, uv + vec2( 1.0,  1.0) * LowTexel).rgb;
+        light += sum * (1.0 / 16.0);
+    }
+    FragColor = vec4(light, 1.0);
+}
+)GLSL";
+
+static void DestroyVoxelLightFieldTextures()
+{
+	auto& lf = bck_->voxel_light_field;
+	if (!lf.down.empty())
+		glDeleteTextures(static_cast<GLsizei>(lf.down.size()), lf.down.data());
+	if (!lf.up.empty())
+		glDeleteTextures(static_cast<GLsizei>(lf.up.size()), lf.up.data());
+	lf.down.clear();
+	lf.up.clear();
+	lf.sizes.clear();
+}
+
+static void InitVoxelLightField()
+{
+	auto& lf = bck_->voxel_light_field;
+	GLint units = 0;
+	glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &units);
+	if (units <= VOXEL_LIGHT_FIELD_TEXTURE_UNIT)
+		return; // unsupported : emissive voxels glow but light nothing
+
+	auto make = [](const char* vs, const char* fs) -> GL33_Shader*
+	{
+		auto* shader = new GL33_Shader();
+		if (shader->GL33_Create(vs, std::strlen(vs), fs, std::strlen(fs)) != 0)
+		{
+			delete shader;
+			return nullptr;
+		}
+		return shader;
+	};
+	lf.emit_shader = make(kVoxelLightEmitVS, kVoxelLightEmitFS);
+	lf.down_shader = make(kVoxelLightFullscreenVS, kVoxelLightDownFS);
+	lf.up_shader = make(kVoxelLightFullscreenVS, kVoxelLightUpFS);
+	glGenFramebuffers(1, &lf.fbo);
+	lf.supported = lf.emit_shader && lf.down_shader && lf.up_shader && lf.fbo;
+}
+
+static void ShutdownVoxelLightField()
+{
+	auto& lf = bck_->voxel_light_field;
+	DestroyVoxelLightFieldTextures();
+	delete lf.emit_shader;
+	delete lf.down_shader;
+	delete lf.up_shader;
+	lf.emit_shader = lf.down_shader = lf.up_shader = nullptr;
+	if (lf.fbo)
+		glDeleteFramebuffers(1, &lf.fbo);
+	lf.fbo = 0;
+	lf.supported = false;
+	lf.active = false;
+}
+
+static void EnsureVoxelLightFieldTextures(int width0, int height0, int levels)
+{
+	auto& lf = bck_->voxel_light_field;
+	if (static_cast<int>(lf.sizes.size()) == levels && !lf.sizes.empty() &&
+		lf.sizes[0].x == width0 && lf.sizes[0].y == height0)
+		return;
+
+	DestroyVoxelLightFieldTextures();
+	lf.down.resize(static_cast<size_t>(levels));
+	lf.up.resize(static_cast<size_t>(levels));
+	lf.sizes.resize(static_cast<size_t>(levels));
+	glGenTextures(levels, lf.down.data());
+	glGenTextures(levels, lf.up.data());
+	for (int l = 0; l < levels; ++l)
+	{
+		const glm::ivec2 size(std::max(1, width0 >> l), std::max(1, height0 >> l));
+		lf.sizes[static_cast<size_t>(l)] = size;
+		for (GLuint tex : { lf.down[static_cast<size_t>(l)], lf.up[static_cast<size_t>(l)] })
+		{
+			glBindTexture(GL_TEXTURE_2D, tex);
+			// Packed float HDR : 4 bytes per texel, filterable and renderable.
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_R11F_G11F_B10F, size.x, size.y, 0, GL_RGB, GL_FLOAT, nullptr);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		}
+	}
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// Falloff of one emitter (distance in voxels) : same curve as the old voxel
+// point lights evaluated on the voxel plane (lifted by half a voxel).
+static float VoxelEmitterFalloff(float distance, float falloff)
+{
+	const float d2 = distance * distance + 0.25f;
+	return (0.5f / std::sqrt(d2)) / (1.f + d2 / std::max(falloff * falloff, 1e-6f));
+}
+
+// Energy of the falloff in the ring [a, b] (voxels) : 2 pi integral f(r) r dr.
+static float VoxelEmitterRingEnergy(float a, float b, float falloff)
+{
+	if (b <= a)
+		return 0.f;
+	constexpr int kSteps = 64; // Simpson
+	const float h = (b - a) / kSteps;
+	float sum = 0.f;
+	for (int i = 0; i <= kSteps; ++i)
+	{
+		const float r = a + h * static_cast<float>(i);
+		const float w = (i == 0 || i == kSteps) ? 1.f : ((i & 1) ? 4.f : 2.f);
+		sum += w * VoxelEmitterFalloff(r, falloff) * r;
+	}
+	return 2.f * 3.14159265f * sum * h / 3.f;
+}
+
+// Weight of each pyramid level (cached : same falloff / texel size / levels).
+static const std::array<float, 10>& VoxelLightLevelWeights(float falloff, int s, int levels)
+{
+	static std::array<float, 10> weights{};
+	static float cachedFalloff = -1.f;
+	static int cachedS = -1;
+	static int cachedLevels = -1;
+	if (cachedFalloff == falloff && cachedS == s && cachedLevels == levels)
+		return weights;
+	cachedFalloff = falloff;
+	cachedS = s;
+	cachedLevels = levels;
+
+	weights.fill(0.f);
+	auto radius = [&](int l) { return l == 0 ? 0.f : 0.75f * static_cast<float>(s << l); };
+	for (int l = 0; l < levels && l < 10; ++l)
+		weights[static_cast<size_t>(l)] = VoxelEmitterRingEnergy(radius(l), radius(l + 1), falloff);
+	// Level 0 only lights the emitter's own texel : capped there (else the
+	// emitter and what overlaps it are over-lit), the rest goes one level up.
+	constexpr float kLevel0Max = 0.6f;
+	if (levels > 1 && weights[0] > kLevel0Max)
+	{
+		weights[1] += weights[0] - kLevel0Max;
+		weights[0] = kLevel0Max;
+	}
+	return weights;
+}
+
+// Builds the light field of the viewport about to be drawn. Called before
+// the viewport binds its framebuffer : leaves the depth test on, blending off.
+static void BuildVoxelLightField(HRL_id scene_id, const hrl_scene_t* scene, const HRL_Viewport* viewport)
+{
+	auto& lf = bck_->voxel_light_field;
+	lf.active = false;
+	if (!lf.supported || !scene || !scene->voxel_world || !viewport)
+		return;
+	const HRL_VoxelWorld* world = scene->voxel_world;
+	const float reach = VoxelLightReachVoxels(world);
+	if (reach <= 0.f || world->voxel_size_ <= 0.f || world->chunk_size_ <= 0 ||
+		scene->debug_view == HRL_DEBUG_VIEW_WIREFRAME || scene->debug_view == HRL_DEBUG_VIEW_UNLIT)
+		return;
+	auto mapIt = bck_->voxel_chunks.find(scene_id);
+	if (mapIt == bck_->voxel_chunks.end() || mapIt->second.empty())
+		return;
+
+	float minWX, minWY, maxWX, maxWY;
+	if (!ComputeVoxelViewWorldRect(world, viewport, minWX, minWY, maxWX, maxWY))
+		return;
+
+	// Region in voxels : the view + the reach of the light.
+	const float vs = world->voxel_size_;
+	const float rx0 = minWX / vs - reach, ry0 = minWY / vs - reach;
+	const float rx1 = maxWX / vs + reach, ry1 = maxWY / vs + reach;
+	if (!(rx1 > rx0) || !(ry1 > ry0) || !std::isfinite(rx0 + ry0 + rx1 + ry1))
+		return;
+
+	// Voxels per texel : 1, or more for a very large view (zoomed out).
+	constexpr float kMaxSide = 1024.f;
+	int s = 1;
+	while (std::max(rx1 - rx0, ry1 - ry0) / static_cast<float>(s) > kMaxSide && s < 64)
+		s *= 2;
+
+	// Levels until a texel of the coarsest one covers the reach.
+	int levels = 1;
+	while (levels < 10 && 0.75f * static_cast<float>(s << (levels - 1)) < reach)
+		++levels;
+
+	// Snap the region to the coarsest texels (no shimmering when the camera
+	// moves), sizes rounded up so the textures are rarely reallocated.
+	const int coarse = s << (levels - 1);
+	const int sizeStep = std::max(coarse, s * 32);
+	const int x0 = static_cast<int>(std::floor(rx0 / coarse)) * coarse;
+	const int y0 = static_cast<int>(std::floor(ry0 / coarse)) * coarse;
+	int spanX = static_cast<int>(std::ceil((rx1 - static_cast<float>(x0)) / sizeStep)) * sizeStep;
+	int spanY = static_cast<int>(std::ceil((ry1 - static_cast<float>(y0)) / sizeStep)) * sizeStep;
+	spanX = std::max(spanX, coarse);
+	spanY = std::max(spanY, coarse);
+	const int width0 = spanX / s;
+	const int height0 = spanY / s;
+	if (width0 <= 0 || height0 <= 0 || width0 > 4096 || height0 > 4096)
+		return;
+
+	EnsureVoxelLightFieldTextures(width0, height0, levels);
+
+	// GL state : restored for the scene passes that follow.
+	const GLboolean cullWasOn = glIsEnabled(GL_CULL_FACE);
+	const GLboolean scissorWasOn = glIsEnabled(GL_SCISSOR_TEST);
+	glDisable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glDisable(GL_BLEND);
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_SCISSOR_TEST);
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	glBindFramebuffer(GL_FRAMEBUFFER, lf.fbo);
+	glDrawBuffer(GL_COLOR_ATTACHMENT0);
+
+	// 1. Emission of the loaded chunks inside the region.
+	const float regionMinX = static_cast<float>(x0) * vs;
+	const float regionMinY = static_cast<float>(y0) * vs;
+	const float regionW = static_cast<float>(spanX) * vs;
+	const float regionH = static_cast<float>(spanY) * vs;
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, lf.down[0], 0);
+	glViewport(0, 0, width0, height0);
+	glClearColor(0.f, 0.f, 0.f, 0.f);
+	glClear(GL_COLOR_BUFFER_BIT);
+	lf.emit_shader->Use();
+	lf.emit_shader->SetVec4("Region", glm::vec4(regionMinX, regionMinY, 1.f / regionW, 1.f / regionH));
+	int emitterChunks = 0;
+	const float chunkWorld = static_cast<float>(world->chunk_size_) * vs;
+	for (const auto& [key, gpu] : mapIt->second)
+	{
+		if (!gpu.emissive_vao || gpu.emissive_index_count <= 0)
+			continue;
+		const float cx0 = static_cast<float>(VoxelChunkXFromKey(key)) * chunkWorld - vs;
+		const float cy0 = static_cast<float>(VoxelChunkYFromKey(key)) * chunkWorld - vs;
+		if (cx0 > regionMinX + regionW || cy0 > regionMinY + regionH ||
+			cx0 + chunkWorld + 2.f * vs < regionMinX || cy0 + chunkWorld + 2.f * vs < regionMinY)
+			continue;
+		glBindVertexArray(gpu.emissive_vao);
+		glDrawElements(GL_TRIANGLES, gpu.emissive_index_count, GL_UNSIGNED_INT, nullptr);
+		++emitterChunks;
+	}
+	glBindVertexArray(0);
+
+	if (emitterChunks > 0)
+	{
+		glBindVertexArray(bck_->vao[BUFFER_QUAD]); // attributes unused (gl_VertexID)
+
+		// 2. Box-filtered pyramid.
+		lf.down_shader->Use();
+		lf.down_shader->SetInt("Src", 0);
+		glActiveTexture(GL_TEXTURE0);
+		for (int l = 1; l < levels; ++l)
+		{
+			const glm::ivec2 size = lf.sizes[static_cast<size_t>(l)];
+			const glm::ivec2 src = lf.sizes[static_cast<size_t>(l - 1)];
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, lf.down[static_cast<size_t>(l)], 0);
+			glViewport(0, 0, size.x, size.y);
+			glBindTexture(GL_TEXTURE_2D, lf.down[static_cast<size_t>(l - 1)]);
+			lf.down_shader->SetVec2("SrcTexel", glm::vec2(1.f / static_cast<float>(src.x), 1.f / static_cast<float>(src.y)));
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+		}
+
+		// 3. Weighted sum, coarsest level first. The pyramid conserves energy,
+		//    so level l receives the energy of the falloff between the radii
+		//    r_l and r_(l+1) (integral of f over that ring) : the sum then
+		//    follows f (checked numerically against the point-light curve).
+		const float falloff = world->emissive_light_falloff_;
+		const float intensity = world->emissive_light_intensity_;
+		const std::array<float, 10>& weights = VoxelLightLevelWeights(falloff, s, levels);
+		lf.up_shader->Use();
+		lf.up_shader->SetInt("Cur", 0);
+		lf.up_shader->SetInt("Low", 1);
+		for (int l = levels - 1; l >= 0; --l)
+		{
+			const glm::ivec2 size = lf.sizes[static_cast<size_t>(l)];
+			const float weight = intensity * weights[static_cast<size_t>(l)];
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, lf.up[static_cast<size_t>(l)], 0);
+			glViewport(0, 0, size.x, size.y);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, lf.down[static_cast<size_t>(l)]);
+			const bool hasLow = l + 1 < levels;
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_2D, hasLow ? lf.up[static_cast<size_t>(l + 1)] : 0);
+			lf.up_shader->SetInt("HasLow", hasLow ? 1 : 0);
+			lf.up_shader->SetFloat("Weight", weight);
+			if (hasLow)
+			{
+				const glm::ivec2 low = lf.sizes[static_cast<size_t>(l + 1)];
+				lf.up_shader->SetVec2("LowTexel", glm::vec2(1.f / static_cast<float>(low.x), 1.f / static_cast<float>(low.y)));
+			}
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+		}
+		glActiveTexture(GL_TEXTURE1);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glBindVertexArray(0);
+
+		lf.region = glm::vec4(regionMinX, regionMinY, 1.f / regionW, 1.f / regionH);
+		lf.falloff_world = falloff * vs;
+		lf.active = true;
+
+		glActiveTexture(GL_TEXTURE0 + VOXEL_LIGHT_FIELD_TEXTURE_UNIT);
+		glBindTexture(GL_TEXTURE_2D, lf.up[0]);
+		glActiveTexture(GL_TEXTURE0);
+	}
+
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glEnable(GL_DEPTH_TEST);
+	glDepthMask(GL_TRUE);
+	if (cullWasOn) glEnable(GL_CULL_FACE);
+	if (scissorWasOn) glEnable(GL_SCISSOR_TEST);
+	glClearColor(0.f, 0.f, 0.f, 1.f);
+	ctx_->bound_shader = nullptr;
+	ctx_->bound_material = nullptr;
+}
+
+// Uniforms of the light field for a shader that reads it (voxel, sprite,
+// mesh). Cached by GL33_Shader : only changes reach OpenGL.
+static void ApplyVoxelLightFieldUniforms(GL33_Shader* shader)
+{
+	if (!shader || !bck_)
+		return;
+	const auto& lf = bck_->voxel_light_field;
+	shader->SetInt("VoxelLightEnabled", lf.active ? 1 : 0);
+	if (!lf.active)
+		return;
+	shader->SetInt("VoxelLightField", VOXEL_LIGHT_FIELD_TEXTURE_UNIT);
+	shader->SetVec4("VoxelLightRegion", lf.region);
+	shader->SetFloat("VoxelLightFalloff", lf.falloff_world);
+}
+
 
 static void DrawVoxelWorld(HRL_id scene_id, const hrl_scene_t* scene, const FrustumPlaneSet& frustum)
 {
@@ -2584,6 +3811,8 @@ static void DrawVoxelWorld(HRL_id scene_id, const hrl_scene_t* scene, const Frus
 
 	GL33_Shader* shader = bck_->voxel_shader;
 	shader->Use();
+	// Normale constante des voxels 2D (attribut 1 sans tableau, voir GL33_VoxelVertex).
+	glVertexAttrib3f(1, 0.f, 0.f, 1.f);
 	ctx_->shader = shader;
 	ctx_->bound_shader = shader;
 	ctx_->bound_material = nullptr;
@@ -2662,8 +3891,11 @@ static void DrawVoxelWorld(HRL_id scene_id, const hrl_scene_t* scene, const Frus
 			(0.5f * static_cast<float>(startX + endX)) * scene->voxel_world->voxel_size_,
 			(0.5f * static_cast<float>(startY + endY)) * scene->voxel_world->voxel_size_,
 			0.f);
-		const float dx = 0.5f * static_cast<float>(endX - startX) * scene->voxel_world->voxel_size_;
-		const float dy = 0.5f * static_cast<float>(endY - startY) * scene->voxel_world->voxel_size_;
+		// En SMOOTH, la geometrie d'un chunk deborde d'un demi-voxel sur ses
+		// voisins : marge d'un voxel sur les bornes (culling et lumieres).
+		const float boundsMargin = scene->voxel_world->render_mode_ == HRL_VOXEL_FLAT ? 0.f : 1.f;
+		const float dx = (0.5f * static_cast<float>(endX - startX) + boundsMargin) * scene->voxel_world->voxel_size_;
+		const float dy = (0.5f * static_cast<float>(endY - startY) + boundsMargin) * scene->voxel_world->voxel_size_;
 		const float radius = std::sqrt(dx * dx + dy * dy);
 		if (!SphereInsideFrustum(frustum, center, radius))
 			continue;
@@ -2671,69 +3903,50 @@ static void DrawVoxelWorld(HRL_id scene_id, const hrl_scene_t* scene, const Frus
 		visibleChunks.push_back({ key, &gpu, center, radius });
 	}
 
-	int boundVoxelLightCount = -1;
-	int boundVoxelShadowLightCount = -1;
-	GLuint boundVoxelLightUBO = 0;
-	auto cacheIt = bck_->voxel_light_cache.find(scene_id);
-	const GL33_Backend::VoxelLightCache* lightCache =
-		(cacheIt != bck_->voxel_light_cache.end()) ? &cacheIt->second : nullptr;
+	// Lights : the scene lights of the shared UBO (binding 0, at most 32). The
+	// emissive voxels no longer are point lights : their light comes from the
+	// light field (one texture read), whatever their number.
+	{
+		auto cacheIt = bck_->voxel_light_cache.find(scene_id);
+		const int lightCount = cacheIt != bck_->voxel_light_cache.end() ? cacheIt->second.scene_light_count : 0;
+		const int shadowCount = cacheIt != bck_->voxel_light_cache.end() ? cacheIt->second.scene_shadow_light_count : 0;
+		shader->SetInt("VoxelLightCount", lightCount);
+		shader->SetInt("VoxelShadowLightCount", shadowCount);
+		glBindBufferBase(GL_UNIFORM_BUFFER, 0, bck_->ubo[UBO_LIGHTS]);
+	}
+	ApplyVoxelLightFieldUniforms(shader);
+
+	// Textures of the voxel types.
+	const GLuint textureArray = EnsureVoxelTextureArray(scene_id, scene->voxel_world);
+	shader->SetInt("VoxelTexturesEnabled", textureArray ? 1 : 0);
+	if (textureArray)
+	{
+		shader->SetInt("VoxelTextures", VOXEL_TEXTURE_ARRAY_UNIT);
+		glActiveTexture(GL_TEXTURE0 + VOXEL_TEXTURE_ARRAY_UNIT);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, textureArray);
+
+		// World size of one copy of each texture (4 layers per vec4).
+		static std::array<glm::vec4, 64> tiles;
+		tiles.fill(glm::vec4(1.f));
+		const HRL_VoxelWorld* world = scene->voxel_world;
+		int layerCount = 0;
+		for (size_t type = 1; type < world->type_texture_layers_.size(); ++type)
+		{
+			const int layer = world->type_texture_layers_[type];
+			if (layer < 0 || layer >= 256)
+				continue;
+			tiles[static_cast<size_t>(layer >> 2)][layer & 3] = world->type_texture_tiles_[type] * world->voxel_size_;
+			layerCount = std::max(layerCount, layer + 1);
+		}
+		const GLint location = glGetUniformLocation(static_cast<GLuint>(shader->GetId()), "VoxelTexTiles");
+		if (location >= 0 && layerCount > 0)
+			glUniform4fv(location, (layerCount + 3) / 4, &tiles[0].x);
+	}
+
 	for (const VoxelVisibleChunk& visible : visibleChunks)
 	{
-		const uint64_t key = visible.key;
-		auto& gpu = *visible.gpu;
-		// Build the spatially culled light list only when the light cache changes.
-		// The chunk bounds are stable, so repeating chunk x light intersection tests
-		// every frame is pure CPU overhead when the scene is static.
-		if (lightCache)
-		{
-			const auto& cache = *lightCache;
-			if (gpu.light_revision != cache.revision)
-			{
-					gpu.lights.clear();
-					gpu.lights.reserve(std::min(static_cast<size_t>(MAX_LIGHTS),
-						static_cast<size_t>(cache.scene_light_count) + cache.lights.size()));
-
-					for (int i = 0; i < cache.scene_light_count &&
-						static_cast<int>(gpu.lights.size()) < MAX_LIGHTS; ++i)
-						gpu.lights.push_back(cache.scene_lights[static_cast<size_t>(i)]);
-
-					for (const GL_Light& light : cache.lights)
-					{
-						if (static_cast<int>(gpu.lights.size()) >= MAX_LIGHTS)
-							break;
-						if (VoxelLightCanAffectChunk(light, visible.center, visible.radius))
-							gpu.lights.push_back(light);
-					}
-
-					gpu.light_count = static_cast<int>(gpu.lights.size());
-					gpu.shadow_light_count = 0;
-					for (const GL_Light& light : gpu.lights)
-					{
-						if (light.shadowParams.z >= -0.5f)
-							++gpu.shadow_light_count;
-					}
-					EnsureVoxelChunkLightUBO(gpu, gpu.lights.data(), gpu.light_count, cache.revision);
-				}
-
-				if (gpu.light_ubo && boundVoxelLightUBO != gpu.light_ubo)
-				{
-					glBindBufferBase(GL_UNIFORM_BUFFER, 0, gpu.light_ubo);
-					boundVoxelLightUBO = gpu.light_ubo;
-				}
-				if (boundVoxelLightCount != gpu.light_count)
-				{
-					shader->SetInt("VoxelLightCount", gpu.light_count);
-					boundVoxelLightCount = gpu.light_count;
-				}
-				if (boundVoxelShadowLightCount != gpu.shadow_light_count)
-				{
-					shader->SetInt("VoxelShadowLightCount", gpu.shadow_light_count);
-					boundVoxelShadowLightCount = gpu.shadow_light_count;
-				}
-			}
-
-			glBindVertexArray(gpu.vao);
-		glDrawElements(GL_TRIANGLES, gpu.index_count, GL_UNSIGNED_INT, nullptr);
+		glBindVertexArray(visible.gpu->vao);
+		glDrawElements(GL_TRIANGLES, visible.gpu->index_count, GL_UNSIGNED_INT, nullptr);
 	}
 
 	glBindVertexArray(0);
@@ -2777,9 +3990,14 @@ static void DrawVoxelWorld(HRL_id scene_id, const hrl_scene_t* scene, const Frus
 	glDisable(GL_BLEND);
 	glDepthMask(GL_TRUE);
 
-	// Restore the shared scene-light UBO for the rest of the renderer. Voxel
-	// chunks temporarily bind their own immutable light buffers at binding 0.
+	// The shared scene-light UBO stays bound at binding 0 for the rest of the renderer.
 	glBindBufferBase(GL_UNIFORM_BUFFER, 0, bck_->ubo[UBO_LIGHTS]);
+	if (textureArray)
+	{
+		glActiveTexture(GL_TEXTURE0 + VOXEL_TEXTURE_ARRAY_UNIT);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+		glActiveTexture(GL_TEXTURE0);
+	}
 }
 
 static void CreateSpriteGeometry()
@@ -3083,6 +4301,9 @@ void GL33_InitContext(HRL_uint _width, HRL_uint _height, void *loader)
 		bck_->voxel_shader->SetFloat("BrightThreshold", 1.0f);
 	}
 
+	// Light of the emissive voxels (light field shaders + framebuffer).
+	InitVoxelLightField();
+
 	//SKINNED 3D MESH SHADER
 	auto* skinned_mesh_shader = new GL33_Shader();
 	if (skinned_mesh_shader->GL33_Create(
@@ -3270,6 +4491,13 @@ void GL33_Shutdown()
 	}
 	bck_->voxel_chunks.clear();
 	bck_->voxel_light_cache.clear();
+	for (auto& [scene_id, textureArray] : bck_->voxel_texture_arrays)
+	{
+		(void)scene_id;
+		if (textureArray.texture) glDeleteTextures(1, &textureArray.texture);
+	}
+	bck_->voxel_texture_arrays.clear();
+	ShutdownVoxelLightField();
 
 	for (auto& [id, mesh] : bck_->skeletal_meshes)
 	{
@@ -3438,6 +4666,10 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 
 	GL_Scene* gpu_scene = scene_it->second;
 	GLuint scene_fbo = gpu_scene->fbo;
+	// Les uniforms redondants sont filtres dans GL33_Shader. On repart d'un cache
+	// vide a chaque scene pour rester robuste si l'application ecrit elle-meme
+	// des uniforms via glUniform* sur un programme HRL.
+	GL33_Shader::InvalidateAllValueCaches();
 	ctx_->current_scene = scene;
 	ctx_->current_fog = &scene->fog;
 
@@ -3497,15 +4729,48 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		g_gl33_gi->UpdateDDGI(scene_id);
 	}
 
-	for (const auto& v : scene->viewports)
+	// Independant de la camera : calcule une fois par scene, pas par viewport.
+	bool hasScreenSpaceDisplacement = false;
+	for (const auto& [meshId, mesh] : scene->meshes)
+	{
+		(void)meshId;
+		if (!mesh || mesh->material_ == HRL_INVALID_ID) continue;
+		auto matIt = GetPrivateContext()->materials.find(mesh->material_);
+		if (matIt != GetPrivateContext()->materials.end() && MaterialUsesScreenSpaceDisplacement(matIt->second))
+		{
+			hasScreenSpaceDisplacement = true;
+			break;
+		}
+	}
+
+	// Viewports dessines dans leur ordre de creation (IDs croissants) : le
+	// dernier cree passe au-dessus, ce qui rend les incrustations previsibles.
+	// L'ordre d'une unordered_map est arbitraire : un petit viewport pouvait
+	// etre entierement recouvert par un viewport plein ecran dessine apres lui.
+	static std::vector<std::pair<HRL_id, HRL_Viewport*>> orderedViewports;
+	orderedViewports.assign(scene->viewports.begin(), scene->viewports.end());
+	std::sort(orderedViewports.begin(), orderedViewports.end(),
+		[](const auto& a, const auto& b) { return a.first < b.first; });
+
+	for (const auto& v : orderedViewports)
 	{
 		if (!v.second || !v.second->camera_)
 			continue;
 		ctx_->viewport = v.second;
 		ctx_->bound_material = nullptr;
 		ctx_->bound_shader = nullptr;
+
+		// Light of the emissive voxels seen by this viewport (own framebuffer,
+		// before the viewport binds the scene one).
+		BuildVoxelLightField(scene_id, scene, v.second);
+
 		float winW = (float)GetWindowWidth();
 		float winH = (float)GetWindowHeight();
+		// Rectangle du viewport en pixels (meme arrondi que le glViewport).
+		const int rectX = (int)(v.second->x_ * winW);
+		const int rectY = (int)(v.second->y_ * winH);
+		const int rectW = (int)(v.second->width_ * winW);
+		const int rectH = (int)(v.second->height_ * winH);
 
 		glViewport(
 		 (GLsizei)(v.second->x_ * winW),
@@ -3555,20 +4820,7 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		}
 
 		// Resolve once so displacement samples a stable scene-color snapshot.
-		ResolveSceneMSAA(gpu_scene);
-
-		bool hasScreenSpaceDisplacement = false;
-		for (const auto& [meshId, mesh] : scene->meshes)
-		{
-			(void)meshId;
-			if (!mesh || mesh->material_ == HRL_INVALID_ID) continue;
-			auto matIt = GetPrivateContext()->materials.find(mesh->material_);
-			if (matIt != GetPrivateContext()->materials.end() && MaterialUsesScreenSpaceDisplacement(matIt->second))
-			{
-				hasScreenSpaceDisplacement = true;
-				break;
-			}
-		}
+		ResolveSceneMSAA(gpu_scene, rectX, rectY, rectW, rectH);
 
 		bool displacementRendered = false;
 		if (!wireframeDebug && hasScreenSpaceDisplacement && scene->debug_view == HRL_DEBUG_VIEW_NONE &&
@@ -3589,17 +4841,28 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			displacementRendered = true;
 		}
 
+		// If displacement was rendered into the MSAA target, resolve it now so the
+		// post-process/fog stages see the final displaced scene.
+		if (displacementRendered)
+			ResolveSceneMSAA(gpu_scene, rectX, rectY, rectW, rectH);
+
 		// Debug primitives stay crisp and are rendered over the distortion.
+		// Elles sont dessinees dans le FBO resolu de la scene (et non dans le
+		// buffer MSAA) : avant, avec MSAA, elles etaient tracees apres la
+		// resolution et n'apparaissaient jamais dans l'image de la scene (elles
+		// n'etaient visibles que grace a un second dessin, direct a l'ecran,
+		// depuis HRL_EndFrame). Seule la couleur (attachment 0) est ecrite.
 		auto debugIt = GetPrivateContext()->debug_renderers.find(scene_id);
 		if (debugIt != GetPrivateContext()->debug_renderers.end())
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
+			glDrawBuffer(GL_COLOR_ATTACHMENT0);
+			glViewport(rectX, rectY, rectW, rectH);
 			GL33_DrawDebug(debugIt->second, GetPrivateContext()->debug_line_thickness);
-
-		// If displacement was rendered into the MSAA target, resolve it now so the
-		// post-process/fog stages see the final displaced scene. With no displacement
-		// pass, the first resolve is already the final scene resolve; doing another
-		// one here would overwrite debug primitives rendered after that resolve.
-		if (displacementRendered)
-			ResolveSceneMSAA(gpu_scene);
+			const GLenum attachments[5] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4};
+			glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
+			glDrawBuffers(5, attachments);
+		}
 
 		bool has_post_process = !wireframeDebug && !v.second->post_processes.empty();
 		bool has_scene_effects = !wireframeDebug && (HasActiveVolumetricFog(scene) || scene->god_rays.enabled);
@@ -3666,34 +4929,57 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 				src = dst;
 			}
 
+			// Le resultat post-traite revient TOUJOURS dans le FBO de la scene
+			// (couleur finale = attachment 0), qu'elle soit affichee ou non, et
+			// seulement sur le rectangle de ce viewport pour ne pas ecraser les
+			// viewports precedents.
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, bck_->post_fbo[src]);
 			glReadBuffer(GL_COLOR_ATTACHMENT0);
-			if (scene->draw_on_screen)
-			{
-				glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-				glBlitFramebuffer(0, 0, (int)winW, (int)winH, 0, 0, (int)winW, (int)winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-			}
-			else
-			{
-				glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene_fbo);
-				glDrawBuffer(GL_COLOR_ATTACHMENT0);
-				glBlitFramebuffer(0, 0, (int)winW, (int)winH, 0, 0, (int)winW, (int)winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-			}
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene_fbo);
+			glDrawBuffer(GL_COLOR_ATTACHMENT0);
+			glBlitFramebuffer(rectX, rectY, rectX + rectW, rectY + rectH,
+				rectX, rectY, rectX + rectW, rectY + rectH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		}
-		else if (scene->draw_on_screen)
-		{
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
-			glReadBuffer(GL_COLOR_ATTACHMENT0);
-			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-			glBlitFramebuffer(0, 0, (int)winW, (int)winH, 0, 0, (int)winW, (int)winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-		}
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		DrawGizmos(scene, v.second, [&](){ for (const auto& [vid, vp] : scene->viewports) if (vp == v.second) return vid; return (HRL_id)HRL_INVALID_ID; }());
+
+		// Overlays (gizmos, infos de debug, messages, widgets) : dessines dans
+		// l'image finale de la scene, uniquement dans sa couleur (attachment 0)
+		// pour ne pas polluer les buffers de picking / albedo / normales.
+		// Avant, ils allaient toujours sur l'ecran (FBO 0), meme pour une scene
+		// creee avec HRL_CreateScene(false).
+		glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
+		glDrawBuffer(GL_COLOR_ATTACHMENT0);
+		bck_->overlay_fbo = scene_fbo;
+		DrawGizmos(scene, v.second, v.first);
 		if (scene->debug_view == HRL_DEBUG_VIEW_MESH_INFO)
 			DrawMeshDebugInfoTexts(scene, v.second);
 		DrawScreenMessages(scene, v.second);
+		glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
 		DrawWidgets(v.second->widgets, v.second);
+
+		// Retablit les 5 sorties du FBO de scene pour le rendu suivant. (Avant,
+		// le glDrawBuffer(GL_COLOR_ATTACHMENT0) du post-process restait actif sur
+		// ce FBO : sans MSAA, les frames suivantes n'ecrivaient plus le picking,
+		// l'albedo ni les normales.)
+		{
+			const GLenum attachments[5] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4};
+			glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
+			glDrawBuffers(5, attachments);
+		}
 	}
+	bck_->overlay_fbo = 0;
+
+	// Image finale complete (tous les viewports + overlays) : copiee une seule
+	// fois a l'ecran, et seulement si la scene est affichee.
+	if (scene->draw_on_screen)
+	{
+		const int winW = (int)GetWindowWidth();
+		const int winH = (int)GetWindowHeight();
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
+		glReadBuffer(GL_COLOR_ATTACHMENT0);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		glBlitFramebuffer(0, 0, winW, winH, 0, 0, winW, winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 
@@ -3776,6 +5062,7 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* me
 	s->SetUint("uSpriteID", object_id);
 	s->SetVec4("UVRegion", {mesh->region_[0], mesh->region_[1], mesh->region_[2], mesh->region_[3]});
 	s->SetVec3("CamPos", ctx_->viewport->camera_->position_);
+	ApplyVoxelLightFieldUniforms(s);
 
 	if (shaderChanged)
 	{
@@ -3839,10 +5126,17 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* me
 		s->SetInt(HRL_MATERIAL_PARAM_TWO_SIDED, 0);
 
 		for (const auto& [name, value] : mat->intParams_) s->SetInt(name, value);
+		// Cles construites une seule fois : plus d'allocation de std::string par
+		// texture et par changement de materiau.
+		static const std::string kTextureKeys[6] = {
+			tex_uniform_name[0], tex_uniform_name[1], tex_uniform_name[2],
+			tex_uniform_name[3], tex_uniform_name[4], tex_uniform_name[5]
+		};
+		static const std::string kAmbientOcclusionKey = HRL_T_AMBIENT_OCCLUSION;
 		for (int i = 0; i < 6; ++i)
 		{
 			s->SetInt(tex_uniform_name[i], i);
-			auto itParam = mat->textureParams_.find(std::string(tex_uniform_name[i]));
+			auto itParam = mat->textureParams_.find(kTextureKeys[i]);
 			if (itParam == mat->textureParams_.end()) { ApplyFallback(i); continue; }
 			auto itTexture = bck_->textures.find(itParam->second);
 			if (itTexture == bck_->textures.end()) { ApplyFallback(i); continue; }
@@ -3851,7 +5145,7 @@ static bool BindMaterial(HRL_Material* mat, HRL_id object_id, const HRL_Mesh* me
 		}
 		s->SetInt(HRL_T_AMBIENT_OCCLUSION, AO_TEXTURE_UNIT);
 		glActiveTexture(GL_TEXTURE0 + AO_TEXTURE_UNIT);
-		auto aoParam = mat->textureParams_.find(std::string(HRL_T_AMBIENT_OCCLUSION));
+		auto aoParam = mat->textureParams_.find(kAmbientOcclusionKey);
 		if (aoParam != mat->textureParams_.end())
 		{
 			auto aoTexture = bck_->textures.find(aoParam->second);
@@ -3907,8 +5201,8 @@ static void DrawSkySphere(const hrl_scene_t* scene)
 	glEnable(GL_CULL_FACE);
 	glCullFace(GL_FRONT);
 
-	GLint previousPolygonMode[2] = {GL_FILL, GL_FILL};
-	glGetIntegerv(GL_POLYGON_MODE, previousPolygonMode);
+	// Pas de glGet* ici : ces requetes peuvent forcer une synchronisation du
+	// driver. Les passes 3D fixent explicitement l'etat dont elles ont besoin.
 	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
 	bck_->sky_shader->Use();
@@ -3937,8 +5231,6 @@ static void DrawSkySphere(const hrl_scene_t* scene)
 	glDrawElements(GL_TRIANGLES, bck_->sky_index_count, GL_UNSIGNED_INT, nullptr);
 	glBindVertexArray(0);
 
-	glPolygonMode(GL_FRONT, previousPolygonMode[0]);
-	glPolygonMode(GL_BACK, previousPolygonMode[1]);
 	glCullFace(GL_BACK);
 	glDisable(GL_CULL_FACE);
 	glDepthMask(GL_TRUE);
@@ -3951,8 +5243,7 @@ static bool MaterialUsesScreenSpaceDisplacement(const HRL_Material* material)
         return false;
     // The feature is opt-in. Merely assigning a displacement texture must not
     // change the rendering path; the material must explicitly enable it.
-    auto enabledParam = material->intParams_.find(HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED);
-    if (enabledParam == material->intParams_.end() || enabledParam->second == 0)
+    if (!material->ss_displacement_enabled_)
         return false;
 
     auto texParam = material->textureParams_.find(HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING);
@@ -4131,12 +5422,8 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 	glDepthMask(GL_TRUE);	glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND);
 
-	GLboolean previousCullEnabled = glIsEnabled(GL_CULL_FACE);
-	GLint previousCullFace = GL_BACK;
-	glGetIntegerv(GL_CULL_FACE_MODE, &previousCullFace);
-	GLint previousPolygonMode[2] = {GL_FILL, GL_FILL};
-	glGetIntegerv(GL_POLYGON_MODE, previousPolygonMode);
-
+	// Etat fixe explicitement (plus de glIsEnabled/glGetIntegerv, qui peuvent
+	// forcer une synchronisation CPU/GPU dans le driver).
 	const bool wireframe = debug_view == HRL_DEBUG_VIEW_WIREFRAME;
 	if (wireframe)
 	{
@@ -4149,7 +5436,9 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 	{
 		glEnable(GL_CULL_FACE);
 		glCullFace(GL_BACK);
+		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	}
+	bool cullEnabled = !wireframe;
 
 	struct DrawItem {
 		HRL_id id;
@@ -4230,20 +5519,12 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 
 	for (const DrawItem& item : visible)
 	{
-		if (!wireframe)
+		// N'emettre glEnable/glDisable que lorsque l'etat change reellement.
+		const bool cull = !wireframe && !MaterialIsTwoSided(item.material);
+		if (cull != cullEnabled)
 		{
-			if (MaterialIsTwoSided(item.material))
-				glDisable(GL_CULL_FACE);
-			else
-			{
-				glEnable(GL_CULL_FACE);
-				glCullFace(GL_BACK);
-			}
-		}
-		else
-		{
-			glDisable(GL_CULL_FACE);
-			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+			if (cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+			cullEnabled = cull;
 		}
 		if (!BindMaterial(item.material, item.id, item.mesh, item.model))
 			continue;
@@ -4285,17 +5566,7 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 	}
 
 	glBindVertexArray(0);
-	glPolygonMode(GL_FRONT, previousPolygonMode[0]);
-	glPolygonMode(GL_BACK, previousPolygonMode[1]);
-	if (previousCullEnabled)
-	{
-		glEnable(GL_CULL_FACE);
-		glCullFace(previousCullFace);
-	}
-	else
-	{
-		glDisable(GL_CULL_FACE);
-	}
+	RestoreOpaqueStageState(wireframe);
 }
 
 
@@ -4434,12 +5705,14 @@ static glm::mat4 MakeVFXSystemMatrix(const HRL_VFXSystem* system)
 	return m;
 }
 
-static glm::mat4 MakeVFXParticleModel(const HRL_VFXParticle& p, const glm::mat4& systemMatrix,
+// systemMatrix == nullptr : espace monde (pas de transformation). Le test
+// "matrice == identite" est fait une fois par emetteur et non par particule.
+static glm::mat4 MakeVFXParticleModel(const HRL_VFXParticle& p, const glm::mat4* systemMatrix,
 	const glm::mat4& billboardBasis, bool stretched, float stretch)
 {
 	glm::vec3 worldPos = p.position;
-	if (systemMatrix != glm::mat4(1.f))
-		worldPos = glm::vec3(systemMatrix * glm::vec4(worldPos, 1.f));
+	if (systemMatrix)
+		worldPos = glm::vec3(*systemMatrix * glm::vec4(worldPos, 1.f));
 
 	glm::mat4 model = glm::translate(glm::mat4(1.f), worldPos);
 	glm::mat4 orient = billboardBasis;
@@ -4569,9 +5842,12 @@ static void DrawVFX(const hrl_scene_t* scene)
 		std::vector<VFXRenderInstance> instances;
 	};
 
-	std::vector<Batch> batches;
-	batches.reserve(16);
-	std::vector<std::pair<float, VFXRenderInstance>> sorted;
+	// Tampons persistants : plus d'allocation par frame ni de double copie des
+	// instances (on trie des indices, puis on remplit le lot dans l'ordre).
+	static std::vector<Batch> batches;
+	size_t batchCount = 0;
+	static std::vector<VFXRenderInstance> unsorted;
+	static std::vector<std::pair<float, uint32_t>> order;
 	const glm::mat4 inverseView = glm::inverse(ctx_->view_mat);
 	const glm::mat4 billboardBasis = glm::mat4(glm::mat3(inverseView));
 	const glm::vec3 cameraPos = ctx_->viewport->camera_->position_;
@@ -4581,33 +5857,54 @@ static void DrawVFX(const hrl_scene_t* scene)
 		(void)sid;
 		if (!system || !system->enabled_) continue;
 		const glm::mat4 systemMatrix = MakeVFXSystemMatrix(system);
+		const bool systemIsIdentity = systemMatrix == glm::mat4(1.f);
 		for (const auto& [eid, emitter] : system->emitters_)
 		{
 			(void)eid;
 			if (!emitter || !emitter->enabled_ || emitter->render_mode_ == HRL_VFX_RENDER_MESH || emitter->particles_.empty()) continue;
-			sorted.clear();
-			sorted.reserve(emitter->particles_.size());
-			for (const auto& particle : emitter->particles_)
-			{
-				VFXRenderInstance inst;
-				inst.model = MakeVFXParticleModel(
-					particle,
-					emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL ? systemMatrix : glm::mat4(1.f),
-					billboardBasis,
-					emitter->render_mode_ == HRL_VFX_RENDER_STRETCHED_BILLBOARD,
-					emitter->stretch_);
-				inst.color = particle.color;
-				const glm::vec3 pos = glm::vec3(inst.model[3]);
-				sorted.emplace_back(glm::dot(pos - cameraPos, pos - cameraPos), inst);
-			}
-			if (emitter->blend_mode_ == HRL_VFX_BLEND_ALPHA)
-				std::stable_sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-			Batch batch;
+			const glm::mat4* particleSystemMatrix =
+				(emitter->simulation_space_ == HRL_VFX_SIMULATION_LOCAL && !systemIsIdentity) ? &systemMatrix : nullptr;
+			const bool stretched = emitter->render_mode_ == HRL_VFX_RENDER_STRETCHED_BILLBOARD;
+
+			if (batchCount == batches.size())
+				batches.emplace_back();
+			Batch& batch = batches[batchCount];
 			batch.blend = emitter->blend_mode_;
 			batch.texture = ResolveVFXTexture(emitter);
-			batch.instances.reserve(sorted.size());
-			for (const auto& pair : sorted) batch.instances.push_back(pair.second);
-			if (!batch.instances.empty()) batches.push_back(std::move(batch));
+			batch.instances.clear();
+
+			if (emitter->blend_mode_ == HRL_VFX_BLEND_ALPHA)
+			{
+				unsorted.clear();
+				order.clear();
+				unsorted.reserve(emitter->particles_.size());
+				order.reserve(emitter->particles_.size());
+				for (const auto& particle : emitter->particles_)
+				{
+					VFXRenderInstance inst;
+					inst.model = MakeVFXParticleModel(particle, particleSystemMatrix, billboardBasis, stretched, emitter->stretch_);
+					inst.color = particle.color;
+					const glm::vec3 pos = glm::vec3(inst.model[3]);
+					order.emplace_back(glm::dot(pos - cameraPos, pos - cameraPos), static_cast<uint32_t>(unsorted.size()));
+					unsorted.push_back(inst);
+				}
+				std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+				batch.instances.reserve(order.size());
+				for (const auto& entry : order) batch.instances.push_back(unsorted[entry.second]);
+			}
+			else
+			{
+				// Additif / multiplicatif : l'ordre n'a pas d'importance, pas de tri.
+				batch.instances.reserve(emitter->particles_.size());
+				for (const auto& particle : emitter->particles_)
+				{
+					VFXRenderInstance inst;
+					inst.model = MakeVFXParticleModel(particle, particleSystemMatrix, billboardBasis, stretched, emitter->stretch_);
+					inst.color = particle.color;
+					batch.instances.push_back(inst);
+				}
+			}
+			if (!batch.instances.empty()) ++batchCount;
 		}
 	}
 
@@ -4626,8 +5923,9 @@ static void DrawVFX(const hrl_scene_t* scene)
 	glDepthFunc(GL_LESS);
 	glDepthMask(GL_FALSE);
 
-	for (auto& batch : batches)
+	for (size_t batchIndex = 0; batchIndex < batchCount; ++batchIndex)
 	{
+		const Batch& batch = batches[batchIndex];
 		if (batch.instances.empty()) continue;
 		glEnable(GL_BLEND);
 		switch (batch.blend)
@@ -4694,7 +5992,8 @@ static void DrawVFX(const hrl_scene_t* scene)
 			if (!material || (material->shader_ != HRL_MESH_3D_SHADER))
 				continue;
 
-			std::vector<std::pair<float, const HRL_VFXParticle*>> ordered;
+			static std::vector<std::pair<float, const HRL_VFXParticle*>> ordered;
+			ordered.clear();
 			ordered.reserve(emitter->particles_.size());
 			for (const auto& particle : emitter->particles_)
 			{
@@ -4711,6 +6010,19 @@ static void DrawVFX(const hrl_scene_t* scene)
 			else if (emitter->blend_mode_ == HRL_VFX_BLEND_MULTIPLY) glBlendFunc(GL_DST_COLOR, GL_ZERO);
 			else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
+			// Texture de surcharge resolue une fois par emetteur.
+			GLuint overrideTexture = 0;
+			if (emitter->texture_ != HRL_INVALID_ID && material->shader_ == HRL_MESH_3D_SHADER)
+			{
+				auto texIt = bck_->textures.find(emitter->texture_);
+				if (texIt != bck_->textures.end() && texIt->second)
+					overrideTexture = texIt->second->GetGL_ID();
+			}
+			// Le materiau est le meme pour toutes les particules : apres le premier
+			// BindMaterial, seuls les uniforms par objet changent (les valeurs
+			// identiques sont filtrees par GL33_Shader). Textures et VAO ne sont
+			// lies qu'une fois.
+			bool emitterStateBound = false;
 			for (const auto& entry : ordered)
 			{
 				const HRL_VFXParticle& particle = *entry.second;
@@ -4730,21 +6042,23 @@ static void DrawVFX(const hrl_scene_t* scene)
 				if (!BindMaterial(material, emitter->id_, &mesh, model)) continue;
 				if (ctx_->shader) ctx_->shader->SetVec3("TintColor", glm::vec3(particle.color));
 
-				if (emitter->texture_ != HRL_INVALID_ID && material->shader_ == HRL_MESH_3D_SHADER)
+				if (!emitterStateBound)
 				{
-					auto texIt = bck_->textures.find(emitter->texture_);
-					if (texIt != bck_->textures.end() && texIt->second)
+					if (overrideTexture != 0)
 					{
 						glActiveTexture(GL_TEXTURE0);
-						glBindTexture(GL_TEXTURE_2D, texIt->second->GetGL_ID());
+						glBindTexture(GL_TEXTURE_2D, overrideTexture);
 					}
+					glBindVertexArray(gpu->vao);
+					emitterStateBound = true;
 				}
-
-
-				glBindVertexArray(gpu->vao);
 				if (gpu->indexed && gpu->index_count > 0) glDrawElements(GL_TRIANGLES, gpu->index_count, GL_UNSIGNED_INT, nullptr);
 				else glDrawArrays(GL_TRIANGLES, 0, gpu->vertex_count);
 			}
+			// La texture de surcharge a remplace celle du materiau sur l'unite 0 :
+			// forcer un rebind complet si un autre emetteur reutilise ce materiau.
+			if (overrideTexture != 0)
+				ctx_->bound_material = nullptr;
 		}
 	}
 
@@ -5030,10 +6344,8 @@ static void DrawMeshDebugInfoTexts(const hrl_scene_t* scene, const HRL_Viewport*
 	const int viewportW = std::max(1, static_cast<int>(viewport->width_ * winW));
 	const int viewportH = std::max(1, static_cast<int>(viewport->height_ * winH));
 
-	// The scene has already been composited to the screen immediately before
-	// this function is called. Mesh info must therefore be drawn over the
-	// default framebuffer, using the owning viewport.
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	// Dessine dans l'image finale de la scene (et non sur l'ecran).
+	glBindFramebuffer(GL_FRAMEBUFFER, bck_->overlay_fbo);
 	glViewport(viewportX, viewportY, viewportW, viewportH);
 
 	glDisable(GL_DEPTH_TEST);
@@ -5157,7 +6469,8 @@ static void DrawScreenMessages(const hrl_scene_t* scene, const HRL_Viewport* vie
 	const int viewportW = std::max(1, static_cast<int>(viewport->width_ * winW));
 	const int viewportH = std::max(1, static_cast<int>(viewport->height_ * winH));
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	// Dessine dans l'image finale de la scene (et non sur l'ecran).
+	glBindFramebuffer(GL_FRAMEBUFFER, bck_->overlay_fbo);
 	glViewport(viewportX, viewportY, viewportW, viewportH);
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_CULL_FACE);
@@ -5923,51 +7236,12 @@ static glm::mat4 CalculateViewMatrix()
 //LIGHTS
 void GL33_UpdateLights(const std::vector<HRL_Light*>& _lights)
 {
-	//on commence par creer le tableau de GL_Lights
-	GL_Light gpu_lights[MAX_LIGHTS]{};
-	for (int i = 0; i < MAX_LIGHTS; ++i)
-	{
-		gpu_lights[i].shadowMatrix = glm::mat4(1.f);
-		gpu_lights[i].shadowParams = glm::vec4(0.f, 0.f, -1.f, 0.f);
-		gpu_lights[i].shadowStrength = 1.f;
-	}
-	size_t count = 0;
-
-	//on rempli le tableau
-	for (const auto& light: _lights)
-	{
-		if (count >= MAX_LIGHTS)
-		{
-			break;
-		}
-
-		gpu_lights[count].type = light->type_;
-		gpu_lights[count].intensity = light->intensity_;
-		gpu_lights[count].attenuation = light->attenuation_;
-
-		gpu_lights[count].innerCutoff = std::cos(glm::radians(light->innerCutoff));
-
-		gpu_lights[count].position = light->position_;
-		gpu_lights[count].outerCutoff = std::cos(glm::radians(light->outerCutoff));
-
-		// yaw = rotation.y, pitch = rotation.x
-		glm::vec3 dir;
-		dir.x = cos(glm::radians(light->rotation_.y)) * cos(glm::radians(light->rotation_.x));
-		dir.y = sin(glm::radians(light->rotation_.x));
-		dir.z = sin(glm::radians(light->rotation_.y)) * cos(glm::radians(light->rotation_.x));
-		gpu_lights[count].rotation = glm::normalize(dir);
-
-		gpu_lights[count].padding3 = 0.f;
-
-		gpu_lights[count].color = light->color_;
-		gpu_lights[count].shadowStrength = light->shadow_strength_;
-
-		++count;
-	}
-
-	//on passe les données à opengl
-	glBindBuffer(GL_UNIFORM_BUFFER, bck_->ubo[UBO_LIGHTS]);
-	glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)sizeof(gpu_lights), gpu_lights);
+	// Volontairement vide pour OpenGL : GL33_DrawScene -> UploadSceneLights()
+	// reconstruit et envoie l'UBO complet de la scene (lumieres + matrices
+	// d'ombre + emetteurs voxel) juste avant le rendu. L'ancien envoi fait ici
+	// (appele par HRL_EndFrame et par chaque setter de lumiere) etait
+	// systematiquement ecrase : ~40 Ko envoyes pour rien a chaque appel.
+	(void)_lights;
 }
 
 
@@ -6074,7 +7348,163 @@ static bool EnsureShadowResource(HRL_Light* light)
 	return true;
 }
 
-static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution,
+// Un caster d'ombre prepare une seule fois par scene (matrice modele, bornes,
+// GPU, flag double face) au lieu d'etre recalcule pour chaque lumiere et
+// chaque face de cube map.
+struct ShadowCaster
+{
+	HRL_id id = HRL_INVALID_ID;
+	HRL_Mesh* mesh = nullptr;
+	glm::mat4 model{1.f};
+	glm::vec3 center{0.f};
+	float radius = 0.f;
+	bool hasBounds = false;   // bounds_radius_ > 0 (sinon toujours considere visible)
+	bool twoSided = false;
+	const GL33_Backend::MeshGPU* staticGpu = nullptr;
+	GL33_Backend::SkeletalMeshGPU* skeletalGpu = nullptr;
+};
+
+static void HashBytes(uint64_t& hash, const void* data, size_t size)
+{
+	const unsigned char* bytes = static_cast<const unsigned char*>(data);
+	for (size_t i = 0; i < size; ++i)
+	{
+		hash ^= static_cast<uint64_t>(bytes[i]);
+		hash *= 1099511628211ull;
+	}
+}
+
+template <typename T>
+static void HashValue(uint64_t& hash, const T& value)
+{
+	HashBytes(hash, &value, sizeof(T));
+}
+
+static void CollectShadowCasters(hrl_scene_t* scene, std::vector<ShadowCaster>& out)
+{
+	out.clear();
+	HRL_Context* context = GetPrivateContext();
+	for (const auto& [id, mesh] : scene->meshes)
+	{
+		if (!mesh || mesh->type_ == HRL_SPRITE)
+			continue;
+
+		ShadowCaster caster;
+		caster.id = id;
+		caster.mesh = mesh;
+		if (mesh->type_ == HRL_3D_SKELETAL_MESH)
+		{
+			auto it = bck_->skeletal_meshes.find(id);
+			if (it == bck_->skeletal_meshes.end() || it->second.vao == 0)
+				continue;
+			caster.skeletalGpu = &it->second;
+			UploadSkeletalBones(static_cast<HRL_SkeletalMesh*>(mesh), *caster.skeletalGpu);
+		}
+		else
+		{
+			auto it = bck_->meshes.find(id);
+			if (it == bck_->meshes.end())
+				continue;
+			caster.staticGpu = &it->second;
+		}
+
+		caster.model = CalculateModelMatrix(mesh);
+		caster.hasBounds = mesh->bounds_radius_ > 0.f;
+		caster.center = glm::vec3(caster.model * glm::vec4(mesh->bounds_center_, 1.f));
+		const float maxScale = std::max({std::abs(mesh->scale_.x), std::abs(mesh->scale_.y), std::abs(mesh->scale_.z)});
+		caster.radius = mesh->bounds_radius_ * std::max(maxScale, 1e-6f);
+		const auto materialIt = context->materials.find(mesh->material_);
+		caster.twoSided = materialIt != context->materials.end() && MaterialIsTwoSided(materialIt->second);
+		out.push_back(caster);
+	}
+}
+
+// Filtre les casters qui peuvent affecter une lumiere (meme regles que
+// l'ancien code : portee pour une point light, frustum pour les autres ;
+// les meshes skinnes ne sont jamais rejetes car leurs bornes ne suivent pas
+// l'animation).
+static void SelectLightCasters(const std::vector<ShadowCaster>& all, bool pointLight,
+	const glm::vec3& lightPosition, float farPlane, const FrustumPlaneSet& frustum,
+	std::vector<const ShadowCaster*>& out)
+{
+	out.clear();
+	for (const ShadowCaster& caster : all)
+	{
+		if (caster.skeletalGpu)
+		{
+			out.push_back(&caster);
+			continue;
+		}
+		if (pointLight)
+		{
+			const float limit = farPlane + caster.radius;
+			const glm::vec3 d = caster.center - lightPosition;
+			if (glm::dot(d, d) > limit * limit)
+				continue;
+		}
+		else if (caster.hasBounds && !SphereInsideFrustum(frustum, caster.center, caster.radius))
+			continue;
+		out.push_back(&caster);
+	}
+}
+
+static uint64_t ComputeShadowSignature(const hrl_scene_t* scene, const HRL_Light* light,
+	const GL33_Backend::ShadowGPU& shadow, const std::vector<const ShadowCaster*>& casters)
+{
+	uint64_t hash = 1469598103934665603ull;
+	HashValue(hash, light->type_);
+	HashValue(hash, light->position_);
+	HashValue(hash, light->rotation_);
+	HashValue(hash, light->outerCutoff);
+	HashValue(hash, shadow.resolution);
+	HashValue(hash, shadow.fbo);
+	HashValue(hash, casters.size());
+	for (const ShadowCaster* caster : casters)
+	{
+		HashValue(hash, caster->id);
+		HashValue(hash, caster->model);
+		HashValue(hash, caster->twoSided);
+		if (caster->skeletalGpu)
+		{
+			HashValue(hash, caster->skeletalGpu->upload_serial);
+			HashValue(hash, static_cast<const HRL_SkeletalMesh*>(caster->mesh)->pose_serial_);
+		}
+		else if (caster->staticGpu)
+		{
+			HashValue(hash, caster->staticGpu->levels.size());
+			for (const auto& level : caster->staticGpu->levels)
+				HashValue(hash, level.upload_serial);
+			// Reglages qui influencent le choix du LOD dans la shadow map.
+			HashValue(hash, caster->mesh->lod_automatic_);
+			HashValue(hash, caster->mesh->lod_override_);
+			HashValue(hash, caster->mesh->lod_mode_);
+			HashValue(hash, caster->mesh->lod_screen_threshold_);
+			HashValue(hash, caster->mesh->lod_base_distance_);
+		}
+	}
+	// Les landscapes sont peu nombreux : on les inclut tous.
+	for (const auto& [id, landscape] : scene->landscapes)
+	{
+		if (!landscape)
+			continue;
+		HashValue(hash, id);
+		HashValue(hash, landscape->revision_);
+		HashValue(hash, landscape->position_);
+		HashValue(hash, landscape->rotation_);
+		HashValue(hash, landscape->scale_);
+		HashValue(hash, landscape->material_);
+		auto gpuIt = bck_->landscapes.find(id);
+		if (gpuIt != bck_->landscapes.end())
+			HashValue(hash, gpuIt->second.geometry.upload_serial);
+		auto matIt = GetPrivateContext()->materials.find(landscape->material_);
+		const bool twoSided = matIt != GetPrivateContext()->materials.end() && MaterialIsTwoSided(matIt->second);
+		HashValue(hash, twoSided);
+	}
+	return hash;
+}
+
+static void RenderShadowCasters(hrl_scene_t* scene, const std::vector<const ShadowCaster*>& casters,
+	const glm::mat4& lightViewProjection, const glm::mat4& lightView, const glm::mat4& lightProjection, int shadowResolution,
 	GL33_Shader* shader, bool pointLight, const glm::vec3& lightPosition,
 	float farPlane, int face)
 {
@@ -6083,48 +7513,23 @@ static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewPr
 
 	GL33_Shader* activeShader = nullptr;
 	const FrustumPlaneSet frustum = BuildFrustum(lightViewProjection);
-	for (const auto& [id, mesh] : scene->meshes)
+	// PrepareSceneShadows entre ici avec GL_CULL_FACE actif et glCullFace(GL_FRONT).
+	bool cullEnabled = true;
+	for (const ShadowCaster* caster : casters)
 	{
-		if (!mesh || mesh->type_ == HRL_SPRITE)
-			continue;
-
-		const bool skeletal = mesh->type_ == HRL_3D_SKELETAL_MESH;
-		GL33_Backend::SkeletalMeshGPU* skeletalGpu = nullptr;
+		const bool skeletal = caster->skeletalGpu != nullptr;
 		const GL33_Backend::MeshLOD_GPU* staticGpu = nullptr;
-		if (skeletal)
+		if (!skeletal)
 		{
-			auto it = bck_->skeletal_meshes.find(id);
-			if (it == bck_->skeletal_meshes.end() || it->second.vao == 0)
+			// Culling par face de cube map (ou frustum de la lumiere). Les
+			// meshes sans bornes restent toujours dessines, comme avant.
+			if (caster->hasBounds && !SphereInsideFrustum(frustum, caster->center, caster->radius))
 				continue;
-			skeletalGpu = &it->second;
-			UploadSkeletalBones(static_cast<HRL_SkeletalMesh*>(mesh), *skeletalGpu);
-		}
-		else
-		{
-			auto it = bck_->meshes.find(id);
-			if (it == bck_->meshes.end())
-				continue;
-			const glm::mat4 model = CalculateModelMatrix(mesh);
-			if (pointLight)
-			{
-				const glm::vec3 center = glm::vec3(model * glm::vec4(mesh->bounds_center_, 1.f));
-				const float maxScale = std::max({std::abs(mesh->scale_.x), std::abs(mesh->scale_.y), std::abs(mesh->scale_.z)});
-				const float radius = mesh->bounds_radius_ * std::max(maxScale, 1e-6f);
-				const float limit = farPlane + radius;
-				if (glm::dot(center - lightPosition, center - lightPosition) > limit * limit)
-					continue;
-			}
-			else if (!IsMeshVisible(mesh, model, frustum))
-				continue;
-			const int lodLevel = SelectMeshLOD(mesh, model, lightView, lightProjection, (float)shadowResolution);
-			staticGpu = GetMeshLOD_GPU(it->second, lodLevel);
+			const int lodLevel = SelectMeshLOD(caster->mesh, caster->model, lightView, lightProjection, (float)shadowResolution);
+			staticGpu = GetMeshLOD_GPU(*caster->staticGpu, lodLevel);
 			if (!staticGpu)
 				continue;
 		}
-
-		const glm::mat4 model = CalculateModelMatrix(mesh);
-		if (!skeletal && !pointLight && !IsMeshVisible(mesh, model, frustum))
-			continue;
 
 		GL33_Shader* meshShader = shader;
 		if (skeletal)
@@ -6140,25 +7545,22 @@ static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewPr
 			meshShader->SetFloat("farPlane", farPlane);
 			activeShader = meshShader;
 		}
-		meshShader->SetMat4("model", model);
-		const auto shadowMaterialIt = GetPrivateContext()->materials.find(mesh->material_);
-		const bool shadowTwoSided = shadowMaterialIt != GetPrivateContext()->materials.end() && MaterialIsTwoSided(shadowMaterialIt->second);
-		if (shadowTwoSided)
-			glDisable(GL_CULL_FACE);
-		else
+		meshShader->SetMat4("model", caster->model);
+		const bool cull = !caster->twoSided;
+		if (cull != cullEnabled)
 		{
-			glEnable(GL_CULL_FACE);
-			glCullFace(GL_FRONT);
+			if (cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+			cullEnabled = cull;
 		}
 
 		if (skeletal)
 		{
-			glBindBufferBase(GL_UNIFORM_BUFFER, 1, skeletalGpu->bone_ubo);
-			glBindVertexArray(skeletalGpu->vao);
-			if (skeletalGpu->indexed)
-				glDrawElements(GL_TRIANGLES, skeletalGpu->index_count, GL_UNSIGNED_INT, nullptr);
+			glBindBufferBase(GL_UNIFORM_BUFFER, 1, caster->skeletalGpu->bone_ubo);
+			glBindVertexArray(caster->skeletalGpu->vao);
+			if (caster->skeletalGpu->indexed)
+				glDrawElements(GL_TRIANGLES, caster->skeletalGpu->index_count, GL_UNSIGNED_INT, nullptr);
 			else
-				glDrawArrays(GL_TRIANGLES, 0, skeletalGpu->vertex_count);
+				glDrawArrays(GL_TRIANGLES, 0, caster->skeletalGpu->vertex_count);
 		}
 		else
 		{
@@ -6169,6 +7571,9 @@ static void RenderShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewPr
 				glDrawArrays(GL_TRIANGLES, 0, staticGpu->vertex_count);
 		}
 	}
+	// DrawLandscapeShadowCasters suppose le meme etat d'entree.
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_FRONT);
 	DrawLandscapeShadowCasters(scene, lightViewProjection, lightView, lightProjection, shadowResolution, pointLight, lightPosition, farPlane, face);
 	glBindVertexArray(0);
 	(void)face;
@@ -6185,6 +7590,11 @@ static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id)
 		return;
 	activeSlots.clear();
 
+	// Casters prepares une fois pour toutes les lumieres de la scene.
+	static std::vector<ShadowCaster> allCasters;
+	static std::vector<const ShadowCaster*> lightCasters;
+	CollectShadowCasters(scene, allCasters);
+
 	int slot = 0;
 	for (const auto& [id, light] : scene->lights)
 	{
@@ -6198,65 +7608,23 @@ static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id)
 			continue;
 
 		const int resolution = shadowIt->second.resolution;
-		glBindFramebuffer(GL_FRAMEBUFFER, shadowIt->second.fbo);
-		glViewport(0, 0, resolution, resolution);
-		glEnable(GL_DEPTH_TEST);
-		glDepthMask(GL_TRUE);
-		glDepthFunc(GL_LESS);
-		glDisable(GL_BLEND);
-		glEnable(GL_CULL_FACE);
-		glCullFace(GL_FRONT);
-		// Point-light shadows use a manually computed linear radial depth in the
-		// fragment shader. Large polygon offsets in this space can visibly detach
-		// the shadow from the caster ("double"/ghosted silhouettes), especially
-		// on animated meshes. Receiver-side bias is applied in the lighting shader.
-		// Keep the existing polygon offset for projected 2D shadow maps.
-		if (light->type_ == HRL_POINT_LIGHT)
-			glDisable(GL_POLYGON_OFFSET_FILL);
-		else
-		{
-			glEnable(GL_POLYGON_OFFSET_FILL);
-			glPolygonOffset(2.0f, 4.0f);
-		}
+		const bool isPoint = light->type_ == HRL_POINT_LIGHT;
 
-		if (light->type_ == HRL_POINT_LIGHT)
+		// Matrices de la lumiere (identiques a l'ancien code).
+		constexpr float pointNearPlane = 0.05f;
+		constexpr float pointFarPlane = 100.f;
+		glm::mat4 lightView(1.f);
+		glm::mat4 projection(1.f);
+		if (isPoint)
 		{
-			constexpr float nearPlane = 0.05f;
-			constexpr float farPlane = 100.f;
-			const glm::mat4 projection = glm::perspective(glm::radians(90.f), 1.f, nearPlane, farPlane);
-			const glm::vec3 pos = light->position_;
-			const std::array<glm::vec3, 6> directions = {
-				glm::vec3( 1, 0, 0), glm::vec3(-1, 0, 0),
-				glm::vec3( 0, 1, 0), glm::vec3( 0,-1, 0),
-				glm::vec3( 0, 0, 1), glm::vec3( 0, 0,-1)
-			};
-			const std::array<glm::vec3, 6> ups = {
-				glm::vec3(0,-1,0), glm::vec3(0,-1,0),
-				glm::vec3(0,0,1), glm::vec3(0,0,-1),
-				glm::vec3(0,-1,0), glm::vec3(0,-1,0)
-			};
-			for (int face = 0; face < 6; ++face)
-			{
-				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-					GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, shadowIt->second.depth_cube, 0);
-				glClear(GL_DEPTH_BUFFER_BIT);
-				const glm::mat4 view = glm::lookAt(pos, pos + directions[face], ups[face]);
-				RenderShadowCasters(scene, projection * view, view, projection, resolution, bck_->shadow_point_shader, true, pos, farPlane, face);
-			}
+			projection = glm::perspective(glm::radians(90.f), 1.f, pointNearPlane, pointFarPlane);
 		}
 		else
 		{
 			const glm::vec3 lightDir = GetLightDirection(light);
-			glm::vec3 center(0.f);
-			if (light->type_ == HRL_SPOT_LIGHT)
-				center = light->position_;
-			else
-				center = glm::vec3(0.f);
-
+			const glm::vec3 center = (light->type_ == HRL_SPOT_LIGHT) ? light->position_ : glm::vec3(0.f);
 			glm::vec3 up = std::abs(glm::dot(lightDir, glm::vec3(0,1,0))) > 0.98f
 				? glm::vec3(0,0,1) : glm::vec3(0,1,0);
-			glm::mat4 lightView;
-			glm::mat4 projection;
 			if (light->type_ == HRL_SPOT_LIGHT)
 			{
 				const float outerAngle = glm::clamp(light->outerCutoff, 1.f, 89.0f);
@@ -6269,14 +7637,77 @@ static void PrepareSceneShadows(hrl_scene_t* scene, HRL_id scene_id)
 				projection = glm::ortho(-60.f, 60.f, -60.f, 60.f, 0.1f, 200.f);
 				lightView = glm::lookAt(lightPosition, center, up);
 			}
-			const glm::mat4 shadowClip = projection * lightView;
-			// Shadow rasterization needs clip-space coordinates (-1..1). The 0..1
-			// bias transform belongs only to the sampling matrix used by the lit shader.
-			RenderShadowCasters(scene, shadowClip, lightView, projection, resolution, bck_->shadow_2d_shader, false, light->position_, 0.f, -1);
 		}
+		const glm::mat4 shadowClip = projection * lightView;
 
-		glDisable(GL_POLYGON_OFFSET_FILL);
-		glCullFace(GL_BACK);
+		SelectLightCasters(allCasters, isPoint, light->position_, pointFarPlane,
+			BuildFrustum(shadowClip), lightCasters);
+
+		// Le contenu de cette shadow map est-il deja a jour ? Deplacer un objet
+		// hors de la zone d'influence d'une lumiere ne la re-rend plus.
+		const uint64_t signature = ComputeShadowSignature(scene, light, shadowIt->second, lightCasters);
+		const bool upToDate = shadowIt->second.content_valid && shadowIt->second.content_signature == signature;
+
+		if (!upToDate)
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, shadowIt->second.fbo);
+			glViewport(0, 0, resolution, resolution);
+			glEnable(GL_DEPTH_TEST);
+			glDepthMask(GL_TRUE);
+			glDepthFunc(GL_LESS);
+			glDisable(GL_BLEND);
+			glEnable(GL_CULL_FACE);
+			glCullFace(GL_FRONT);
+			// Point-light shadows use a manually computed linear radial depth in the
+			// fragment shader. Large polygon offsets in this space can visibly detach
+			// the shadow from the caster ("double"/ghosted silhouettes), especially
+			// on animated meshes. Receiver-side bias is applied in the lighting shader.
+			// Keep the existing polygon offset for projected 2D shadow maps.
+			if (isPoint)
+				glDisable(GL_POLYGON_OFFSET_FILL);
+			else
+			{
+				glEnable(GL_POLYGON_OFFSET_FILL);
+				glPolygonOffset(2.0f, 4.0f);
+			}
+
+			if (isPoint)
+			{
+				const glm::vec3 pos = light->position_;
+				const std::array<glm::vec3, 6> directions = {
+					glm::vec3( 1, 0, 0), glm::vec3(-1, 0, 0),
+					glm::vec3( 0, 1, 0), glm::vec3( 0,-1, 0),
+					glm::vec3( 0, 0, 1), glm::vec3( 0, 0,-1)
+				};
+				const std::array<glm::vec3, 6> ups = {
+					glm::vec3(0,-1,0), glm::vec3(0,-1,0),
+					glm::vec3(0,0,1), glm::vec3(0,0,-1),
+					glm::vec3(0,-1,0), glm::vec3(0,-1,0)
+				};
+				for (int face = 0; face < 6; ++face)
+				{
+					glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+						GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, shadowIt->second.depth_cube, 0);
+					glClear(GL_DEPTH_BUFFER_BIT);
+					const glm::mat4 view = glm::lookAt(pos, pos + directions[face], ups[face]);
+					RenderShadowCasters(scene, lightCasters, projection * view, view, projection, resolution,
+						bck_->shadow_point_shader, true, pos, pointFarPlane, face);
+				}
+			}
+			else
+			{
+				glClear(GL_DEPTH_BUFFER_BIT);
+				// Shadow rasterization needs clip-space coordinates (-1..1). The 0..1
+				// bias transform belongs only to the sampling matrix used by the lit shader.
+				RenderShadowCasters(scene, lightCasters, shadowClip, lightView, projection, resolution,
+					bck_->shadow_2d_shader, false, light->position_, 0.f, -1);
+			}
+
+			glDisable(GL_POLYGON_OFFSET_FILL);
+			glCullFace(GL_BACK);
+			shadowIt->second.content_signature = signature;
+			shadowIt->second.content_valid = true;
+		}
 		++slot;
 		activeSlots[id] = slot - 1;
 	}
@@ -6367,110 +7798,20 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 	for (int i = 0; i < count && i < 32; ++i)
 		voxelCache.scene_lights[static_cast<size_t>(i)] = gpu_lights[i];
 
-	// Promote the strongest HDR voxel colors to world-space point emitters.
-	// This list is cached by world revisions: previously this code scanned every
-	// voxel on every frame, turning a 4096x4096 empty world into a 16.7M-element
-	// CPU loop per frame.
-	const HRL_VoxelWorld* world = scene->voxel_world;
-	if (!world || world->voxel_size_ <= 0.f)
-	{
-		voxelCache.lights.clear();
-		voxelCache.valid = true;
-		voxelCache.geometry_revision = world ? world->voxel_revision_ : 0;
-		voxelCache.color_revision = world ? world->color_revision_ : 0;
-	}
-	else if (!voxelCache.valid ||
-		voxelCache.geometry_revision != world->voxel_revision_ ||
-		voxelCache.color_revision != world->color_revision_)
-	{
-		voxelCache.lights.clear();
-		voxelCache.geometry_revision = world->voxel_revision_;
-		voxelCache.color_revision = world->color_revision_;
-		voxelCache.valid = true;
+	voxelCache.scene_shadow_light_count = 0;
+	for (int i = 0; i < count; ++i)
+		if (gpu_lights[i].shadowParams.z >= -0.5f)
+			++voxelCache.scene_shadow_light_count;
 
-		if (!world->type_emissive_colors_.empty())
-		{
-			struct VoxelEmitterCandidate
-			{
-				float energy = 0.f;
-				glm::vec3 position{0.f};
-				glm::vec3 color{0.f};
-			};
-
-			std::vector<VoxelEmitterCandidate> emitters;
-			emitters.reserve(std::min(world->voxel_chunks_.size() * 4u, static_cast<size_t>(MAX_LIGHTS)));
-			for (const auto& [key, chunk] : world->voxel_chunks_)
-			{
-				const int chunkX = static_cast<int32_t>(key >> 32u);
-				const int chunkY = static_cast<int32_t>(key & 0xffffffffu);
-				const int minX = chunkX * world->chunk_size_;
-				const int minY = chunkY * world->chunk_size_;
-				const int chunkW = std::min(world->chunk_size_, world->width_ - minX);
-				const int chunkH = std::min(world->chunk_size_, world->height_ - minY);
-				for (int y = 0; y < chunkH; ++y)
-				{
-					for (int x = 0; x < chunkW; ++x)
-					{
-						const uint32_t type = chunk[static_cast<size_t>(y) * static_cast<size_t>(chunkW) +
-							static_cast<size_t>(x)].type;
-					if (type == 0)
-						continue;
-
-					auto emissiveIt = world->type_emissive_colors_.find(type);
-					if (emissiveIt == world->type_emissive_colors_.end())
-						continue;
-					auto baseIt = world->type_colors_.find(type);
-					if (baseIt != world->type_colors_.end() && baseIt->second.a <= 0.001f)
-						continue;
-
-					const glm::vec3 emissive = glm::max(emissiveIt->second, glm::vec3(0.f));
-					const float energy = std::max({emissive.r, emissive.g, emissive.b});
-					if (energy <= 0.f)
-						continue;
-
-					VoxelEmitterCandidate emitter;
-					emitter.energy = energy;
-					emitter.color = emissive / energy;
-					emitter.position = glm::vec3(
-						(static_cast<float>(minX + x) + 0.5f) * world->voxel_size_,
-						(static_cast<float>(minY + y) + 0.5f) * world->voxel_size_,
-						0.5f * world->voxel_size_);
-						emitters.push_back(emitter);
-					}
-				}
-			}
-
-			const size_t maxEmitterCount = static_cast<size_t>(MAX_LIGHTS);
-			if (emitters.size() > maxEmitterCount)
-			{
-				std::nth_element(emitters.begin(), emitters.begin() + maxEmitterCount, emitters.end(),
-					[](const VoxelEmitterCandidate& a, const VoxelEmitterCandidate& b)
-					{ return a.energy > b.energy; });
-				emitters.resize(maxEmitterCount);
-			}
-
-			const float falloffDistance = std::max(world->voxel_size_ * 8.f, world->voxel_size_);
-			const float attenuation = 1.f / std::max(falloffDistance * falloffDistance, 1e-6f);
-			voxelCache.lights.reserve(emitters.size());
-			for (const VoxelEmitterCandidate& emitter : emitters)
-			{
-				GL_Light light{};
-				light.type = HRL_POINT_LIGHT;
-				light.intensity = emitter.energy;
-				light.attenuation = attenuation;
-				light.innerCutoff = 0.f;
-				light.position = emitter.position;
-				light.outerCutoff = 0.f;
-				light.rotation = glm::vec3(0.f, -1.f, 0.f);
-				light.padding3 = 0.f;
-				light.color = emitter.color;
-				light.shadowStrength = 0.f;
-				light.shadowMatrix = glm::mat4(1.f);
-				light.shadowParams = glm::vec4(0.f, 0.f, -1.f, 0.f);
-				voxelCache.lights.push_back(light);
-			}
-		}
-	}
+	// Emissive voxels are no longer promoted to point lights (that capped them
+	// at 256 and made every voxel fragment loop over them) : they light the
+	// scene through the per-viewport light field (BuildVoxelLightField).
+	voxelCache.lights.clear();
+	voxelCache.chunk_emitters.clear();
+	if (HRL_VoxelWorld* world = scene->voxel_world)
+		world->light_dirty_chunks_.clear(); // filled by the voxel edits, unused here
+	voxelCache.world = scene->voxel_world;
+	voxelCache.valid = true;
 
 	// A stable signature lets each chunk keep its own UBO untouched across frames.
 	// Hashing at most 32 scene lights + 256 voxel emitters is tiny compared with
@@ -6500,6 +7841,13 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 			voxelCache.revision = 1;
 	}
 
+	// La signature couvre exactement le contenu envoye (lumieres de la scene
+	// avec leurs donnees d'ombre + emetteurs voxel). Si l'UBO contient deja ces
+	// donnees pour cette scene, on evite de le reecrire.
+	if (bck_->light_ubo_valid && bck_->light_ubo_scene == scene_id &&
+		bck_->light_ubo_signature == voxelCache.signature)
+		return;
+
 	for (const GL_Light& light : voxelCache.lights)
 	{
 		if (count >= MAX_LIGHTS)
@@ -6509,6 +7857,9 @@ static void UploadSceneLights(const hrl_scene_t* scene, HRL_id scene_id)
 
 	glBindBuffer(GL_UNIFORM_BUFFER, bck_->ubo[UBO_LIGHTS]);
 	glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)sizeof(gpu_lights), gpu_lights);
+	bck_->light_ubo_scene = scene_id;
+	bck_->light_ubo_signature = voxelCache.signature;
+	bck_->light_ubo_valid = true;
 }
 
 
@@ -6575,9 +7926,17 @@ static bool CreateMSAAResources(GL_Scene* scene, int samples)
 	return true;
 }
 
-static void ResolveSceneMSAA(GL_Scene* scene)
+// Resout uniquement le rectangle du viewport : resoudre tout le buffer
+// ecrasait l'image finale (post-process, overlays) des viewports precedents.
+static void ResolveSceneMSAA(GL_Scene* scene, int x, int y, int width, int height)
 {
 	if (!scene || scene->msaa_samples <= 1 || !scene->msaa_fbo)
+		return;
+	const int x0 = std::clamp(x, 0, scene->width);
+	const int y0 = std::clamp(y, 0, scene->height);
+	const int x1 = std::clamp(x + width, 0, scene->width);
+	const int y1 = std::clamp(y + height, 0, scene->height);
+	if (x1 <= x0 || y1 <= y0)
 		return;
 	for (int i = 0; i < 5; ++i)
 	{
@@ -6585,13 +7944,11 @@ static void ResolveSceneMSAA(GL_Scene* scene)
 		glReadBuffer(GL_COLOR_ATTACHMENT0 + i);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene->fbo);
 		glDrawBuffer(GL_COLOR_ATTACHMENT0 + i);
-		glBlitFramebuffer(0, 0, scene->width, scene->height,
-			0, 0, scene->width, scene->height,
-			GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		glBlitFramebuffer(x0, y0, x1, y1, x0, y0, x1, y1, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	}
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, scene->msaa_fbo);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene->fbo);
-	glBlitFramebuffer(0, 0, scene->width, scene->height, 0, 0, scene->width, scene->height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+	glBlitFramebuffer(x0, y0, x1, y1, x0, y0, x1, y1, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
 
 	GLenum attachments[5] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4};
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, scene->fbo);
@@ -6708,6 +8065,7 @@ void GL33_DeleteScene(HRL_id _sceneid)
 		g_gl33_gi->ReleaseScene(_sceneid);
 
 	DestroyAllVoxelChunks(_sceneid);
+	DestroyVoxelTextureArray(_sceneid);
 	bck_->voxel_light_cache.erase(_sceneid);
 
 	//scene is not rendered at screen
@@ -6788,6 +8146,7 @@ static bool GL33_UploadMeshLOD(GL33_Backend::MeshLOD_GPU& gpu,
 
 	glGenVertexArrays(1, &gpu.vao);
 	glGenBuffers(1, &gpu.vbo);
+	gpu.upload_serial = ++bck_->gpu_upload_serial;
 	if (!gpu.vao || !gpu.vbo)
 	{
 		if (gpu.vao) glDeleteVertexArrays(1, &gpu.vao);
@@ -7053,6 +8412,7 @@ static bool BindLandscapeMaterial(HRL_id landscapeId, HRL_Material* material, co
 	shader->SetVec4("UVRegion", glm::vec4(0.f, 0.f, 1.f, 1.f));
 	shader->SetVec3("CamPos", ctx_->viewport->camera_->position_);
 	shader->SetVec3("TintColor", glm::vec3(1.f));
+	ApplyVoxelLightFieldUniforms(shader);
 	shader->SetInt("TwoSided", 0);
 	shader->SetInt("DebugView", static_cast<int>(ctx_->current_scene ? ctx_->current_scene->debug_view : HRL_DEBUG_VIEW_NONE));
 	shader->SetInt("ss_displacement_enabled", 0);
@@ -7165,11 +8525,8 @@ static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const Frus
 	}
 
 	const bool wireframe = scene->debug_view == HRL_DEBUG_VIEW_WIREFRAME;
-	GLint previousPolygonMode[2] = {GL_FILL, GL_FILL};
-	glGetIntegerv(GL_POLYGON_MODE, previousPolygonMode);
-	GLboolean previousCull = glIsEnabled(GL_CULL_FACE);
-	GLint previousCullFace = GL_BACK;
-	glGetIntegerv(GL_CULL_FACE_MODE, &previousCullFace);
+	// Etat de sortie deterministe (voir RestoreOpaqueStageState) au lieu de
+	// glGet*/glIsEnabled, qui peuvent bloquer le pipeline du driver.
 
 	glEnable(GL_DEPTH_TEST);
 	glDepthMask(GL_TRUE);
@@ -7186,6 +8543,7 @@ static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const Frus
 		glCullFace(GL_BACK);
 		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	}
+	bool cullEnabled = !wireframe;
 
 	for (const auto& [id, landscape] : scene->landscapes)
 	{
@@ -7210,18 +8568,18 @@ static void DrawLandscapes(HRL_id scene_id, const hrl_scene_t* scene, const Frus
 		if (!BindLandscapeMaterial(id, material, landscape, model))
 			continue;
 
-		const bool twoSided = MaterialIsTwoSided(material);
-		if (wireframe || twoSided) glDisable(GL_CULL_FACE);
-		else { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); }
+		const bool cull = !wireframe && !MaterialIsTwoSided(material);
+		if (cull != cullEnabled)
+		{
+			if (cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+			cullEnabled = cull;
+		}
 		glBindVertexArray(gpu.geometry.vao);
 		glDrawElements(GL_TRIANGLES, gpu.geometry.index_count, GL_UNSIGNED_INT, nullptr);
 	}
 
 	glBindVertexArray(0);
-	glPolygonMode(GL_FRONT, previousPolygonMode[0]);
-	glPolygonMode(GL_BACK, previousPolygonMode[1]);
-	glCullFace(previousCullFace);
-	if (previousCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+	RestoreOpaqueStageState(wireframe);
 }
 
 static void DrawLandscapeShadowCasters(hrl_scene_t* scene, const glm::mat4& lightViewProjection,
@@ -7295,6 +8653,7 @@ static bool GL33_UploadSkeletalMesh(GL33_Backend::SkeletalMeshGPU& gpu,
 	glGenVertexArrays(1, &gpu.vao);
 	glGenBuffers(1, &gpu.vbo);
 	glGenBuffers(1, &gpu.bone_ubo);
+	gpu.upload_serial = ++bck_->gpu_upload_serial;
 	if (!gpu.vao || !gpu.vbo || !gpu.bone_ubo)
 	{
 		if (gpu.vao) glDeleteVertexArrays(1, &gpu.vao);
@@ -7589,6 +8948,17 @@ void GL33_GetModelMatrix(HRL_Mesh *mesh, float *aa)
 
 
 //DEBUG
+// Point d'entree RHI_DrawDebug appele par HRL_EndFrame apres le rendu de la
+// scene. Pour OpenGL, les primitives de debug sont deja dessinees DANS le
+// framebuffer de la scene par GL33_DrawScene (pour chaque viewport). Les
+// redessiner ici les envoyait une seconde fois sur l'ecran (FBO 0), meme
+// pour une scene non affichee. Meme comportement que le backend Vulkan.
+void GL33_DrawDebugAfterScene(const DebugRenderer& _renderer, float line_thickness)
+{
+	(void)_renderer;
+	(void)line_thickness;
+}
+
 void GL33_DrawDebug(const DebugRenderer &_renderer, float line_thickness)
 {
 	if (_renderer.lines.empty() && _renderer.triangles.empty())

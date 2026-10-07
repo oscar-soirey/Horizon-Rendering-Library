@@ -10,6 +10,7 @@
 #include <vector>
 #include <cstdint>
 #include <algorithm>
+#include <array>
 
 #include <glm/glm.hpp>
 #include <stb/stb_truetype.h>
@@ -199,6 +200,12 @@ typedef struct {
   // Textures created internally by HRL_CreateMaterialFromFBX*. Manual
   // HRL_MaterialSetTexture() bindings remain non-owning for compatibility.
   std::vector<HRL_id> owned_textures_;
+
+  // Copies en cache de intParams_[HRL_MATERIAL_PARAM_TWO_SIDED] et
+  // [HRL_MATERIAL_PARAM_SS_DISPLACEMENT_ENABLED], tenues a jour par
+  // HRL_MaterialSetInt/Bool. Evitent une recherche par nom a chaque draw.
+  bool two_sided_ = false;
+  bool ss_displacement_enabled_ = false;
 
   // User-owned opaque pointer associated with this material.
   // HRL never allocates, frees, or dereferences this pointer.
@@ -610,16 +617,82 @@ struct HRL_VoxelWorld final {
       static_cast<size_t>(localX)].type;
   }
 
-  std::unordered_map<HRL_VoxelType, glm::vec4> type_colors_;
+  // HRL_VoxelType tient sur un octet : des tables directes de 256 entrees
+  // remplacent les unordered_map (acces sans hash dans le maillage des chunks
+  // et dans la recherche des emetteurs). ~8 Ko par monde.
+  //  - couleur par defaut : blanc opaque (meme resultat qu'une entree absente) ;
+  //  - flags de collision par defaut : 0 ;
+  //  - emissif par defaut : noir (= pas d'emission).
+  static std::array<glm::vec4, 256> DefaultVoxelTypeColors()
+  {
+    std::array<glm::vec4, 256> colors;
+    colors.fill(glm::vec4(1.f));
+    return colors;
+  }
+  static std::array<glm::vec3, 256> DefaultVoxelEmissiveColors()
+  {
+    std::array<glm::vec3, 256> colors;
+    colors.fill(glm::vec3(0.f));
+    return colors;
+  }
 
-  std::unordered_map<HRL_VoxelType, uint32_t> type_collision_flags_;
+  std::array<glm::vec4, 256> type_colors_ = DefaultVoxelTypeColors();
 
-  // Sparse type-level emissive colors. Most voxel types have no entry, so
-  // ordinary voxels pay no per-voxel memory cost for emission.
-  std::unordered_map<HRL_VoxelType, glm::vec3> type_emissive_colors_;
+  std::array<uint32_t, 256> type_collision_flags_{};
+
+  std::array<glm::vec3, 256> type_emissive_colors_ = DefaultVoxelEmissiveColors();
+  // Nombre de types ayant une couleur emissive non nulle.
+  uint32_t emissive_type_count_ = 0;
+
+  // Textures des types (HRL_SetVoxelTypeTexture). HRL_INVALID_ID : couleur
+  // seule. La texture est repetee tous les `tile` voxels (coordonnees monde,
+  // continue d'un voxel a l'autre) et multipliee par la couleur du type.
+  // type_texture_layers_ : couche du texture array OpenGL (-1 : aucune),
+  // attribuee dans l'ordre croissant des types textures.
+  static std::array<HRL_id, 256> DefaultVoxelTypeTextures()
+  {
+    std::array<HRL_id, 256> textures;
+    textures.fill(HRL_INVALID_ID);
+    return textures;
+  }
+  static std::array<int16_t, 256> DefaultVoxelTypeTextureLayers()
+  {
+    std::array<int16_t, 256> layers;
+    layers.fill(static_cast<int16_t>(-1));
+    return layers;
+  }
+  static std::array<float, 256> DefaultVoxelTypeTextureTiles()
+  {
+    std::array<float, 256> tiles;
+    tiles.fill(1.f);
+    return tiles;
+  }
+  std::array<HRL_id, 256> type_textures_ = DefaultVoxelTypeTextures();
+  std::array<float, 256> type_texture_tiles_ = DefaultVoxelTypeTextureTiles();
+  std::array<int16_t, 256> type_texture_layers_ = DefaultVoxelTypeTextureLayers();
+  uint32_t textured_type_count_ = 0;
+  // Incremente quand la liste des textures change (texture array a refaire).
+  uint64_t texture_revision_ = 1;
+
+  // Eclairage des voxels emissifs (HRL_SetVoxelEmissiveLighting) : champ de
+  // lumiere calcule sur GPU, cout independant du nombre d'emetteurs.
+  bool emissive_lighting_enabled_ = true;
+  float emissive_light_intensity_ = 1.f;
+  // Distance (voxels) a laquelle la lumiere d'un emetteur tombe a ~1/2 de sa
+  // valeur sans la decroissance de proximite. Portee utile ~ 4x cette valeur.
+  float emissive_light_falloff_ = 8.f;
+
+  // Mode de rendu de la surface (HRL_SetVoxelRenderMode). Hors FLAT, la
+  // geometrie d'un chunk depend des voxels de ses voisins.
+  HRL_EVoxelRenderMode render_mode_ = HRL_VOXEL_FLAT;
 
   // Chunks whose baked topology no longer matches the CPU data.
   std::unordered_set<uint64_t> dirty_chunks_;
+
+  // Chunks edites depuis la derniere mise a jour des emetteurs voxel du
+  // renderer OpenGL : seuls ceux-ci sont rescannes (au lieu du monde entier
+  // a chaque edition). Taille bornee par le nombre de chunks.
+  std::unordered_set<uint64_t> light_dirty_chunks_;
 
   // Chunks whose GPU representation needs rebuilding. This is deliberately
   // separate from dirty_chunks_: the latter must remain dirty until the

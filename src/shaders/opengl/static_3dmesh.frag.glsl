@@ -70,6 +70,28 @@ uniform int AlphaInvert;
 uniform int TwoSided;
 uniform vec3 CamPos;
 uniform float BrightThreshold;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Lumière des voxels émissifs (HRL_SetVoxelEmissiveLighting) : champ de
+//  lumière calculé une fois par viewport, une seule lecture de texture quel
+//  que soit le nombre d'émetteurs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+uniform sampler2D VoxelLightField;
+uniform int   VoxelLightEnabled;
+uniform vec4  VoxelLightRegion;   // xy : min monde, zw : 1 / taille monde
+uniform float VoxelLightFalloff;  // atténuation hors du plan des voxels (Z)
+
+vec3 SampleVoxelLight(vec3 worldPos)
+{
+    if (VoxelLightEnabled == 0)
+        return vec3(0.0);
+    vec2 luv = (worldPos.xy - VoxelLightRegion.xy) * VoxelLightRegion.zw;
+    if (luv.x < 0.0 || luv.y < 0.0 || luv.x > 1.0 || luv.y > 1.0)
+        return vec3(0.0);
+    float z = worldPos.z / max(VoxelLightFalloff, 1e-4);
+    return max(texture(VoxelLightField, luv).rgb, vec3(0.0)) / (1.0 + z * z);
+}
 uniform int DebugView;
 uniform vec3 DebugLODColor;
 
@@ -551,6 +573,9 @@ void main()
             lighting += evalBRDF(lightDir, normalWorld, viewDir, baseColor, roughness, specMap, metallic, lightColor) * attenuation * spotFactor * shadow;
         }
     }
+
+    // Emissive voxels : diffuse light of every emitter around (light field).
+    lighting += SampleVoxelLight(fragPos) * baseColor * (1.0 - metallic);
 
     float ao = clamp(texture(T_AO, uv).r, 0.0, 1.0);
     vec3 litResult = lighting * ao;

@@ -111,6 +111,34 @@ typedef struct HRL_VoxelCollision {
 	uint32_t inside_type;
 } HRL_VoxelCollision;
 
+/**
+ * @brief Surface rendering mode of a 2D voxel world (see HRL_SetVoxelRenderMode).
+ *
+ * Only the displayed surface changes: voxel data, collisions, picking and
+ * saved worlds are identical in every mode. The world bounds act as a frame:
+ * voxels touching the border of the world keep a straight edge there.
+ */
+typedef enum HRL_EVoxelRenderMode {
+	/** Default. Each voxel is a filled square (historic behavior). */
+	HRL_VOXEL_FLAT = 0,
+	/**
+	 * Marching squares contour: flat edges stay on the voxel boundaries,
+	 * staircases become 45 degree slopes and isolated corners are cut. The
+	 * boundary between two different voxel types follows the same contour.
+	 */
+	HRL_VOXEL_SMOOTH,
+	/**
+	 * Distinct blocks: every voxel corner touching an exposed side (a side
+	 * whose neighbor is empty) is cut at 45 degrees over 25% of the voxel
+	 * width. Each exposed side is flat over its middle 50% and slopes over
+	 * its outer 25% on both ends. Fully enclosed voxels stay square.
+	 * Between two different voxel types, straight boundaries stay straight
+	 * and only staircase corners (a voxel corner whose two side neighbors are
+	 * of another type) get the same 25% chamfer, filled by the neighbor type.
+	 */
+	HRL_VOXEL_BLOCKY
+} HRL_EVoxelRenderMode;
+
 #define HRL_VOXEL_COLLISION_NONE    0u
 #define HRL_VOXEL_COLLISION_LEFT    (1u << 0)
 #define HRL_VOXEL_COLLISION_RIGHT   (1u << 1)
@@ -1152,6 +1180,11 @@ extern "C" {
 	/**
 	 * @brief Sets the physical side length of one voxel square in world units.
 	 *
+	 * This is a display setting of the scene, not part of the voxel data: it is
+	 * not written by the save functions, and loading a world keeps the scene's
+	 * current size. It can be changed at any time; visible chunks are rebuilt
+	 * on the next frame and coordinate conversions use the new size at once.
+	 *
 	 * @param _sceneid Scene receiving the voxel world.
 	 * @param _size    Side length of one voxel square in world units.
 	 */
@@ -1222,10 +1255,66 @@ extern "C" {
 	 * @brief Assigns the emissive RGB color associated with a voxel type.
 	 *
 	 * Emissive RGB is HDR and defaults to (0, 0, 0). A non-zero emissive
-	 * color is added to the voxel appearance and also acts as a global
-	 * light source for the voxel world.
+	 * color is added to the voxel appearance and also lights the voxel world,
+	 * the sprites and the meshes around it (OpenGL : light field, any number
+	 * of emissive voxels, see HRL_SetVoxelEmissiveLighting).
 	 */
 	HRL_API void HRL_SetVoxelTypeEmissiveColor(HRL_id _sceneid, uint32_t _type, float _r, float _g, float _b);
+
+	/**
+	 * @brief Assigns a texture to a voxel type (optional, OpenGL backend).
+	 *
+	 * The texture is sampled in world space, so it continues seamlessly from one
+	 * voxel to the next, and repeats every `_tileVoxels` voxels (1 : the whole
+	 * texture on each voxel, 16 : one copy every 16x16 voxels). It is multiplied
+	 * by the type color (use white for the raw texture) and its alpha by the
+	 * type alpha. Pixel-art friendly : nearest filtering.
+	 * Textures of every textured type are packed in one texture array (each one
+	 * is resized, nearest, to the largest textured size, at most 256x256).
+	 * Emissive types keep their emissive color ; the texture modulates the
+	 * emission seen on the voxel itself.
+	 *
+	 * @param _texture    Texture ID (HRL_CreateTexture), or HRL_INVALID_ID to
+	 *                    go back to the plain color.
+	 * @param _tileVoxels Voxels covered by one copy of the texture (> 0).
+	 */
+	HRL_API void HRL_SetVoxelTypeTexture(HRL_id _sceneid, uint32_t _type, HRL_id _texture, float _tileVoxels);
+
+	/**
+	 * @brief Configures the light cast by emissive voxels (OpenGL backend).
+	 *
+	 * Emissive voxels light the voxel world, sprites and meshes around them
+	 * through a GPU light field computed once per viewport : the cost does not
+	 * depend on the number of emissive voxels (any amount is allowed). Light
+	 * is not occluded.
+	 *
+	 * @param _enabled   HRL_FALSE : emissive voxels still glow, but light nothing.
+	 * @param _intensity Multiplier of the light (default 1).
+	 * @param _falloff   Distance in voxels of the soft falloff (default 8). The
+	 *                   light reaches about four times this distance; a larger
+	 *                   value streams more voxel chunks around the cameras.
+	 */
+	HRL_API void HRL_SetVoxelEmissiveLighting(HRL_id _sceneid, int _enabled, float _intensity, float _falloff);
+
+	/**
+	 * @brief Selects how the surface of the scene's voxel world is drawn.
+	 *
+	 * HRL_VOXEL_FLAT (default), HRL_VOXEL_SMOOTH or HRL_VOXEL_BLOCKY. The mode
+	 * only changes the generated display geometry; collisions and picking keep
+	 * using the voxel grid. Changing the mode rebuilds the visible chunks.
+	 * Voxel worlds are drawn by the OpenGL backend only.
+	 *
+	 * @param _sceneid Scene owning the voxel world (created if needed).
+	 * @param _mode    One of the HRL_EVoxelRenderMode values.
+	 */
+	HRL_API void HRL_SetVoxelRenderMode(HRL_id _sceneid, HRL_EVoxelRenderMode _mode);
+
+	/**
+	 * @brief Returns the voxel surface rendering mode of a scene.
+	 * @return The current mode, or HRL_VOXEL_FLAT for an invalid scene or a
+	 *         scene without voxel world.
+	 */
+	HRL_API HRL_EVoxelRenderMode HRL_GetVoxelRenderMode(HRL_id _sceneid);
 
 	/**
 	 * @brief Loads or replaces voxel data for a scene.
@@ -1270,8 +1359,10 @@ extern "C" {
 	 * @brief Loads a voxel world from a serialized memory buffer.
 	 *
 	 * The buffer must have been produced by HRL_SaveVoxelWorldAll() or use the
-	 * same HRL voxel-world serialization format. World dimensions, voxel physical
-	 * size, chunk size and voxel types are restored. Existing type configuration
+	 * same HRL voxel-world serialization format. World dimensions, chunk size and
+	 * voxel types are restored. The voxel physical size is not stored in the
+	 * file: the scene keeps its current HRL_SetVoxelPhysicalSize() value (files
+	 * written by older versions still load; their stored size is ignored). Existing type configuration
 	 * (colors, emissive colors and user-defined collision flags) is kept.
 	 */
 	HRL_API int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size);

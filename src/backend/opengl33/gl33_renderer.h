@@ -76,6 +76,7 @@ void GL33_GetModelMatrix(HRL_Mesh* mesh, float* aa);
 
 //Debug//
 void GL33_DrawDebug(const DebugRenderer& _renderer, float line_thickness);
+void GL33_DrawDebugAfterScene(const DebugRenderer& _renderer, float line_thickness);
 
 //Requests//
 int GL33_IsGlobalIlluminationMethodSupported(int method);

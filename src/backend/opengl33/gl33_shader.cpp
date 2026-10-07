@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <string>
 #include <limits>
+#include <cstring>
 
 #include <glad/glad.h>
 
@@ -137,48 +138,98 @@ uint64_t GL33_Shader::GetId() const
   return id;
 }
 
-void GL33_Shader::SetInt(const std::string &name, int value)
+uint32_t GL33_Shader::s_value_generation_ = 1;
+
+void GL33_Shader::InvalidateAllValueCaches()
 {
-  glUniform1i(FindUniformLocation(name), value);
+  ++s_value_generation_;
+  if (s_value_generation_ == 0)
+    s_value_generation_ = 1; // 0 est reserve a "aucune valeur"
 }
 
-void GL33_Shader::SetUint(const std::string &name, uint32_t value)
+GL33_Shader::UniformSlot* GL33_Shader::FindUniformSlot(const char* name)
 {
-  glUniform1ui(FindUniformLocation(name), value);
+  if (!name)
+    return nullptr;
+  lookup_key_.assign(name);
+  auto it = uniform_indices_.find(lookup_key_);
+  if (it != uniform_indices_.end())
+    return &uniform_slots_[it->second];
+
+  // Premier acces a ce nom : une seule requete OpenGL, ensuite tout vient du cache.
+  UniformSlot slot;
+  slot.location = glGetUniformLocation(static_cast<GLuint>(id), name);
+  uniform_slots_.push_back(slot);
+  const uint32_t index = static_cast<uint32_t>(uniform_slots_.size() - 1);
+  uniform_indices_.emplace(lookup_key_, index);
+  return &uniform_slots_[index];
 }
 
-void GL33_Shader::SetFloat(const std::string &name, float value)
+bool GL33_Shader::NeedsUpload(UniformSlot* slot, const void* value, size_t size)
 {
-  glUniform1f(FindUniformLocation(name), value);
+  // Uniform absent du programme (optimise par le compilateur GLSL, ou nom
+  // inconnu) : glUniform*(-1) ne fait rien, inutile de l'appeler.
+  if (!slot || slot->location < 0)
+    return false;
+  if (slot->generation == s_value_generation_ && std::memcmp(slot->data, value, size) == 0)
+    return false;
+  std::memcpy(slot->data, value, size);
+  slot->generation = s_value_generation_;
+  return true;
 }
 
-void GL33_Shader::SetVec2(const std::string &name, const glm::vec2 &value)
+void GL33_Shader::SetInt(const char* name, int value)
 {
-  glUniform2f(FindUniformLocation(name), value.x, value.y);
+  UniformSlot* slot = FindUniformSlot(name);
+  if (NeedsUpload(slot, &value, sizeof(value)))
+    glUniform1i(slot->location, value);
 }
 
-void GL33_Shader::SetVec3(const std::string &name, const glm::vec3 &value)
+void GL33_Shader::SetUint(const char* name, uint32_t value)
 {
-  glUniform3f(FindUniformLocation(name), value.x, value.y, value.z);
+  UniformSlot* slot = FindUniformSlot(name);
+  if (NeedsUpload(slot, &value, sizeof(value)))
+    glUniform1ui(slot->location, value);
 }
 
-void GL33_Shader::SetVec4(const std::string &name, const glm::vec4 &value)
+void GL33_Shader::SetFloat(const char* name, float value)
 {
-  glUniform4f(FindUniformLocation(name), value.x, value.y, value.z, value.w);
+  UniformSlot* slot = FindUniformSlot(name);
+  if (NeedsUpload(slot, &value, sizeof(value)))
+    glUniform1f(slot->location, value);
 }
 
-void GL33_Shader::SetMat3(const std::string &name, const glm::mat3 &value)
+void GL33_Shader::SetVec2(const char* name, const glm::vec2 &value)
 {
-  glUniformMatrix3fv(FindUniformLocation(name), 1, GL_FALSE, glm::value_ptr(value));
+  UniformSlot* slot = FindUniformSlot(name);
+  if (NeedsUpload(slot, glm::value_ptr(value), sizeof(float) * 2))
+    glUniform2f(slot->location, value.x, value.y);
 }
 
-void GL33_Shader::SetMat4(const std::string &name, const glm::mat4 &value)
+void GL33_Shader::SetVec3(const char* name, const glm::vec3 &value)
 {
-  glUniformMatrix4fv(FindUniformLocation(name), 1, GL_FALSE, glm::value_ptr(value));
+  UniformSlot* slot = FindUniformSlot(name);
+  if (NeedsUpload(slot, glm::value_ptr(value), sizeof(float) * 3))
+    glUniform3f(slot->location, value.x, value.y, value.z);
 }
 
-GLint GL33_Shader::FindUniformLocation(const std::string &name)
+void GL33_Shader::SetVec4(const char* name, const glm::vec4 &value)
 {
-  auto [it, inserted] = uniform_locations_.try_emplace(name, glGetUniformLocation(id, name.c_str()));
-  return it->second;
+  UniformSlot* slot = FindUniformSlot(name);
+  if (NeedsUpload(slot, glm::value_ptr(value), sizeof(float) * 4))
+    glUniform4f(slot->location, value.x, value.y, value.z, value.w);
+}
+
+void GL33_Shader::SetMat3(const char* name, const glm::mat3 &value)
+{
+  UniformSlot* slot = FindUniformSlot(name);
+  if (NeedsUpload(slot, glm::value_ptr(value), sizeof(float) * 9))
+    glUniformMatrix3fv(slot->location, 1, GL_FALSE, glm::value_ptr(value));
+}
+
+void GL33_Shader::SetMat4(const char* name, const glm::mat4 &value)
+{
+  UniformSlot* slot = FindUniformSlot(name);
+  if (NeedsUpload(slot, glm::value_ptr(value), sizeof(float) * 16))
+    glUniformMatrix4fv(slot->location, 1, GL_FALSE, glm::value_ptr(value));
 }
