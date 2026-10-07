@@ -3534,6 +3534,16 @@ int HRL_LoadVoxelWorldBuffer(HRL_id _sceneid, const void* _buffer, size_t _size)
 	newWorld->geometry_revision_ = geometryRevision + 1;
 	newWorld->voxel_revision_ = voxelRevision + 1;
 	newWorld->color_revision_ = colorRevision;
+	// Textures of the types and emissive lighting are scene settings too :
+	// a reload (ex : editor Stop restoring the level) must keep them.
+	newWorld->type_textures_ = world->type_textures_;
+	newWorld->type_texture_tiles_ = world->type_texture_tiles_;
+	newWorld->type_texture_layers_ = world->type_texture_layers_;
+	newWorld->textured_type_count_ = world->textured_type_count_;
+	newWorld->texture_revision_ = world->texture_revision_ + 1;
+	newWorld->emissive_lighting_enabled_ = world->emissive_lighting_enabled_;
+	newWorld->emissive_light_intensity_ = world->emissive_light_intensity_;
+	newWorld->emissive_light_falloff_ = world->emissive_light_falloff_;
 	newWorld->dirty_chunks_.clear();
 	newWorld->render_dirty_chunks_.clear();
 	it->second->voxel_world = newWorld;
