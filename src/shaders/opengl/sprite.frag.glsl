@@ -125,7 +125,15 @@ struct Light
     float padding3;
 
     vec3  color;
-    float padding4;
+    float shadowStrength;  // (non utilisé par les sprites)
+
+    // Même disposition std140 que GL_Light (144 octets) et que le shader des
+    // meshes : sans ces deux champs, lights[i] (i > 0) était lu au mauvais
+    // endroit de l'UBO (pas de 64 au lieu de 144 octets) et donnait des
+    // valeurs aberrantes (NaN) qui faisaient disparaître les sprites dès
+    // qu'il y avait plusieurs lumières dans la scène.
+    mat4  shadowMatrix;
+    vec4  shadowParams;
 };
 
 layout(std140) uniform LightBlock
@@ -276,6 +284,8 @@ void main()
         {
             vec3  toLight     = light.position - fragPos;
             float dist        = length(toLight);
+            if (dist < 1e-4)
+                continue;                        // lumière sur le fragment : pas de direction
             vec3  lightDir    = toLight / dist; // normalisé sans recalculer length()
 
             float attenuation = 1.0 / (1.0 + light.attenuation * dist * dist);
@@ -311,6 +321,8 @@ void main()
         {
             vec3  toLight     = light.position - fragPos;
             float dist        = length(toLight);
+            if (dist < 1e-4)
+                continue;
             vec3  lightDir    = toLight / dist;
 
             // Angle entre la direction principale du spot et le rayon fragment→source

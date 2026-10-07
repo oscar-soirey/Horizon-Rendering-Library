@@ -3791,10 +3791,13 @@ static void ApplyVoxelLightFieldUniforms(GL33_Shader* shader)
 	if (!shader || !bck_)
 		return;
 	const auto& lf = bck_->voxel_light_field;
+	// Always give the sampler its own unit, even unused : by default it would
+	// share unit 0 with a sampler of another type (the voxel texture array),
+	// and OpenGL then refuses the draw call (GL_INVALID_OPERATION).
+	shader->SetInt("VoxelLightField", VOXEL_LIGHT_FIELD_TEXTURE_UNIT);
 	shader->SetInt("VoxelLightEnabled", lf.active ? 1 : 0);
 	if (!lf.active)
 		return;
-	shader->SetInt("VoxelLightField", VOXEL_LIGHT_FIELD_TEXTURE_UNIT);
 	shader->SetVec4("VoxelLightRegion", lf.region);
 	shader->SetFloat("VoxelLightFalloff", lf.falloff_world);
 }
@@ -3919,9 +3922,9 @@ static void DrawVoxelWorld(HRL_id scene_id, const hrl_scene_t* scene, const Frus
 	// Textures of the voxel types.
 	const GLuint textureArray = EnsureVoxelTextureArray(scene_id, scene->voxel_world);
 	shader->SetInt("VoxelTexturesEnabled", textureArray ? 1 : 0);
+	shader->SetInt("VoxelTextures", VOXEL_TEXTURE_ARRAY_UNIT);
 	if (textureArray)
 	{
-		shader->SetInt("VoxelTextures", VOXEL_TEXTURE_ARRAY_UNIT);
 		glActiveTexture(GL_TEXTURE0 + VOXEL_TEXTURE_ARRAY_UNIT);
 		glBindTexture(GL_TEXTURE_2D_ARRAY, textureArray);
 
