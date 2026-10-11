@@ -27,6 +27,19 @@ if(COMPILE_VULKAN)
 
 endif()
 
+# OpenGL ES 3.0 backend (HRL_OPENGL_ES_30, mobile). See docs/GLES3_BACKEND.md.
+option(HRL_ENABLE_GLES3 "Compile the OpenGL ES 3.0 backend" OFF)
+
+if(HRL_ENABLE_GLES3)
+
+    set(GLES3_SOURCES
+        src/backend/gles3/gles3_backend.cpp
+        src/backend/gles3/gles3_renderer.cpp
+        src/backend/gles3/gles3_shader.cpp
+        src/backend/gles3/gles3_texture.cpp
+    )
+
+endif()
 
 
 
@@ -156,6 +169,8 @@ add_library(hrldll SHARED
         src/backend/opengl33/gl33_texture.cpp
 	src/backend/opengl33/gi.cpp
 
+	${GLES3_SOURCES}
+
 	${VULKAN_SOURCES}
 )
 
@@ -164,6 +179,10 @@ add_dependencies(hrldll embed_resources)
 #compile dll declspec export
 #target_compile_definitions(hrl PRIVATE HRL_NO_DLL)
 target_compile_definitions(hrldll PRIVATE HRL_BUILD_DLL)
+
+if(HRL_ENABLE_GLES3)
+target_compile_definitions(hrldll PRIVATE HRL_ENABLE_GLES3)
+endif()
 
 
 #link OpenGL
@@ -181,4 +200,4 @@ target_include_directories(hrldll PRIVATE "${VULKAN_SDK}/Include")
 #target_link_libraries(hrl PRIVATE Vulkan::Vulkan)
 target_link_libraries(hrldll PRIVATE Vulkan::Vulkan)
 
-endif()
+endif()

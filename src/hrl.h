@@ -233,7 +233,9 @@ typedef enum HRL_E_APIs{
 	HRL_D3D12,
 	HRL_METAL,
 	HRL_NVN,
-	HRL_GNM
+	HRL_GNM,
+	/** OpenGL ES 3.0 (Android, mobile). Compiled when HRL_ENABLE_GLES3 is defined; see docs/GLES3_BACKEND.md. */
+	HRL_OPENGL_ES_30
 }HRL_E_APIs;
 
 typedef enum HRL_ELightType{
@@ -427,8 +429,8 @@ typedef enum HRL_EVFXSpawnShape {
 /* Placement of the text of a label / button in its widget box.
  * FIT      : the text is scaled to fill the box (aspect kept), centered (default).
  * TOP_LEFT : the text keeps its size (text size = pixel height of a line), from the
- *            top-left corner of the box, clipped by the box.
- * CENTER   : the text keeps its size, centered in the box, clipped by the box. */
+ *            top-left corner of the box ; a longer text overflows the box.
+ * CENTER   : the text keeps its size, centered in the box (may overflow it). */
 typedef enum HRL_ETextLayout{
 	HRL_TEXT_LAYOUT_FIT = 0,
 	HRL_TEXT_LAYOUT_TOP_LEFT,
@@ -468,7 +470,7 @@ extern "C" {
 
 	/**
 	 * @brief Selects the graphics backend to use. Must be called before HRL_InitContext.
-	 * @param _api One of the HRL_* API constants (e.g. HRL_OPENGL_45, HRL_VULKAN).
+	 * @param _api One of the HRL_* API constants (e.g. HRL_OPENGL_33, HRL_VULKAN, HRL_OPENGL_ES_30).
 	 */
 	HRL_API void HRL_Init(HRL_E_APIs _api);
 
@@ -1174,6 +1176,19 @@ extern "C" {
 	 * @param _height    World height in voxels.
 	 */
 	HRL_API void HRL_SetVoxelSize(HRL_id _sceneid, int _width, int _height);
+	/** Size of the voxel world (voxels). HRL_FALSE (0, 0) without a world. */
+	HRL_API int HRL_GetVoxelSize(HRL_id _sceneid, int* _width, int* _height);
+	HRL_API int HRL_GetVoxelChunkSize(HRL_id _sceneid);
+	/** The size fits the .hrlv encoding (chunk count <= 2^32 with the current chunk size). */
+	HRL_API int HRL_IsVoxelSizeEncodable(HRL_id _sceneid, int _width, int _height);
+	/** Non-empty voxels that a resize to (_width, _height) would remove. */
+	HRL_API uint64_t HRL_CountVoxelsOutside(HRL_id _sceneid, int _width, int _height);
+	/**
+	 * Changes the size of the voxel world, KEEPING its voxels (unlike
+	 * HRL_SetVoxelSize, which empties it). Voxels outside the new size are
+	 * removed. The origin (0, 0) does not move. Save the world afterwards.
+	 */
+	HRL_API int HRL_ResizeVoxelWorld(HRL_id _sceneid, int _width, int _height);
 
 	/**
 	 * @brief Creates an empty voxel world with the given dimensions.

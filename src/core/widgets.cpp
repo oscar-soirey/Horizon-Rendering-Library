@@ -342,7 +342,8 @@ void HRL_Widget::PushText(std::vector<WidgetDrawInfos>& infos, HRL_id texture, c
 	const float box_h = GetHeightPixels();
 	const float box_x = position_.x * viewport_width_ - box_w * anchor_.x;
 	const float box_y = position_.y * viewport_height_ - box_h * anchor_.y;
-	if (box_w <= 0.0f || box_h <= 0.0f)
+	// An empty box still shows its text (it overflows) ; FIT needs a box.
+	if (layout == HRL_TEXT_LAYOUT_FIT && (box_w <= 0.0f || box_h <= 0.0f))
 		return;
 
 	const float tex_w = static_cast<float>(texture_width);
@@ -399,13 +400,9 @@ void HRL_Widget::PushText(std::vector<WidgetDrawInfos>& infos, HRL_id texture, c
 	const float quad_x = std::floor(text_x - padding + 0.5f);
 	const float quad_y = std::floor(text_y - padding + 0.5f);
 
-	// Clipped by the widget box.
-	const float x0 = std::max(quad_x, box_x);
-	const float y0 = std::max(quad_y, box_y);
-	const float x1 = std::min(quad_x + quad_w, box_x + box_w);
-	const float y1 = std::min(quad_y + quad_h, box_y + box_h);
-	if (x1 <= x0 || y1 <= y0)
-		return;
+	// Not clipped : a text longer than its box overflows it (like the
+	// Widget Editor preview).
+	const float x0 = quad_x, y0 = quad_y, x1 = quad_x + quad_w, y1 = quad_y + quad_h;
 
 	WidgetDrawInfos d{};
 	d.px = x0 / viewport_width_;
@@ -415,10 +412,10 @@ void HRL_Widget::PushText(std::vector<WidgetDrawInfos>& infos, HRL_id texture, c
 	d.texture = texture;
 	d.r = color.r; d.g = color.g; d.b = color.b; d.a = color.a;
 	d.sdf = true;
-	d.u0 = (x0 - quad_x) / quad_w;
-	d.u1 = (x1 - quad_x) / quad_w;
-	d.t0 = (y0 - quad_y) / quad_h;
-	d.t1 = (y1 - quad_y) / quad_h;
+	d.u0 = 0.0f;
+	d.u1 = 1.0f;
+	d.t0 = 0.0f;
+	d.t1 = 1.0f;
 	infos.push_back(d);
 }
 

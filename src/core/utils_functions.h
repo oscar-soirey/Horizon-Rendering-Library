@@ -57,6 +57,11 @@ BitmapResult GenerateSDFBitmap(
 		float font_size, float wrap_width
 );
 
+// Decodes every chunk of a lazily loaded voxel world (serialized_chunks_).
+struct HRL_VoxelWorld;
+void HRL_InternalMaterializeVoxelChunks(HRL_VoxelWorld* world);
+bool HRL_EnsureVoxelChunkLoaded(HRL_VoxelWorld* world, int chunkX, int chunkY);
+
 // Internal helper used by widgets so the public HRL text API remains unchanged.
 HRL_id HRL_InternalCreateSDFTextTexture(const char* text, HRL_id font_id, float font_size);
 

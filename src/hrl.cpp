@@ -12,7 +12,14 @@
 #include "core/utils_functions.h"
 #include "core/widgets.h"
 
+// Backends. HRL_DISABLE_OPENGL33 leaves the desktop OpenGL backend out (mobile
+// builds); HRL_ENABLE_GLES3 adds the OpenGL ES 3.0 one (HRL_OPENGL_ES_30).
+#ifndef HRL_DISABLE_OPENGL33
 #include "backend/opengl33/gl33_backend.h"
+#endif
+#ifdef HRL_ENABLE_GLES3
+#include "backend/gles3/gles3_backend.h"
+#endif
 #include "backend/vulkan/vulkan_backend.h"
 #include <vulkan/vulkan.h>
 
@@ -795,21 +802,38 @@ static void SimulateVFXSystem(HRL_VFXSystem* system, float dt)
 void HRL_Init(HRL_E_APIs _api)
 {
 	g_AsyncResourceLoader.Start();
-	if (_api != HRL_OPENGL_33 && _api != HRL_VULKAN)
+	bool backendAvailable = (_api == HRL_VULKAN);
+#ifndef HRL_DISABLE_OPENGL33
+	backendAvailable = backendAvailable || (_api == HRL_OPENGL_33);
+#endif
+#ifdef HRL_ENABLE_GLES3
+	backendAvailable = backendAvailable || (_api == HRL_OPENGL_ES_30);
+#endif
+	if (!backendAvailable)
 	{
 		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR,
-			"HRL_Init: selected backend is not implemented");
+			"HRL_Init: selected backend is not implemented (or was not compiled in this build)");
 		return;
 	}
 
 	switch (_api)
 	{
+#ifndef HRL_DISABLE_OPENGL33
 	case HRL_OPENGL_33 :
 	{
 		g_Backend = GetOpenGL33Backend();
 		g_Backend.RHI_Init();
 		break;
 	}
+#endif
+#ifdef HRL_ENABLE_GLES3
+	case HRL_OPENGL_ES_30 :
+	{
+		g_Backend = GetOpenGLES3Backend();
+		g_Backend.RHI_Init();
+		break;
+	}
+#endif
 	case HRL_OPENGL_45 :
 	{
 		break;
@@ -2996,6 +3020,9 @@ void HRL_SetVoxelChunkSize(HRL_id _sceneid, int _chunkSize)
 	HRL_VoxelWorld* world = it->second->voxel_world;
 	if (world->chunk_size_ == _chunkSize)
 		return;
+	// Chunks of a lazily loaded world still compressed : decoded first, or
+	// they would be lost with serialized_chunks_ below.
+	HRL_InternalMaterializeVoxelChunks(world);
 	const int oldChunkSize = world->chunk_size_;
 	auto oldChunks = std::move(world->voxel_chunks_);
 	world->voxel_chunks_.clear();
@@ -3036,6 +3063,171 @@ void HRL_SetVoxelChunkSize(HRL_id _sceneid, int _chunkSize)
 	world->render_dirty_chunks_.clear();
 	++world->geometry_revision_;
 	++world->voxel_revision_;
+}
+
+// Decodes every chunk still compressed in serialized_chunks_ (lazy load).
+void HRL_InternalMaterializeVoxelChunks(HRL_VoxelWorld* world)
+{
+	if (!world)
+		return;
+	for (const auto& [key, record] : world->serialized_chunks_)
+	{
+		if (record.deleted)
+			continue;
+		const int chunkX = static_cast<int32_t>(key >> 32u);
+		const int chunkY = static_cast<int32_t>(key & 0xffffffffu);
+		HRL_EnsureVoxelChunkLoaded(world, chunkX, chunkY);
+	}
+}
+
+static bool VoxelWorldSizeIsEncodable(int width, int height, int chunkSize)
+{
+	if (width <= 0 || height <= 0 || chunkSize <= 0)
+		return false;
+	const uint64_t columns = (static_cast<uint64_t>(width) + chunkSize - 1u) / static_cast<uint64_t>(chunkSize);
+	const uint64_t rows = (static_cast<uint64_t>(height) + chunkSize - 1u) / static_cast<uint64_t>(chunkSize);
+	return columns * rows <= std::numeric_limits<uint32_t>::max();
+}
+
+int HRL_GetVoxelSize(HRL_id _sceneid, int* _width, int* _height)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second || !it->second->voxel_world)
+	{
+		if (_width) *_width = 0;
+		if (_height) *_height = 0;
+		return HRL_FALSE;
+	}
+	if (_width) *_width = it->second->voxel_world->width_;
+	if (_height) *_height = it->second->voxel_world->height_;
+	return HRL_TRUE;
+}
+
+int HRL_GetVoxelChunkSize(HRL_id _sceneid)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second || !it->second->voxel_world)
+		return 0;
+	return it->second->voxel_world->chunk_size_;
+}
+
+int HRL_IsVoxelSizeEncodable(HRL_id _sceneid, int _width, int _height)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	const int chunkSize = (it != ctx_.scenes.end() && it->second && it->second->voxel_world)
+		? it->second->voxel_world->chunk_size_ : 32;
+	return VoxelWorldSizeIsEncodable(_width, _height, chunkSize) ? HRL_TRUE : HRL_FALSE;
+}
+
+uint64_t HRL_CountVoxelsOutside(HRL_id _sceneid, int _width, int _height)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second || !it->second->voxel_world)
+		return 0;
+	HRL_VoxelWorld* world = it->second->voxel_world;
+	HRL_InternalMaterializeVoxelChunks(world);
+
+	uint64_t count = 0;
+	const int cs = world->chunk_size_;
+	for (const auto& [key, chunk] : world->voxel_chunks_)
+	{
+		const int chunkX = static_cast<int32_t>(key >> 32u);
+		const int chunkY = static_cast<int32_t>(key & 0xffffffffu);
+		const int minX = chunkX * cs;
+		const int minY = chunkY * cs;
+		const int chunkW = std::min(cs, world->width_ - minX);
+		const int chunkH = std::min(cs, world->height_ - minY);
+		if (chunkW <= 0 || chunkH <= 0)
+			continue;
+		// Whole chunk inside : nothing to count.
+		if (minX + chunkW <= _width && minY + chunkH <= _height)
+			continue;
+		for (int y = 0; y < chunkH; ++y)
+			for (int x = 0; x < chunkW; ++x)
+			{
+				if (minX + x < _width && minY + y < _height)
+					continue;
+				if (chunk[static_cast<size_t>(y) * static_cast<size_t>(chunkW) + static_cast<size_t>(x)].type != 0)
+					++count;
+			}
+	}
+	return count;
+}
+
+int HRL_ResizeVoxelWorld(HRL_id _sceneid, int _width, int _height)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_ResizeVoxelWorld: invalid scene ID");
+		return HRL_FALSE;
+	}
+	EnsureVoxelWorld(_sceneid);
+	HRL_VoxelWorld* world = it->second->voxel_world;
+
+	if (!VoxelWorldSizeIsEncodable(_width, _height, world->chunk_size_))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR,
+			"HRL_ResizeVoxelWorld: size must be positive and fit the .hrlv encoding (chunk count <= 2^32)");
+		return HRL_FALSE;
+	}
+	if (world->width_ == _width && world->height_ == _height)
+		return HRL_TRUE;
+
+	// Every chunk decoded, then re-bucketed : the edge chunks change size
+	// (a chunk stores min(chunk_size, width - minX) columns).
+	HRL_InternalMaterializeVoxelChunks(world);
+	const int oldWidth = world->width_;
+	const int oldHeight = world->height_;
+	const int cs = world->chunk_size_;
+	auto oldChunks = std::move(world->voxel_chunks_);
+	world->voxel_chunks_.clear();
+	world->serialized_source_.clear();
+	world->serialized_chunks_.clear();
+	world->width_ = _width;
+	world->height_ = _height;
+
+	for (auto& [key, oldChunk] : oldChunks)
+	{
+		const int chunkX = static_cast<int32_t>(key >> 32u);
+		const int chunkY = static_cast<int32_t>(key & 0xffffffffu);
+		const int minX = chunkX * cs;
+		const int minY = chunkY * cs;
+		const int oldW = std::min(cs, oldWidth - minX);
+		const int oldH = std::min(cs, oldHeight - minY);
+		if (oldW <= 0 || oldH <= 0 || minX >= _width || minY >= _height)
+			continue;
+
+		const int newW = std::min(cs, _width - minX);
+		const int newH = std::min(cs, _height - minY);
+		if (newW == oldW && newH == oldH)
+		{
+			// Same shape : the chunk is moved as is.
+			world->voxel_chunks_.emplace(key, std::move(oldChunk));
+			continue;
+		}
+
+		bool any = false;
+		const int w = std::min(oldW, newW);
+		const int h = std::min(oldH, newH);
+		for (int y = 0; y < h && !any; ++y)
+			for (int x = 0; x < w; ++x)
+				if (oldChunk[static_cast<size_t>(y) * oldW + x].type != 0) { any = true; break; }
+		if (!any)
+			continue;
+
+		auto& chunk = world->EnsureVoxelChunk(chunkX, chunkY);
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+				chunk[static_cast<size_t>(y) * newW + x] = oldChunk[static_cast<size_t>(y) * oldW + x];
+	}
+
+	world->dirty_chunks_.clear();
+	world->render_dirty_chunks_.clear();
+	world->light_dirty_chunks_.clear();
+	++world->geometry_revision_;
+	++world->voxel_revision_;
+	return HRL_TRUE;
 }
 
 void HRL_SetVoxelTypeColor(HRL_id _sceneid, uint32_t _type, float _r, float _g, float _b, float _a)
