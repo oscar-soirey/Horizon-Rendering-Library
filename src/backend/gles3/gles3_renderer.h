@@ -21,6 +21,8 @@ void GLES3_WindowResizeCallback(int width, int height);
 void GLES3_TakeScreenshot(HRL_id scene, const char* target_path);
 
 void GLES3_ResetFramebuffer();
+/// The framebuffer on-screen scenes are drawn into (default: 0, the window).
+void GLES3_SetDefaultFramebuffer(unsigned int framebuffer);
 
 void GLES3_DrawScene(hrl_scene_t* scene, HRL_id scene_id);
 

@@ -28,6 +28,21 @@ Both backends can live in the same binary (useful to compare them on a PC). The
 `HRL_GL_*` functions of `hrl_gl.h` are implemented by the OpenGL 3.3 backend; the ES
 backend provides them only when `HRL_DISABLE_OPENGL33` is defined.
 
+## iOS
+
+iOS has no framebuffer 0: a view (`GLKView`, `CAEAGLLayer`) renders into a framebuffer
+of its own. Tell the backend which one stands for the screen before each frame:
+
+```c
+GLint framebuffer = 0;
+glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);   // the view has just bound it
+HRL_SetDefaultFramebuffer((HRL_uint)framebuffer);
+```
+
+On-screen scenes are then drawn into it, and screenshots read from it. The default is 0
+(a window), so nothing changes on the other platforms. The function loader is
+`dlsym(RTLD_DEFAULT, name)`: the entry points are plain symbols of OpenGLES.framework.
+
 ## What is supported
 
 | Feature | Notes |

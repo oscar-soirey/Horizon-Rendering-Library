@@ -84,11 +84,20 @@ struct AsyncResourceTask
     std::string frag;
 };
 
+// A browser page without shared memory has no threads to give (Emscripten
+// without -pthread): resources are then decoded on the calling thread.
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+#define HRL_NO_THREADS 1
+#endif
+
 class AsyncResourceLoader
 {
 public:
     void Start()
     {
+#ifdef HRL_NO_THREADS
+        return; // tasks run inside Enqueue()
+#else
         std::lock_guard<std::mutex> lock(mutex_);
         if (!workers_.empty()) return;
         stop_ = false;
@@ -98,6 +107,7 @@ public:
         workers_.reserve(count);
         for (unsigned int i = 0; i < count; ++i)
             workers_.emplace_back([this]{ WorkerLoop(); });
+#endif
     }
 
     void Stop()
@@ -114,6 +124,14 @@ public:
 
     void Enqueue(AsyncResourceTask task)
     {
+#ifdef HRL_NO_THREADS
+        // No worker threads (a browser page): do the work now. The result is
+        // still picked up by the main loop, like one coming from a worker.
+        AsyncResourceResult result = Process(task);
+        std::lock_guard<std::mutex> lock(result_mutex_);
+        results_.push(std::move(result));
+        return;
+#endif
         {
             std::lock_guard<std::mutex> lock(mutex_);
             queue_.push(std::move(task));
@@ -155,6 +173,25 @@ private:
         return true;
     }
 
+    static AsyncResourceResult Process(AsyncResourceTask& task)
+    {
+        AsyncResourceResult result;
+        result.type = task.type;
+        result.id = task.id;
+        if (task.type == AsyncResourceResult::Type::Texture)
+        {
+            result.success = DecodeTexture(task.bytes, result.bitmap, result.error);
+        }
+        else
+        {
+            result.vert = std::move(task.vert);
+            result.frag = std::move(task.frag);
+            result.success = !result.vert.empty() && !result.frag.empty();
+            if (!result.success) result.error = "Async shader load: empty vertex or fragment source";
+        }
+        return result;
+    }
+
     void WorkerLoop()
     {
         for (;;)
@@ -169,20 +206,7 @@ private:
                 ++active_workers_;
             }
 
-            AsyncResourceResult result;
-            result.type = task.type;
-            result.id = task.id;
-            if (task.type == AsyncResourceResult::Type::Texture)
-            {
-                result.success = DecodeTexture(task.bytes, result.bitmap, result.error);
-            }
-            else
-            {
-                result.vert = std::move(task.vert);
-                result.frag = std::move(task.frag);
-                result.success = !result.vert.empty() && !result.frag.empty();
-                if (!result.success) result.error = "Async shader load: empty vertex or fragment source";
-            }
+            AsyncResourceResult result = Process(task);
 
             {
                 std::lock_guard<std::mutex> lock(result_mutex_);
@@ -6864,6 +6888,15 @@ void HRL_SetAntialiasingMode(HRL_uint _mode)
 	}
 	if (g_Backend.RHI_SetAntialiasingMode)
 		g_Backend.RHI_SetAntialiasingMode((int)_mode);
+}
+
+void HRL_SetDefaultFramebuffer(HRL_uint _framebuffer)
+{
+#ifdef HRL_ENABLE_GLES3
+	GLES3_SetDefaultFramebuffer(_framebuffer);
+#else
+	(void)_framebuffer;
+#endif
 }
 
 void HRL_MaterialSetEmissiveColor(HRL_id matid, float r, float g, float b, float a)

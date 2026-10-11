@@ -2241,6 +2241,15 @@ extern "C" {
 	 */
 	HRL_API void HRL_SetAntialiasingMode(HRL_uint _mode);
 
+	/**
+	 * @brief Tells the OpenGL ES backend which framebuffer stands for the screen.
+	 * Only needed where there is no framebuffer 0: on iOS a view renders into a
+	 * framebuffer of its own (GLKView, CAEAGLLayer). Call it before each frame
+	 * with the framebuffer the view has bound. Ignored by the other backends.
+	 * @param _framebuffer OpenGL name of the framebuffer; 0 is the window (default).
+	 */
+	HRL_API void HRL_SetDefaultFramebuffer(HRL_uint _framebuffer);
+
 
 	/* ============================================================================
 	 *  FONTS

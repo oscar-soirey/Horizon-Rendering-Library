@@ -41,6 +41,10 @@
 #include <string>
 #include <cstring>
 
+// The framebuffer that stands for the screen: 0 for a window, the view's own
+// framebuffer on iOS, which has no framebuffer 0 (see HRL_SetDefaultFramebuffer).
+static GLuint g_default_framebuffer = 0;
+
 namespace
 {
 
@@ -997,7 +1001,7 @@ bool AllocateSceneTarget(GLES3_Scene* scene, int width, int height)
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene->color_texture, 0);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, scene->depth_rbo);
 	const bool complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_default_framebuffer);
 
 	scene->width = width;
 	scene->height = height;
@@ -2388,6 +2392,11 @@ void GLES3_ResetFramebuffer()
 {
 }
 
+void GLES3_SetDefaultFramebuffer(unsigned int framebuffer)
+{
+	g_default_framebuffer = framebuffer;
+}
+
 // ===========================================================================
 // Frame
 // ===========================================================================
@@ -2415,7 +2424,7 @@ void GLES3_DrawScene(hrl_scene_t* scene, HRL_id scene_id)
 	}
 	if (!onScreen && gpu_scene->fbo == 0)
 		AllocateSceneTarget(gpu_scene, (int)GetWindowWidth(), (int)GetWindowHeight());
-	const GLuint target_fbo = onScreen ? 0u : gpu_scene->fbo;
+	const GLuint target_fbo = onScreen ? g_default_framebuffer : gpu_scene->fbo;
 
 	// Redundant uniforms are filtered by GLES3_Shader. Start every scene from an
 	// empty cache so the renderer stays correct if the application writes
@@ -2497,7 +2506,7 @@ void GLES3_DrawScene(hrl_scene_t* scene, HRL_id scene_id)
 	glDisable(GL_BLEND);
 	glBindVertexArray(0);
 	glUseProgram(0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_default_framebuffer);
 }
 
 void GLES3_TakeScreenshot(HRL_id scene, const char* target_path)
@@ -2521,8 +2530,10 @@ void GLES3_TakeScreenshot(HRL_id scene, const char* target_path)
 	if (gpuScene->on_screen)
 	{
 		// The scene was just rendered into the back buffer (before the swap).
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		glReadBuffer(GL_BACK);
+		glBindFramebuffer(GL_FRAMEBUFFER, g_default_framebuffer);
+		// The back buffer of a window, or the colour attachment of the
+		// framebuffer that stands for the screen (iOS).
+		glReadBuffer(g_default_framebuffer == 0 ? GL_BACK : GL_COLOR_ATTACHMENT0);
 	}
 	else
 	{
@@ -2530,7 +2541,7 @@ void GLES3_TakeScreenshot(HRL_id scene, const char* target_path)
 		glReadBuffer(GL_COLOR_ATTACHMENT0);
 	}
 	glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_default_framebuffer);
 	glPixelStorei(GL_PACK_ALIGNMENT, 4);
 
 	const size_t rowBytes = (size_t)width * 4u;
