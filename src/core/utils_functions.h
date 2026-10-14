@@ -65,4 +65,11 @@ bool HRL_EnsureVoxelChunkLoaded(HRL_VoxelWorld* world, int chunkX, int chunkY);
 // Internal helper used by widgets so the public HRL text API remains unchanged.
 HRL_id HRL_InternalCreateSDFTextTexture(const char* text, HRL_id font_id, float font_size);
 
+// CPU copy (RGBA8, GL row order) of a backend texture, used by CPU-side
+// systems (GI, landscapes, voxel texture arrays). The active backend registers
+// the lookup; returns nullptr when the texture is unknown.
+typedef const std::vector<unsigned char>* (*HRL_TextureCPUDataLookup)(HRL_id texture, int* width, int* height);
+void HRL_InternalSetTextureCPUDataLookup(HRL_TextureCPUDataLookup lookup);
+const std::vector<unsigned char>* HRL_InternalGetTextureCPUData(HRL_id texture, int* width, int* height);
+
 #endif

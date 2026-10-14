@@ -19,10 +19,20 @@ if(COMPILE_VULKAN)
 	set(VULKAN_SDK "S:/Programs/VulkanSDK")
 	find_package(Vulkan REQUIRED)
 
+    # The Vulkan backend runs the OpenGL 3.3 renderer sources over an
+    # OpenGL-on-Vulkan layer (vkgl), so both backends render identically.
     set(VULKAN_SOURCES
-        src/backend/vulkan/vulkan_backend.cpp
+        src/backend/vulkan/vk_core.cpp
+        src/backend/vulkan/vk_context.cpp
+        src/backend/vulkan/vk_compile.cpp
         src/backend/vulkan/vulkan_shader.cpp
-        src/backend/vulkan/vulkan_texture.cpp
+        src/backend/vulkan/vulkan_backend.cpp
+        src/backend/vulkan/vkgl/vkgl.cpp
+        src/backend/vulkan/vk_gl33_backend.cpp
+        src/backend/vulkan/vk_gl33_renderer.cpp
+        src/backend/vulkan/vk_gl33_shader.cpp
+        src/backend/vulkan/vk_gl33_texture.cpp
+        src/backend/vulkan/vk_gl33_gi.cpp
     )
 
 endif()
@@ -136,6 +146,10 @@ add_library(hrl STATIC
 
         #core
         src/core/utils_functions.cpp
+        src/core/widgets.cpp
+        src/core/render_common.cpp
+        src/core/voxel_render.cpp
+        src/core/gi_probes.cpp
 
         #opengl
         src/backend/opengl33/gl33_backend.cpp
@@ -161,6 +175,9 @@ add_library(hrldll SHARED
         #core
         src/core/utils_functions.cpp
         src/core/widgets.cpp
+        src/core/render_common.cpp
+        src/core/voxel_render.cpp
+        src/core/gi_probes.cpp
 
         #opengl
         src/backend/opengl33/gl33_backend.cpp
@@ -192,6 +209,8 @@ target_link_libraries(hrldll PRIVATE OpenGL::GL)
 
 if(COMPILE_VULKAN)
 
+target_compile_definitions(hrldll PRIVATE HRL_ENABLE_VULKAN)
+
 #include Vulkan
 #target_include_directories(hrl PRIVATE "${VULKAN_SDK}/Include")
 target_include_directories(hrldll PRIVATE "${VULKAN_SDK}/Include")
@@ -200,4 +219,4 @@ target_include_directories(hrldll PRIVATE "${VULKAN_SDK}/Include")
 #target_link_libraries(hrl PRIVATE Vulkan::Vulkan)
 target_link_libraries(hrldll PRIVATE Vulkan::Vulkan)
 
-endif()
+endif()

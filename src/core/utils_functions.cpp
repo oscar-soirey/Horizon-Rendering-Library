@@ -421,3 +421,17 @@ BitmapResult GenerateSDFBitmap(
 
     return out;
 }
+
+static HRL_TextureCPUDataLookup g_textureCPUDataLookup = nullptr;
+
+void HRL_InternalSetTextureCPUDataLookup(HRL_TextureCPUDataLookup lookup)
+{
+	g_textureCPUDataLookup = lookup;
+}
+
+const std::vector<unsigned char>* HRL_InternalGetTextureCPUData(HRL_id texture, int* width, int* height)
+{
+	if (width) *width = 0;
+	if (height) *height = 0;
+	return g_textureCPUDataLookup ? g_textureCPUDataLookup(texture, width, height) : nullptr;
+}

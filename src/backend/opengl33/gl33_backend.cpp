@@ -2,6 +2,7 @@
 
 #include "gl33_renderer.h"
 #include "gl33_texture.h"
+#include "../../hrl_gl.h"
 
 HRL_vtable GetOpenGL33Backend()
 {
@@ -71,6 +72,7 @@ HRL_vtable GetOpenGL33Backend()
 
 	vtable.RHI_EnableColorPickingBuffer = GL33_EnableColorPickingBuffer;
 	vtable.RHI_SetAntialiasingMode = GL33_SetAntialiasingMode;
+	vtable.RHI_GetHoveredObject = HRL_GL_GetHoveredObject;
 
 	return vtable;
 }

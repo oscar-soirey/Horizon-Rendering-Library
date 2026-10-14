@@ -1,3 +1,4 @@
+// HRL Vulkan backend - internal entry points (not part of the public API).
 #pragma once
 
 #include "../../core/backend_vtable.h"
@@ -15,6 +16,5 @@ VkDevice VulkanGetDevice();
 VkQueue VulkanGetGraphicsQueue();
 VkSurfaceKHR VulkanGetSurface();
 
-
-// Internal backend factory used by hrl.cpp. Not part of the public HRL API.
+// Internal backend factory used by hrl.cpp.
 HRL_vtable GetVulkanBackend();

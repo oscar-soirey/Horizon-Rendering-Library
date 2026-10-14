@@ -2,7 +2,7 @@
 
 <img src="./docs/assets/icon.png" alt="C++Extended logo" width="128">
 
-> **Version** `26.6` — A lightweight, explicit rendering abstraction layer.
+> **Version** `26.6` (API `0.8`) — A lightweight, explicit rendering abstraction layer.
 
 HRL is a C/C++ rendering library designed to sit on top of multiple graphics backends (OpenGL, Vulkan, D3D11/12, Metal, and more) behind a unified, stable API. It is built around a simple principle: **nothing exists until you create it, and everything you create must be explicitly destroyed.**
 
@@ -71,77 +71,60 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 
 ## Supported Backends
 
-|Constant|Backend|Platform|
-|-|-|-|
-|`HRL_OpenGL33`|OpenGL 3.3|Windows, Linux, MacOS|
-|`HRL_OpenGL45`|OpenGL 4.5|Windows, Linux, MacOS|
-|`HRL_Vulkan`|Vulkan|Windows, Linux|
-|`HRL_D3D11`|Direct3D 11|Windows, Xbox|
-|`HRL_D3D12`|Direct3D 12|Windows, Xbox|
-|`HRL_Metal`|Metal|Apple|
-|`HRL_NVN`|NVN|Nintedo|
-|`HRL_GNM`|GNM|Playstation|
+|Constant|Backend|Status|Platform|
+|-|-|-|-|
+|`HRL_OPENGL_33`|OpenGL 3.3|✅ Available|Windows, Linux, macOS|
+|`HRL_VULKAN`|Vulkan 1.0+|✅ Available (CMake `-DCOMPILE_VULKAN=ON`)|Windows, Linux|
+|`HRL_OPENGL_45`|OpenGL 4.5|Reserved|Windows, Linux|
+|`HRL_D3D11`|Direct3D 11|Reserved|Windows, Xbox|
+|`HRL_D3D12`|Direct3D 12|Reserved|Windows, Xbox|
+|`HRL_METAL`|Metal|Reserved|Apple|
+|`HRL_NVN`|NVN|Reserved|Nintendo|
+|`HRL_GNM`|GNM|Reserved|PlayStation|
+
+"Reserved" constants are part of the API but have no backend in this repository yet: `HRL_Init` reports `HRL_INVALID_BACKEND_OPERATION` for them.
 
 ---
 
-# Comparaison des backends graphiques
+## Backend feature comparison
 
-|Fonctionnalité|OpenGL 3.3|Vulkan|Direct3D 11|Direct3D 12|Metal|
-|-|:-:|:-:|:-:|:-:|:-:|
-|Initialisation / contexte|✅|✅|✅|✅|✅|
-|Swapchain / présentation|—|✅|✅|✅|✅|
-|Mesh 3D|✅|✅|✅|✅|✅|
-|Mesh indexé|✅|✅|✅|✅|✅|
-|Sprite|✅|✅|✅|✅|✅|
-|Skeletal mesh|✅|✅|✅|✅|✅|
-|LOD|✅|✅|✅|✅|✅|
-|Textures|✅|✅|✅|✅|✅|
-|Filtrage texture|✅|✅|✅|✅|✅|
-|Matériaux PBR|✅|✅|✅|✅|✅|
-|Albedo|✅|✅|✅|✅|✅|
-|Normal map|✅|✅|✅|✅|✅|
-|Metallic / Roughness|✅|✅|✅|✅|✅|
-|Specular|✅|✅|✅|✅|✅|
-|Alpha|✅|✅|✅|✅|✅|
-|Lights point / directional / spot|✅|✅|✅|✅|✅|
-|Sky light|✅|✅|✅|✅|✅|
-|Fog classique|✅|✅|✅|✅|✅|
-|MSAA / antialiasing|✅|✅|✅|✅|✅|
-|Color picking|✅|✅|✅|✅|✅|
-|Debug rendering|✅|✅|✅|✅|✅|
-|Debug views|✅|⚠️ Partiel|⚠️ Partiel|⚠️ Partiel|⚠️ Partiel|
-|Screenshot|✅|✅|✅|✅|✅|
-|Post-processing|✅|❌|❌|❌|❌|
-|Ambient Occlusion|✅|❌|❌|❌|❌|
-|God Rays|✅|❌|❌|❌|❌|
-|Sky Sphere|✅|❌|❌|❌|❌|
-|Environment mapping|✅|❌|❌|❌|❌|
-|Ombres des lights|✅|❌|❌|❌|❌|
-|Volumetric fog|✅|❌|❌|❌|❌|
-|Global volumetric fog|✅|❌|❌|❌|❌|
-|GI / DDGI|✅|❌|❌|❌|❌|
-|SSGI|API seulement|❌|❌|❌|❌|
-|VCT|API seulement|❌|❌|❌|❌|
-|LPV|API seulement|❌|❌|❌|❌|
-|Path tracing|API seulement|❌|❌|❌|❌|
-|Ray tracing|❌|✅|❌|✅|✅|
-|VFX / particules|✅|✅/⚠️|✅/⚠️|✅/⚠️|✅/⚠️|
-|VFX mesh particles|✅|✅|✅|✅|✅|
-|Widgets|✅|✅|✅|✅|✅|
-|Gizmos|✅|⚠️|⚠️|⚠️|⚠️|
-|Post-process materials|✅|❌|❌|❌|❌|
-|Async texture/shader|CPU/API|✅|⚠️|✅|✅|
-|FBX|✅|✅|✅|✅|✅|
-|Screen Space Displacement map|✅|✅|✅|✅|✅|
-|Virtualized Geomtry|❌|✅|❌|✅|✅|
+The Vulkan backend executes the same renderer as the OpenGL 3.3 backend, so both backends support exactly the same features and produce the same images.
 
-## Légende
+|Feature|OpenGL 3.3|Vulkan|
+|-|:-:|:-:|
+|Initialization / context|✅|✅|
+|Swapchain / presentation|Application (`SwapBuffers`)|✅ HRL presents in `HRL_EndFrame`|
+|3D meshes (indexed or not)|✅|✅|
+|Sprites|✅|✅|
+|Skeletal meshes|✅|✅|
+|LOD|✅|✅|
+|Textures and texture filtering|✅|✅|
+|PBR materials (albedo, normal, metallic / roughness, specular, alpha)|✅|✅|
+|Point / directional / spot / sky lights|✅|✅|
+|Light shadows|✅|✅|
+|Classic fog, volumetric fog, global volumetric fog|✅|✅|
+|Sky sphere, environment mapping|✅|✅|
+|Ambient occlusion, god rays|✅|✅|
+|Volumetric clouds|✅|✅|
+|Post-processing and post-process materials|✅|✅|
+|MSAA / antialiasing|✅|✅|
+|Color picking (`HRL_GetHoveredObject`)|✅|✅|
+|Debug rendering and debug views|✅|✅|
+|Screenshots|✅|✅|
+|GI / DDGI|✅|✅|
+|SSGI, VCT, LPV, path tracing|API only|API only|
+|Ray tracing, virtualized geometry|❌|❌|
+|VFX / particles, mesh particles|✅|✅|
+|Widgets, gizmos, screen messages|✅|✅|
+|Screen space displacement maps|✅|✅|
+|Landscapes|✅|✅|
+|2D voxel worlds|✅|✅|
+|Asynchronous texture / shader loading|✅ (CPU side)|✅ (CPU side)|
+|FBX import|✅|✅|
 
-* ✅ —
-* ⚠️ —
-* ❌ —
-
-
+* ✅ — supported
+* API only — the API entry points exist, the method is not implemented by the renderer yet
+* ❌ — not supported
 
 ---
 
@@ -179,7 +162,7 @@ HRL_InitContext(width, height, loader)
     ├── HRL_BeginFrame()
     ├── \\\[ update object transforms, uniforms, etc. ]
     ├── HRL_EndFrame()
-    └── \\\[ swap buffers via your windowing layer ]
+    └── \\\[ swap buffers via your windowing layer (OpenGL only, Vulkan presents itself) ]
 
 HRL_Shutdown() (clean every objects automatically)
 ```
@@ -218,7 +201,20 @@ Selects the graphics backend. Must be called first, before any other function.
 HRL_InitContext(HRL_uint width, HRL_uint height, void* loader);
 ```
 
-Creates the rendering context. `loader` is your platform's function loader (e.g. `glfwGetProcAddress` for OpenGL).
+Creates the rendering context. `loader` is your platform's function loader (e.g. `glfwGetProcAddress` for OpenGL). It is ignored by the Vulkan backend.
+
+#### Vulkan
+
+Build HRL with `-DCOMPILE_VULKAN=ON` (Vulkan SDK required). Before `HRL_InitContext`, give HRL the instance extensions required by your window system and a callback that creates the `VkSurfaceKHR` (see `hrl_vulkan.h` and [`src/backend/vulkan/README.md`](src/backend/vulkan/README.md)):
+
+```c
+HRL_Vulkan_SetInstanceExtensions(extensions, extension_count); // e.g. glfwGetRequiredInstanceExtensions
+HRL_Vulkan_SetSurfaceCallback(CreateMySurface, my_window);
+HRL_Init(HRL_VULKAN);
+HRL_InitContext(width, height, NULL);
+```
+
+Without a surface callback the Vulkan backend renders off-screen (scenes, screenshots and picking still work). The OpenGL 3.3 GLSL shaders (built-in and `HRL_CreateShader` sources) are used as they are by the Vulkan backend: they are translated and compiled to SPIR-V with `glslangValidator` from the Vulkan SDK, and the result is cached on disk.
 
 ```c
 HRL_Shutdown();
@@ -408,7 +404,7 @@ void HRL_TakeScreenshot(HRL_id sceneid, const char* path); // Saves as PNG
 
 ```c
 // 1. Initialize
-HRL_Init(HRL_OpenGL45);
+HRL_Init(HRL_OPENGL_33);
 HRL_InitContext(1280, 720, glfwGetProcAddress);
 
 // 2. Scene, camera, viewport

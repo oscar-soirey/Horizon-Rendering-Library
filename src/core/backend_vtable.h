@@ -90,6 +90,9 @@ typedef struct {
 	//Requests//
 	int(*RHI_IsValidTexture)(HRL_id tex);
 	int(*RHI_IsValidShader)(HRL_id shader);
+
+	//Color picking readback (pixel coordinates use the scene framebuffer convention: origin bottom-left)
+	HRL_id(*RHI_GetHoveredObject)(HRL_id scene, int mouseX, int mouseY, HRL_EMeshType* mesh_type);
 }HRL_vtable;
 
 #endif

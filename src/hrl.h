@@ -279,7 +279,7 @@ typedef enum HRL_EFilterType{
  * Backend support in this release:
  *   - OpenGL 3.3: DDGI-style world-space irradiance probes
  *   - OpenGL 4.5: not implemented in this repository
- *   - Vulkan: not implemented in this repository
+ *   - Vulkan: DDGI-style world-space irradiance probes (same renderer as OpenGL 3.3)
  *   - D3D11: not implemented in this repository
  *   - D3D12: not implemented in this repository
  *   - Metal: not implemented in this repository

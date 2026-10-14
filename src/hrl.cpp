@@ -20,8 +20,11 @@
 #ifdef HRL_ENABLE_GLES3
 #include "backend/gles3/gles3_backend.h"
 #endif
+// HRL_ENABLE_VULKAN (CMake option COMPILE_VULKAN) adds the Vulkan backend.
+#ifdef HRL_ENABLE_VULKAN
 #include "backend/vulkan/vulkan_backend.h"
 #include <vulkan/vulkan.h>
+#endif
 
 #include <unordered_map>
 #include <unordered_set>
@@ -257,6 +260,7 @@ HRL_Context* GetPrivateContext()
 	return &ctx_;
 }
 
+#ifdef HRL_ENABLE_VULKAN
 void HRL_Vulkan_SetSurfaceCallback(HRL_VulkanCreateSurfaceCallback callback, void* user_data)
 {
 	VulkanSetSurfaceCallback(callback, user_data);
@@ -295,6 +299,16 @@ uint64_t HRL_Vulkan_GetSurface(void)
 	return static_cast<uint64_t>(VulkanGetSurface());
 #endif
 }
+#else
+// Vulkan backend not compiled : the hrl_vulkan.h entry points are inert.
+void HRL_Vulkan_SetSurfaceCallback(HRL_VulkanCreateSurfaceCallback, void*) {}
+void HRL_Vulkan_SetInstanceExtensions(const char* const*, HRL_uint) {}
+void* HRL_Vulkan_GetInstance(void) { return nullptr; }
+void* HRL_Vulkan_GetPhysicalDevice(void) { return nullptr; }
+void* HRL_Vulkan_GetDevice(void) { return nullptr; }
+void* HRL_Vulkan_GetGraphicsQueue(void) { return nullptr; }
+uint64_t HRL_Vulkan_GetSurface(void) { return 0; }
+#endif
 
 
 
@@ -826,7 +840,10 @@ static void SimulateVFXSystem(HRL_VFXSystem* system, float dt)
 void HRL_Init(HRL_E_APIs _api)
 {
 	g_AsyncResourceLoader.Start();
-	bool backendAvailable = (_api == HRL_VULKAN);
+	bool backendAvailable = false;
+#ifdef HRL_ENABLE_VULKAN
+	backendAvailable = backendAvailable || (_api == HRL_VULKAN);
+#endif
 #ifndef HRL_DISABLE_OPENGL33
 	backendAvailable = backendAvailable || (_api == HRL_OPENGL_33);
 #endif
@@ -862,12 +879,14 @@ void HRL_Init(HRL_E_APIs _api)
 	{
 		break;
 	}
+#ifdef HRL_ENABLE_VULKAN
 	case HRL_VULKAN :
 	{
 		g_Backend = GetVulkanBackend();
 		g_Backend.RHI_Init();
 		break;
 	}
+#endif
 	case HRL_D3D11 :
 	{
 		break;
@@ -4485,6 +4504,21 @@ uint32_t HRL_GetGlobalIlluminationSupportedMethods()
 void HRL_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
 {
 	g_Backend.RHI_ResizeSceneTexture(_sceneid, _width, _height);
+}
+
+HRL_id HRL_GetHoveredObject(HRL_id _scene, int mouseX, int mouseY, HRL_EMeshType* mesh_type)
+{
+	if (ctx_.scenes.find(_scene) == ctx_.scenes.end())
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetHoveredObject: invalid scene ID");
+		return HRL_INVALID_ID;
+	}
+	if (!g_Backend.RHI_GetHoveredObject)
+	{
+		SetErrorCode(HRL_INVALID_BACKEND_OPERATION, HRL_SEVERITY_ERROR, "HRL_GetHoveredObject: not supported by the active backend");
+		return HRL_INVALID_ID;
+	}
+	return g_Backend.RHI_GetHoveredObject(_scene, mouseX, mouseY, mesh_type);
 }
 
 void HRL_EnableColorPickingBuffer(HRL_id _sceneid, int _enable)
