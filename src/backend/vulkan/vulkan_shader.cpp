@@ -157,8 +157,19 @@ std::vector<Statement> SplitTopLevel(const std::string& src)
 				const std::string head = cur.substr(0, brace);
 				const std::vector<std::string> t = Tokenize(head);
 				bool declaration = false;
-				for (const auto& tok : t)
-					if (tok == "struct" || tok == "uniform" || tok == "in" || tok == "out" || tok == "buffer") declaration = true;
+				// Only the qualifiers before the parameter list count : a function
+				// may have "in"/"out" parameters.
+				for (size_t k = 0; k < t.size(); ++k)
+				{
+					if (t[k] == "layout")
+					{
+						// skip the layout qualifier arguments
+						while (k < t.size() && t[k] != ")") ++k;
+						continue;
+					}
+					if (t[k] == "(") break;
+					if (t[k] == "struct" || t[k] == "uniform" || t[k] == "in" || t[k] == "out" || t[k] == "buffer") declaration = true;
+				}
 				if (!declaration && head.find('(') != std::string::npos && head.find('=') == std::string::npos)
 				{
 					++i;

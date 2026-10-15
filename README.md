@@ -111,9 +111,8 @@ The Vulkan backend executes the same renderer as the OpenGL 3.3 backend, so both
 |Color picking (`HRL_GetHoveredObject`)|✅|✅|
 |Debug rendering and debug views|✅|✅|
 |Screenshots|✅|✅|
-|GI / DDGI|✅|✅|
-|SSGI, VCT, LPV, path tracing|API only|API only|
-|Ray tracing, virtualized geometry|❌|❌|
+|Global illumination : SSGI, VCT, LPV, DDGI, ray traced, path traced|✅|✅|
+|Hardware ray tracing, virtualized geometry|❌|❌|
 |VFX / particles, mesh particles|✅|✅|
 |Widgets, gizmos, screen messages|✅|✅|
 |Screen space displacement maps|✅|✅|
@@ -123,8 +122,26 @@ The Vulkan backend executes the same renderer as the OpenGL 3.3 backend, so both
 |FBX import|✅|✅|
 
 * ✅ — supported
-* API only — the API entry points exist, the method is not implemented by the renderer yet
 * ❌ — not supported
+
+### Global illumination
+
+```c
+HRL_SetGlobalIlluminationMethod(scene, HRL_GI_DDGI);
+HRL_SetGlobalIlluminationEnabled(scene, HRL_TRUE);
+HRL_SetGlobalIlluminationIntensity(scene, 1.0f); // optional
+```
+
+|Method|What it does|Cost / quality|
+|-|-|-|
+|`HRL_GI_SSGI`|Screen space rays against the depth buffer|Cheapest, only what is on screen|
+|`HRL_GI_VCT`|Voxel cone tracing (64³ voxel volume)|Medium, smooth, approximate|
+|`HRL_GI_LPV`|Light propagation volume (32³, spherical harmonics)|Cheap once built, very soft and approximate|
+|`HRL_GI_DDGI`|Probe grid updated by ray tracing, no leaks, multiple bounces|Recommended : close to the reference, stable|
+|`HRL_GI_RAY_TRACING`|Ray traced bounces per pixel + temporal denoising|Accurate, a bit noisy when moving|
+|`HRL_GI_PATH_TRACING`|Progressive path tracing (6 bounces)|Reference, converges while the camera is still|
+
+Ray tracing is done in shaders on a BVH of the scene, so no ray tracing hardware is needed. Every method works the same way in OpenGL 3.3 and Vulkan. The world space methods use the static 3D meshes and the landscapes, and update automatically when they or the lights change.
 
 ---
 

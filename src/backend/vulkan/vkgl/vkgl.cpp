@@ -914,9 +914,16 @@ void vkgl_TexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w
 	const uint32_t mips = colorData && !cubeFace ? FullMipCount(width, height) : 1;
 	if (!Specify(*t, cubeFace ? ImageKind::Cube : ImageKind::Tex2D, vf, width, height, 1, mips, VK_SAMPLE_COUNT_1_BIT))
 		return;
+	const uint32_t layer = cubeFace ? (uint32_t)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0u;
+	if (pixels && vf == VK_FORMAT_R32G32B32A32_SFLOAT && type == GL_FLOAT && format == GL_RGBA)
+	{
+		// Float data (GI scene textures) : same layout in Vulkan.
+		UploadRegion(t->tex.image, layer, 0, 0, width, height, pixels, (size_t)width * (size_t)height * 16u);
+		return;
+	}
 	std::vector<unsigned char> rgba;
 	if (colorData && ConvertPixels(format, type, pixels, width, height, rgba))
-		UploadRegion(t->tex.image, cubeFace ? (uint32_t)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0u, 0, 0, width, height, rgba.data(), rgba.size());
+		UploadRegion(t->tex.image, layer, 0, 0, width, height, rgba.data(), rgba.size());
 }
 
 void vkgl_TexSubImage2D(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void* pixels)

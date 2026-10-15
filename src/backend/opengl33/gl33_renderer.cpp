@@ -2034,7 +2034,7 @@ void GL33_WindowResizeCallback(int width, int height)
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
 	}
 
-	// Resize every scene attachment. Attachments 3 and 4 are the DDGI albedo
+	// Resize every scene attachment. Attachments 3 and 4 are the GI albedo
 	// and world-normal targets and must track the window size too.
 	for (const auto& s : bck_->gpu_scenes)
 	{
@@ -2107,6 +2107,11 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 	PrepareSceneShadows(scene, scene_id);
 	UploadSceneLights(scene, scene_id);
 
+	// Global illumination, world space part (camera independent) : BVH,
+	// probes, voxels. Done before the shadow maps are bound to their units.
+	if (g_gl33_gi && scene->global_illumination_enabled && scene->debug_view == HRL_DEBUG_VIEW_NONE)
+		g_gl33_gi->UpdateScene(scene_id, scene);
+
 	// Voxel world geometry is streamed from the complete CPU-side voxel array.
 	// Only chunks intersecting the scene cameras (plus a small margin) receive
 	// OpenGL buffers.
@@ -2136,15 +2141,6 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			glActiveTexture(GL_TEXTURE0 + SHADOW_2D_TEXTURE_UNIT_BASE + slot);
 			glBindTexture(GL_TEXTURE_2D, shadowIt->second.depth_2d);
 		}
-	}
-
-	// DDGI is world-space and camera-independent: update the probe volume once
-	// per scene frame, before any mesh is shaded. The mesh shader consumes the
-	// resulting UBO directly.
-	if (scene->global_illumination_enabled &&
-		scene->global_illumination_method == HRL_GI_DDGI && g_gl33_gi)
-	{
-		g_gl33_gi->UpdateDDGI(scene_id);
 	}
 
 	// Independant de la camera : calcule une fois par scene, pas par viewport.
@@ -2288,8 +2284,9 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 		bool has_ambient_occlusion = !wireframeDebug && scene->ambient_occlusion_enabled;
 		bool has_ssr = !wireframeDebug && scene->screen_space_reflections_enabled;
 		bool has_decals = !wireframeDebug && !scene->decals.empty();
+		bool has_gi = g_gl33_gi && scene->global_illumination_enabled && scene->debug_view == HRL_DEBUG_VIEW_NONE;
 
-		if (has_post_process || has_scene_effects || has_volumetric_clouds || has_ambient_occlusion || has_ssr || has_decals)
+		if (has_post_process || has_scene_effects || has_volumetric_clouds || has_ambient_occlusion || has_ssr || has_decals || has_gi)
 		{
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_fbo);
 			glReadBuffer(GL_COLOR_ATTACHMENT0);
@@ -2305,6 +2302,31 @@ void GL33_DrawScene(hrl_scene_t *scene, HRL_id scene_id)
 			if (has_decals && bck_->decal_shader)
 				ApplyDecals(gpu_scene, scene, ctx_->view_mat, ctx_->proj_mat, vx, vy, vw, vh, currentTexture);
 			src = (currentTexture == bck_->post_textures[0]) ? 0 : 1;
+			if (has_gi && gpu_scene->depth_texture)
+			{
+				// Indirect diffuse light, added before the effects that darken or
+				// fog the image (AO, volumetric fog, clouds).
+				GL_33_GI::View giView;
+				giView.sceneId = scene_id;
+				giView.scene = scene;
+				giView.viewportId = v.first;
+				giView.sceneWidth = gpu_scene->width;
+				giView.sceneHeight = gpu_scene->height;
+				giView.depth = gpu_scene->depth_texture;
+				giView.normal = gpu_scene->textures[4];
+				giView.albedo = gpu_scene->textures[3];
+				giView.sceneColor = bck_->post_textures[src];
+				giView.outputFbo = bck_->post_fbo[1 - src];
+				giView.view = ctx_->view_mat;
+				giView.projection = ctx_->proj_mat;
+				giView.cameraPosition = v.second->camera_->position_;
+				giView.x = vx; giView.y = vy; giView.width = vw; giView.height = vh;
+				if (g_gl33_gi->Apply(giView))
+				{
+					currentTexture = bck_->post_textures[1 - src];
+					src = 1 - src;
+				}
+			}
 			if (has_ssr && bck_->ssr_shader)
 				ApplyScreenSpaceReflections(gpu_scene, scene, ctx_->view_mat, ctx_->proj_mat, vx, vy, vw, vh, currentTexture);
 			src = (currentTexture == bck_->post_textures[0]) ? 0 : 1;
@@ -2931,9 +2953,6 @@ static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, H
 		}
 		if (!BindMaterial(item.material, item.id, item.mesh, item.model))
 			continue;
-
-		if ((item.material->shader_ == HRL_MESH_3D_SHADER || item.material->shader_ == HRL_SKINNED_3D_MESH_SHADER) && g_gl33_gi)
-			g_gl33_gi->ApplyToShader(scene_id, ctx_->shader);
 
 		if ((item.material->shader_ == HRL_MESH_3D_SHADER || item.material->shader_ == HRL_SKINNED_3D_MESH_SHADER) &&
 			debug_view == HRL_DEBUG_VIEW_LOD)
@@ -6135,16 +6154,12 @@ HRL_id HRL_GL_GetHoveredObject(HRL_id _scene, int mouseX, int mouseY, HRL_EMeshT
 //Global illumination support
 int GL33_IsGlobalIlluminationMethodSupported(int method)
 {
-	if (!g_gl33_gi)
-		return HRL_FALSE;
-	if (method < HRL_GI_NONE || method > HRL_GI_RAY_TRACING)
-		return HRL_FALSE;
-	return g_gl33_gi->Supports((HRL_EGlobalIlluminationMethod)method) ? HRL_TRUE : HRL_FALSE;
+	return GL_33_GI::Supports(method) ? HRL_TRUE : HRL_FALSE;
 }
 
 uint32_t GL33_GetGlobalIlluminationSupportedMethods()
 {
-	return g_gl33_gi ? g_gl33_gi->GetSupportedMethods() : 0u;
+	return GL_33_GI::SupportedMethods();
 }
 
 //Color Picking

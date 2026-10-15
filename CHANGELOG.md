@@ -1,5 +1,23 @@
 # Changelog
 
+## Global illumination
+
+### Added
+
+- Six working global illumination methods, in OpenGL 3.3 and Vulkan : `HRL_GI_SSGI`, `HRL_GI_VCT`, `HRL_GI_LPV`, `HRL_GI_DDGI`, `HRL_GI_RAY_TRACING` and `HRL_GI_PATH_TRACING` (see the README). Before, only DDGI was accepted and it barely changed the image (probes on the walls, light leaks, arbitrary strength).
+- GPU ray tracing in shaders on a SAH BVH of the scene (static meshes LOD 0 + landscapes), shared by DDGI, voxel lighting, ray traced GI and path tracing.
+- `HRL_SetGlobalIlluminationIntensity` / `HRL_GetGlobalIlluminationIntensity`.
+
+### Changed
+
+- The indirect light is added by a screen pass from the GI G-buffer (diffuse albedo, normal, depth) instead of the mesh shader, so it also applies to skinned meshes, landscapes and voxels.
+- The GI albedo buffer (`HRL_GL_GetSceneAlbedoBufferGL_ID`) now holds the diffuse albedo (metallic removed), as documented.
+- `core/gi_probes.*` (CPU probe tracing) replaced by `core/gi_scene.*` (BVH, voxelization, probe layout).
+
+### Fixed
+
+- Vulkan shader translation of functions with `out` parameters and of `layout(...)` uniform blocks.
+
 ## Vulkan backend (API 0.8)
 
 ### Added

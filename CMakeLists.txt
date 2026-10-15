@@ -149,7 +149,7 @@ add_library(hrl STATIC
         src/core/widgets.cpp
         src/core/render_common.cpp
         src/core/voxel_render.cpp
-        src/core/gi_probes.cpp
+        src/core/gi_scene.cpp
 
         #opengl
         src/backend/opengl33/gl33_backend.cpp
@@ -177,7 +177,7 @@ add_library(hrldll SHARED
         src/core/widgets.cpp
         src/core/render_common.cpp
         src/core/voxel_render.cpp
-        src/core/gi_probes.cpp
+        src/core/gi_scene.cpp
 
         #opengl
         src/backend/opengl33/gl33_backend.cpp

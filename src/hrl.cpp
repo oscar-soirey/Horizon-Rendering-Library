@@ -4501,6 +4501,33 @@ uint32_t HRL_GetGlobalIlluminationSupportedMethods()
 		: 0u;
 }
 
+void HRL_SetGlobalIlluminationIntensity(HRL_id _sceneid, float _intensity)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_SetGlobalIlluminationIntensity: invalid scene ID");
+		return;
+	}
+	if (!std::isfinite(_intensity) || _intensity < 0.f)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_SetGlobalIlluminationIntensity: intensity must be >= 0");
+		return;
+	}
+	it->second->global_illumination_intensity = _intensity;
+}
+
+float HRL_GetGlobalIlluminationIntensity(HRL_id _sceneid)
+{
+	auto it = ctx_.scenes.find(_sceneid);
+	if (it == ctx_.scenes.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_GetGlobalIlluminationIntensity: invalid scene ID");
+		return 0.f;
+	}
+	return it->second->global_illumination_intensity;
+}
+
 void HRL_ResizeSceneTexture(HRL_id _sceneid, int _width, int _height)
 {
 	g_Backend.RHI_ResizeSceneTexture(_sceneid, _width, _height);

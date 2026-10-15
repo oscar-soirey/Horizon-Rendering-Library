@@ -828,6 +828,7 @@ typedef struct {
   // Global illumination. Opt-in only; default keeps the existing renderer untouched.
   bool global_illumination_enabled = false;
   HRL_EGlobalIlluminationMethod global_illumination_method = HRL_GI_DDGI;
+  float global_illumination_intensity = 1.0f;
 
   // Shadow maps are static until geometry or a shadow-relevant light changes.
   bool shadows_dirty = true;
