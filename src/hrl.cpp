@@ -9914,6 +9914,16 @@ void HRL_SetDebugMeshInfoTextColor(HRL_id _sceneid, float r, float g, float b, f
 	it->second->debug_mesh_info_text_color = glm::clamp(glm::vec4(r, g, b, a), glm::vec4(0.0f), glm::vec4(1.0f));
 }
 
+HRL_id HRL_AddScreenMessageText(HRL_id _sceneid, float _duration_seconds, const char* _text)
+{
+	if (!_text || !_text[0])
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_AddScreenMessageText: text must not be empty");
+		return HRL_INVALID_ID;
+	}
+	return HRL_AddScreenMessage(_sceneid, _duration_seconds, "%s", _text);
+}
+
 HRL_id HRL_AddScreenMessage(HRL_id _sceneid, float _duration_seconds, const char* _format, ...)
 {
 	auto it = ctx_.scenes.find(_sceneid);

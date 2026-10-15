@@ -2155,6 +2155,13 @@ extern "C" {
 	 * @return The message ID, or HRL_INVALID_ID on failure.
 	 */
 	HRL_API HRL_id HRL_AddScreenMessage(HRL_id _sceneid, float _duration_seconds, const char* _format, ...);
+	/**
+	 * @brief Same as HRL_AddScreenMessage with an already formatted text (no printf
+	 * formatting, '%' is displayed as is). Meant for language bindings, where
+	 * calling a variadic C function is not portable.
+	 * @return The message ID, or HRL_INVALID_ID on failure.
+	 */
+	HRL_API HRL_id HRL_AddScreenMessageText(HRL_id _sceneid, float _duration_seconds, const char* _text);
 	HRL_API void HRL_SetScreenMessageTextSize(HRL_id _sceneid, float _size);
 	HRL_API void HRL_SetScreenMessageTextColor(HRL_id _sceneid, float r, float g, float b, float a);
 	HRL_API void HRL_SetScreenMessageFont(HRL_id _sceneid, HRL_id _fontid);

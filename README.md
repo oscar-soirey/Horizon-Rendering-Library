@@ -66,6 +66,7 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
   * [Error Handling](#error-handling)
   * [Debug Utilities](#debug-utilities)
 * [Minimal Example](#minimal-example)
+* [Language Bindings](#language-bindings)
 
 ---
 
@@ -458,3 +459,15 @@ HRL_Shutdown();
 *HRL is licensed under the Apache License 2.0. See* [*LICENSE*](http://www.apache.org/licenses/LICENSE-2.0) *for details.
 Contact: oscarsoirey.contact@gmail.com*
 
+---
+
+## Language Bindings
+
+Bindings for **Python** (ctypes), **C#** (P/Invoke), **Rust**, **Go** (cgo) and **LuaJIT** (FFI) are generated from the C headers by `bindings/generate.py` (Python 3.8+ only, no SWIG). Run `generate-bindings.bat` (or `python bindings/generate.py`) after changing the API. See [bindings/README.md](bindings/README.md).
+
+```python
+import hrl
+hrl.HRL_Init(hrl.HRL_VULKAN)
+hrl.HRL_InitContext(1280, 720, None)
+scene = hrl.HRL_CreateScene(0)
+```

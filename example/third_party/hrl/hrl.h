@@ -233,7 +233,9 @@ typedef enum HRL_E_APIs{
 	HRL_D3D12,
 	HRL_METAL,
 	HRL_NVN,
-	HRL_GNM
+	HRL_GNM,
+	/** OpenGL ES 3.0 (Android, mobile). Compiled when HRL_ENABLE_GLES3 is defined; see docs/GLES3_BACKEND.md. */
+	HRL_OPENGL_ES_30
 }HRL_E_APIs;
 
 typedef enum HRL_ELightType{
@@ -272,20 +274,25 @@ typedef enum HRL_EFilterType{
 }HRL_EFilterType;
 
 /**
- * Global illumination methods.
+ * Global illumination methods (indirect diffuse light).
  *
- * Backend support in this release:
- *   - OpenGL 3.3: DDGI-style world-space irradiance probes
- *   - OpenGL 4.5: not implemented in this repository
- *   - Vulkan: not implemented in this repository
- *   - D3D11: not implemented in this repository
- *   - D3D12: not implemented in this repository
- *   - Metal: not implemented in this repository
- *   - NVN: not implemented in this repository
- *   - GNM: not implemented in this repository
+ * OpenGL 3.3 and Vulkan implement every method (they run the same renderer):
+ *   - HRL_GI_SSGI         screen space : rays against the depth buffer, light of
+ *                         the visible image only. Cheapest, no world data.
+ *   - HRL_GI_VCT          voxel cone tracing in a 64^3 voxel volume of the scene.
+ *   - HRL_GI_LPV          light propagation volume (32^3, spherical harmonics).
+ *   - HRL_GI_DDGI         dynamic diffuse GI : grid of irradiance probes updated
+ *                         every frame by ray tracing, with visibility (no leaks
+ *                         through walls) and multiple bounces.
+ *   - HRL_GI_PATH_TRACING multi bounce path tracing, accumulated while the camera
+ *                         and the scene do not move (reference quality).
+ *   - HRL_GI_RAY_TRACING  one ray traced bounce per pixel and per frame with
+ *                         temporal accumulation and denoising (real time).
  *
- * VCT, LPV, DDGI, path tracing and ray tracing are exposed now so the public
- * API does not need to change when future backends implement them.
+ * The world space methods (all except SSGI) use the static 3D meshes (LOD 0)
+ * and the landscapes of the scene. Ray tracing runs in shaders on a BVH, so no
+ * ray tracing hardware is required. Changing meshes or lights updates the GI
+ * automatically.
  */
 typedef enum HRL_EGlobalIlluminationMethod {
     HRL_GI_NONE = 0,
@@ -468,7 +475,7 @@ extern "C" {
 
 	/**
 	 * @brief Selects the graphics backend to use. Must be called before HRL_InitContext.
-	 * @param _api One of the HRL_* API constants (e.g. HRL_OPENGL_45, HRL_VULKAN).
+	 * @param _api One of the HRL_* API constants (e.g. HRL_OPENGL_33, HRL_VULKAN, HRL_OPENGL_ES_30).
 	 */
 	HRL_API void HRL_Init(HRL_E_APIs _api);
 
@@ -1109,6 +1116,10 @@ extern "C" {
 	HRL_API int HRL_IsGlobalIlluminationMethodSupported(HRL_EGlobalIlluminationMethod _method);
 	/** Bitmask of methods supported by the active backend: (1u << method). */
 	HRL_API uint32_t HRL_GetGlobalIlluminationSupportedMethods();
+	/** Multiplier of the indirect light (default 1, physically based). */
+	HRL_API void HRL_SetGlobalIlluminationIntensity(HRL_id _sceneid, float _intensity);
+	/** Returns the indirect light multiplier of the scene. */
+	HRL_API float HRL_GetGlobalIlluminationIntensity(HRL_id _sceneid);
 
 	/**
 	 * @brief Resizes the off-screen render texture of a scene.
@@ -2238,6 +2249,15 @@ extern "C" {
 	 *              HRL_ANTIALIASING_4X or HRL_ANTIALIASING_8X.
 	 */
 	HRL_API void HRL_SetAntialiasingMode(HRL_uint _mode);
+
+	/**
+	 * @brief Tells the OpenGL ES backend which framebuffer stands for the screen.
+	 * Only needed where there is no framebuffer 0: on iOS a view renders into a
+	 * framebuffer of its own (GLKView, CAEAGLLayer). Call it before each frame
+	 * with the framebuffer the view has bound. Ignored by the other backends.
+	 * @param _framebuffer OpenGL name of the framebuffer; 0 is the window (default).
+	 */
+	HRL_API void HRL_SetDefaultFramebuffer(HRL_uint _framebuffer);
 
 
 	/* ============================================================================

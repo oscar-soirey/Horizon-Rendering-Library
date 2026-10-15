@@ -462,6 +462,9 @@ int main()
           1.f,
           1.f
       );
+		
+		HRL_SetGlobalIlluminationEnabled(scene, HRL_TRUE);
+		HRL_SetGlobalIlluminationMethod(scene, HRL_GI_RAY_TRACING);
 
 
 

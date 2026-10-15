@@ -1,0 +1,11 @@
+rust/target/
+rust/Cargo.lock
+csharp/bin/
+csharp/obj/
+csharp/examples/bin/
+csharp/examples/obj/
+python/**/__pycache__/
+*.png
+__pycache__/
+*.egg-info/
+build/

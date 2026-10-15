@@ -1,5 +1,17 @@
 # Changelog
 
+## Language bindings
+
+### Added
+
+- `bindings/generate.py` : generator of language bindings from the C headers (Python standard library only). It writes `bindings/hrl_api.json` (description of the whole API) and bindings for Python (ctypes package), C# (P/Invoke, .NET 6+), Rust (crate with raw FFI and safe wrappers), Go (cgo) and LuaJIT (FFI), plus a C program checking the generated description against the compiler.
+- Strings, byte buffers, arrays with their count, out parameters, matrices and callbacks are converted automatically in every language. Examples in each folder.
+- `HRL_AddScreenMessageText` : non-variadic version of `HRL_AddScreenMessage`, for bindings.
+
+### Removed
+
+- SWIG Python bindings (`hrl.i`, `hrl_python.i`, `generate-python.bat`).
+
 ## Global illumination
 
 ### Added
