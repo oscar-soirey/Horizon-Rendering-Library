@@ -20,7 +20,7 @@ only calls functions that are part of OpenGL ES 3.0 (the list is in `GLES3_LoadG
 | `HRL_DISABLE_OPENGL33` | leaves the desktop OpenGL 3.3 backend out (mobile builds) |
 
 With HRL's own `CMakeLists.txt`: `-DHRL_ENABLE_GLES3=ON` adds the four `gles3_*.cpp`
-files to the DLL. For a mobile build compile `glad.c`, `ufbx.c`, `hrl.cpp`,
+files to the DLL. For a mobile build compile `glad.c`, `ufbx.c`, `frontend/*.cpp`,
 `core/*.cpp`, `backend/gles3/*.cpp` and the embedded resources, with both defines,
 and do not compile `backend/opengl33/*`.
 

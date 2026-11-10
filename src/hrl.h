@@ -650,7 +650,7 @@ extern "C" {
 	 * released with HRL_FreeVertex3DFromFBX.
 	 *
 	 * HRL does not expose ufbx types through this API. The FBX implementation is
-	 * an internal dependency of hrl.cpp.
+	 * an internal dependency of the HRL frontend.
 	 *
 	 * @param _data          Pointer to the complete FBX data in memory.
 	 * @param _bufferSize    Size of the FBX data buffer in bytes.
@@ -671,7 +671,7 @@ extern "C" {
 	/**
 	 * @brief Converts the first skinned FBX mesh in an in-memory FBX buffer.
 	 *
-	 * ufbx is an internal dependency of hrl.cpp. Geometry, bones, weights and
+	 * ufbx is an internal dependency of the HRL frontend. Geometry, bones, weights and
 	 * baked animation samples are copied into an HRL-owned CPU data structure.
 	 * No file path is accepted by this API.
 	 */
