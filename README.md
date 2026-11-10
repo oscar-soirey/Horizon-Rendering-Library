@@ -74,58 +74,47 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 
 |Constant|Backend|Status|Platform|
 |-|-|-|-|
-|`HRL_OPENGL_33`|OpenGL 3.3|✅ Available|Windows, Linux, macOS|
-|`HRL_VULKAN`|Vulkan 1.0+|✅ Available (CMake `-DCOMPILE_VULKAN=ON`)|Windows, Linux|
-|`HRL_OPENGL_45`|OpenGL 4.5|Reserved|Windows, Linux|
-|`HRL_D3D11`|Direct3D 11|Reserved|Windows, Xbox|
-|`HRL_D3D12`|Direct3D 12|Reserved|Windows, Xbox|
-|`HRL_METAL`|Metal|Reserved|Apple|
-|`HRL_NVN`|NVN|Reserved|Nintendo|
-|`HRL_GNM`|GNM|Reserved|PlayStation|
+|`HRL_VULKAN`|Vulkan 1.3 (native)|✅ **Primary backend.** Every new rendering feature is developed here|Windows, Linux|
+|`HRL_OPENGL_33`|OpenGL 3.3|⚠️ **Deprecated.** Kept for existing projects, bug fixes only|Windows, Linux, macOS|
+|`HRL_OPENGL_ES_30`|OpenGL ES 3.0|⚠️ Legacy mobile renderer (CMake `-DHRL_ENABLE_GLES3=ON`), no new feature|Android|
+|`HRL_OPENGL_45`, `HRL_D3D11`, `HRL_D3D12`, `HRL_METAL`, `HRL_NVN`, `HRL_GNM`|—|Reserved|—|
 
-"Reserved" constants are part of the API but have no backend in this repository yet: `HRL_Init` reports `HRL_INVALID_BACKEND_OPERATION` for them.
+"Reserved" constants are part of the API but have no backend in this repository: `HRL_Init` reports `HRL_INVALID_BACKEND_OPERATION` for them.
+
+> **OpenGL deprecation.** The OpenGL 3.3 backend still builds and keeps its current behaviour, but it is frozen: no new feature, no feature parity with Vulkan, only fixes needed for stability or compilation. `HRL_Init(HRL_OPENGL_33)` reports a `HRL_SEVERITY_WEAK_WARNING` once. New projects should use `HRL_VULKAN`.
+
+> **Vulkan backend rewrite (API 0.9).** Until 0.8 the Vulkan backend ran the OpenGL renderer through an OpenGL-on-Vulkan layer. It is now a native Vulkan 1.3 renderer, focused on 3D. The features it does not have yet are listed below; they report `HRL_INVALID_BACKEND_OPERATION` (warning, once) instead of rendering. See `docs/ARCHITECTURE.md` and `docs/ROADMAP.md`.
 
 ---
 
 ## Backend feature comparison
 
-The Vulkan backend executes the same renderer as the OpenGL 3.3 backend, so both backends support exactly the same features and produce the same images.
-
-|Feature|OpenGL 3.3|Vulkan|
+|Feature|Vulkan (native)|OpenGL 3.3 (deprecated)|
 |-|:-:|:-:|
-|Initialization / context|✅|✅|
-|Swapchain / presentation|Application (`SwapBuffers`)|✅ HRL presents in `HRL_EndFrame`|
-|3D meshes (indexed or not)|✅|✅|
-|Sprites|✅|✅|
-|Skeletal meshes|✅|✅|
-|LOD|✅|✅|
-|Textures and texture filtering|✅|✅|
-|PBR materials (albedo, normal, metallic / roughness, specular, alpha)|✅|✅|
-|Point / directional / spot / sky lights|✅|✅|
-|Light shadows|✅|✅|
-|Classic fog, volumetric fog, global volumetric fog|✅|✅|
-|Sky sphere, environment mapping|✅|✅|
-|Ambient occlusion, god rays|✅|✅|
-|Volumetric clouds|✅|✅|
-|Post-processing and post-process materials|✅|✅|
-|MSAA / antialiasing|✅|✅|
-|Color picking (`HRL_GetHoveredObject`)|✅|✅|
-|Debug rendering and debug views|✅|✅|
-|Screenshots|✅|✅|
-|Global illumination : SSGI, VCT, LPV, DDGI, ray traced, path traced|✅|✅|
-|Hardware ray tracing, virtualized geometry|❌|❌|
-|VFX / particles, mesh particles|✅|✅|
-|Widgets, gizmos, screen messages|✅|✅|
-|Screen space displacement maps|✅|✅|
-|Landscapes|✅|✅|
-|2D voxel worlds|✅|✅|
-|Asynchronous texture / shader loading|✅ (CPU side)|✅ (CPU side)|
-|FBX import|✅|✅|
+|Swapchain / presentation|✅ HRL presents in `HRL_EndFrame`|Application (`SwapBuffers`)|
+|Off-screen rendering without a window|✅|❌|
+|Static 3D meshes, LOD|✅ multi-draw-indirect|✅|
+|Textures, filtering, mipmaps, anisotropy|✅ bindless|✅|
+|PBR materials (albedo, normal, metallic / roughness, specular, AO, alpha test, emissive)|✅|✅ (no emissive)|
+|Point / directional / spot / sky lights|✅ (no fixed light limit)|✅ (32 lights)|
+|Directional shadows|✅ 4 stable cascades, PCF|✅ single map|
+|Spot light shadows|✅ (4)|✅|
+|Point light shadows|✅ with ray traced shadows only|✅ cube maps|
+|Hardware ray traced shadows (`HRL_Vulkan_SetRayTracedShadows`)|✅ when the GPU supports it|❌|
+|Image based lighting (prefiltered specular + irradiance + BRDF LUT)|✅|❌ (single reflection lookup)|
+|Sky sphere (gradient or equirectangular texture)|✅|✅|
+|HDR rendering, ACES tone mapping, exposure|✅|✅ (opt-in)|
+|Fog (linear / exponential)|✅|✅|
+|Color picking, screenshots, debug primitives, unlit / normal debug views|✅|✅|
+|Custom shaders (`HRL_CreateShader`)|❌ planned as surface functions|✅ GLSL 3.30|
+|Skeletal meshes, landscapes|❌ planned|✅|
+|Post-process materials, bloom, MSAA|❌ planned (TAA instead of MSAA)|✅|
+|SSAO, SSR, decals, volumetric fog, clouds, god rays|❌ planned|✅|
+|Global illumination|❌ planned (hardware ray traced, with fallback)|✅ software BVH in shaders|
+|Sprites, widgets, text, gizmos, VFX, 2D voxel worlds|❌ not started (3D first)|✅|
+|FBX import, asynchronous loading (CPU side)|✅|✅|
 
-* ✅ — supported
-* ❌ — not supported
-
-### Global illumination
+### Global illumination (OpenGL 3.3 only)
 
 ```c
 HRL_SetGlobalIlluminationMethod(scene, HRL_GI_DDGI);
@@ -142,7 +131,7 @@ HRL_SetGlobalIlluminationIntensity(scene, 1.0f); // optional
 |`HRL_GI_RAY_TRACING`|Ray traced bounces per pixel + temporal denoising|Accurate, a bit noisy when moving|
 |`HRL_GI_PATH_TRACING`|Progressive path tracing (6 bounces)|Reference, converges while the camera is still|
 
-Ray tracing is done in shaders on a BVH of the scene, so no ray tracing hardware is needed. Every method works the same way in OpenGL 3.3 and Vulkan. The world space methods use the static 3D meshes and the landscapes, and update automatically when they or the lights change.
+Ray tracing is done in shaders on a BVH of the scene, so no ray tracing hardware is needed. These methods belong to the deprecated OpenGL 3.3 backend; the Vulkan backend will get its own hardware ray traced GI. The world space methods use the static 3D meshes and the landscapes, and update automatically when they or the lights change.
 
 ---
 
@@ -223,16 +212,29 @@ Creates the rendering context. `loader` is your platform's function loader (e.g.
 
 #### Vulkan
 
-Build HRL with `-DCOMPILE_VULKAN=ON` (Vulkan SDK required). Before `HRL_InitContext`, give HRL the instance extensions required by your window system and a callback that creates the `VkSurfaceKHR` (see `hrl_vulkan.h` and [`src/backend/vulkan/README.md`](src/backend/vulkan/README.md)):
+Vulkan is built by default (`-DHRL_ENABLE_VULKAN=ON`; the Vulkan SDK is needed to **build** HRL, not to run it: shaders are compiled to SPIR-V at build time and embedded). Requires a Vulkan 1.3 GPU driver. Before `HRL_InitContext`, give HRL the instance extensions required by your window system and a callback that creates the `VkSurfaceKHR` (see `hrl_vulkan.h` and `examples/vulkan_pbr`):
 
 ```c
 HRL_Vulkan_SetInstanceExtensions(extensions, extension_count); // e.g. glfwGetRequiredInstanceExtensions
 HRL_Vulkan_SetSurfaceCallback(CreateMySurface, my_window);
 HRL_Init(HRL_VULKAN);
 HRL_InitContext(width, height, NULL);
+
+if (HRL_Vulkan_IsRayTracingSupported())
+    HRL_Vulkan_SetRayTracedShadows(HRL_TRUE);   // optional
 ```
 
-Without a surface callback the Vulkan backend renders off-screen (scenes, screenshots and picking still work). The OpenGL 3.3 GLSL shaders (built-in and `HRL_CreateShader` sources) are used as they are by the Vulkan backend: they are translated and compiled to SPIR-V with `glslangValidator` from the Vulkan SDK, and the result is cached on disk.
+Without a surface callback the Vulkan backend renders off-screen (scenes, screenshots and picking still work). Environment variables: `HRL_VULKAN_VALIDATION=1` enables the Khronos validation layer (messages go to the HRL error callback), `HRL_VULKAN_NO_RAYTRACING=1` disables hardware ray tracing.
+
+Build and run the example:
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DHRL_BUILD_EXAMPLES=ON
+cmake --build build --config Release -j
+build/bin/hrl_vulkan_pbr        (build/bin/Release with Visual Studio; add --rt for ray traced shadows)
+```
+
+The examples are built by the main `CMakeLists.txt` and use the headers of `src/` directly; the HRL library and every executable are written to `build/bin`. See `examples/README.md`.
 
 ```c
 HRL_Shutdown();

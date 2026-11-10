@@ -1,5 +1,31 @@
 # Changelog
 
+## Native Vulkan backend, OpenGL deprecation (API 0.9)
+
+### Changed (breaking for `HRL_VULKAN`)
+
+- `HRL_VULKAN` is now a **native Vulkan 1.3 renderer** (`src/backend/vulkan/`). The OpenGL-on-Vulkan layer (`vkgl`) and the copies of the OpenGL renderer compiled over it are removed.
+- The native backend covers 3D only for now: static meshes, LOD, PBR materials, lights, shadows, image based lighting, sky, fog, tone mapping, picking, screenshots, debug primitives. Sprites, widgets, VFX, voxels, skeletal meshes, landscapes, post-process materials, the OpenGL GI methods and `HRL_CreateShader` report `HRL_INVALID_BACKEND_OPERATION` (warning, once per feature) on Vulkan. Projects that need them stay on `HRL_OPENGL_33` for the moment. See the feature table in the README.
+- Vulkan requires a Vulkan 1.3 driver. Shaders are compiled to SPIR-V when HRL is built; nothing is compiled at run time and `glslangValidator` is no longer needed on the user's machine.
+- CMake: `HRL_ENABLE_VULKAN` (ON by default) replaces `COMPILE_VULKAN` (still accepted). CMake 3.20 is enough. The hard coded Vulkan SDK path is gone (`VULKAN_SDK` environment variable or `-DHRL_VULKAN_SDK=`). New options `HRL_BUILD_STATIC`, `HRL_BUILD_EXAMPLES`, `HRL_BUILD_TESTS`.
+
+### Deprecated
+
+- **OpenGL 3.3 backend** (`HRL_OPENGL_33`, `hrl_gl.h`): frozen, bug fixes only. `HRL_Init(HRL_OPENGL_33)` reports a weak warning. Its behaviour is unchanged.
+
+### Added
+
+- Vulkan: cascaded shadow maps (4 cascades), spot light shadow maps, hardware ray traced shadows for every light type (`HRL_Vulkan_SetRayTracedShadows`, `HRL_Vulkan_IsRayTracingSupported`), image based lighting from the sky texture or gradient, emissive materials, off-screen rendering without a window, GPU name (`HRL_Vulkan_GetDeviceName`), `HRL_Vulkan_SetShadowDistance`.
+- `HRL_MaterialSetEmissiveColor` is implemented (it was an empty function).
+- `examples/vulkan_pbr`, `tests/vulkan_smoke.cpp` (run with `ctest`), `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`.
+- The examples are part of the main CMake project (`-DHRL_BUILD_EXAMPLES=ON`): they link the `hrldll` target and include `src/` directly. The library and the executables are written to `build/bin`. The former `example/` folder (copied headers, copied `libhrldll`, prebuilt GLFW, copy of GLM) is replaced by `examples/opengl/` (targets `hrl_gl_showcase`, `hrl_gl_minimal`, `hrl_gl_vfx`, `hrl_gl_voxel`, `hrl_gl_widgets`); GLFW is downloaded by CMake when it is not installed. Their resources live in `examples/assets` (not versioned).
+- Third party: Vulkan Memory Allocator 3.1.0 (`third_party/vma`).
+
+### Removed
+
+- `src/backend/vulkan/vkgl/`, `vk_gl33_*.cpp`, `vk_core.*`, `vk_context.*`, `vk_compile.*`, `vulkan_shader.*`, `vulkan_texture.*`, `vulkan_builtin_shaders.h`, the old `src/shaders/vulkan/*.glsl`.
+- Empty placeholders: `src/backend/d3d11/`, `src/shaders/d3d/`, `src/shaders/metal/`.
+
 ## Language bindings
 
 ### Added
