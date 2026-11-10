@@ -1,0 +1,70 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Environment convolution. mode 0 : GGX prefiltered specular for one roughness,
+// mode 1 : cosine weighted diffuse irradiance.
+#include "brdf.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform samplerCube uEnv;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2DArray uOut;
+layout(push_constant) uniform Push
+{
+	float roughness;
+	float envResolution;
+	uint mode;
+	uint sampleCount;
+} pc;
+
+void main()
+{
+	ivec3 id = ivec3(gl_GlobalInvocationID);
+	ivec2 size = imageSize(uOut).xy;
+	if (id.x >= size.x || id.y >= size.y) return;
+	vec3 N = CubeDirection(uint(id.z), (vec2(id.xy) + 0.5) / vec2(size));
+	float saTexel = 4.0 * PI / (6.0 * pc.envResolution * pc.envResolution);
+	vec3 sum = vec3(0.0);
+	float weight = 0.0;
+
+	if (pc.mode == 0u)
+	{
+		float a = pc.roughness * pc.roughness;
+		if (a < 1e-4)
+		{
+			imageStore(uOut, id, vec4(textureLod(uEnv, N, 0.0).rgb, 1.0));
+			return;
+		}
+		for (uint i = 0u; i < pc.sampleCount; ++i)
+		{
+			vec3 H = ImportanceSampleGGX(Hammersley(i, pc.sampleCount), N, a);
+			vec3 L = reflect(-N, H);
+			float NdotL = dot(N, L);
+			if (NdotL <= 0.0) continue;
+			// Filtered importance sampling: pick the mip matching the sample footprint.
+			float NdotH = max(dot(N, H), 0.0);
+			float pdf = D_GGX(NdotH, a) * 0.25;
+			float saSample = 1.0 / (float(pc.sampleCount) * pdf + 1e-4);
+			float mip = max(0.5 * log2(saSample / saTexel) + 1.0, 0.0);
+			sum += textureLod(uEnv, L, mip).rgb * NdotL;
+			weight += NdotL;
+		}
+	}
+	else
+	{
+		vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+		vec3 T = normalize(cross(up, N));
+		vec3 B = cross(N, T);
+		for (uint i = 0u; i < pc.sampleCount; ++i)
+		{
+			vec2 xi = Hammersley(i, pc.sampleCount);
+			float r = sqrt(xi.y);
+			float phi = 2.0 * PI * xi.x;
+			vec3 L = normalize(T * (r * cos(phi)) + B * (r * sin(phi)) + N * sqrt(1.0 - xi.y));
+			// Cosine weighted pdf = cos / pi : radiance average is the irradiance / pi.
+			float pdf = max(dot(N, L), 1e-4) / PI;
+			float saSample = 1.0 / (float(pc.sampleCount) * pdf);
+			float mip = max(0.5 * log2(saSample / saTexel) + 1.0, 0.0);
+			sum += textureLod(uEnv, L, mip).rgb;
+			weight += 1.0;
+		}
+	}
+	imageStore(uOut, id, vec4(sum / max(weight, 1e-4), 1.0));
+}

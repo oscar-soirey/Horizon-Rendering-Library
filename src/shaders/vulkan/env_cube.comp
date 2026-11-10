@@ -1,0 +1,32 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Builds the environment cube (mip 0) from an equirectangular texture or from
+// the procedural sky gradient.
+#include "brdf.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D uEquirect;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2DArray uCube;
+layout(push_constant) uniform Push
+{
+	mat4 rotation;
+	vec4 top;
+	vec4 horizon;
+	vec4 bottom;
+	uint useTexture;
+	float lod;       // source mip matching the cube texel footprint
+} pc;
+
+void main()
+{
+	ivec3 id = ivec3(gl_GlobalInvocationID);
+	ivec2 size = imageSize(uCube).xy;
+	if (id.x >= size.x || id.y >= size.y) return;
+	vec3 dir = mat3(pc.rotation) * CubeDirection(uint(id.z), (vec2(id.xy) + 0.5) / vec2(size));
+	vec3 color;
+	if (pc.useTexture != 0u)
+		color = textureLod(uEquirect, EquirectUV(dir), pc.lod).rgb;
+	else
+		color = dir.y >= 0.0 ? mix(pc.horizon.rgb, pc.top.rgb, clamp(dir.y, 0.0, 1.0))
+		                     : mix(pc.horizon.rgb, pc.bottom.rgb, clamp(-dir.y, 0.0, 1.0));
+	imageStore(uCube, id, vec4(color, 1.0));
+}
