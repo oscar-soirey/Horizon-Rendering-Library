@@ -1283,7 +1283,7 @@ void DrawSkySphere(const hrl_scene_t* scene)
 	glDepthMask(GL_TRUE);
 }
 
-void DrawOpaqueMeshes(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum)
+void DrawOpaqueMeshes(const HRL_IdMap<HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum)
 {
 	struct DrawItem
 	{
@@ -1409,7 +1409,7 @@ void BindSpriteSamplers(GLuint sampler)
 	glBindSampler((GLuint)GLES3_AO_TEXTURE_UNIT, sampler);
 }
 
-void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum)
+void DrawSprites(const HRL_IdMap<HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum)
 {
 	struct SpriteItem { HRL_Mesh* mesh; HRL_Material* material; glm::mat4 model; float distance2; };
 	static std::vector<SpriteItem> sprites;
@@ -2007,7 +2007,7 @@ void DrawScreenMessages(const hrl_scene_t* scene, const HRL_Viewport* viewport)
 	FlushUIQuads(viewportX, viewportY, viewportW, viewportH);
 }
 
-void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport)
+void DrawWidgets(const HRL_IdMap<HRL_Widget*>& widgets, const HRL_Viewport* viewport)
 {
 	if (!viewport || widgets.empty())
 		return;

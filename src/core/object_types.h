@@ -3,6 +3,8 @@
 
 #include "../hrl.h"
 
+#include "id_map.h"
+
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -210,6 +212,10 @@ struct HRL_Material {
   // User-owned opaque pointer associated with this material.
   // HRL never allocates, frees, or dereferences this pointer.
   void* user_handle_ = nullptr;
+
+  // Incremented by the frontend each time a parameter or a texture of the
+  // material changes. Backends use it to keep packed material data up to date.
+  uint64_t revision_ = 1;
 };
 
 //CAMERA
@@ -241,9 +247,9 @@ struct HRL_Viewport {
   HRL_id scene_ = HRL_INVALID_ID;
 
   //Indexed by stable post-process ID. Priority is stored inside HRL_PostProcess.
-  std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
+  HRL_IdMap<HRL_PostProcess*> post_processes;
 
-  std::unordered_map<HRL_id, HRL_Widget*> widgets;
+  HRL_IdMap<HRL_Widget*> widgets;
 };
 
 
@@ -456,7 +462,7 @@ struct HRL_VFXSystem {
   glm::vec3 position_{0.f};
   glm::vec3 rotation_{0.f};
   glm::vec3 scale_{1.f};
-  std::unordered_map<HRL_id, HRL_VFXEmitter*> emitters_;
+  HRL_IdMap<HRL_VFXEmitter*> emitters_;
 };
 
 //GIZMO
@@ -733,7 +739,7 @@ struct HRL_VoxelWorld final {
   uint64_t color_revision_ = 1;
 };
 
-// Loads a serialized chunk on demand. Implemented in hrl.cpp and used by
+// Loads a serialized chunk on demand. Implemented in frontend/voxel.cpp and used by
 // rendering backends so disk-loaded worlds stay lazy on the CPU side.
 bool HRL_EnsureVoxelChunkLoaded(HRL_VoxelWorld* world, int chunkX, int chunkY);
 
@@ -745,17 +751,17 @@ struct hrl_scene_t {
   bool using_color_picking = true;
 
   //objects
-  std::unordered_map<HRL_id, HRL_Mesh*> meshes;
+  HRL_IdMap<HRL_Mesh*> meshes;
 
   // Optional 2D voxel world owned by this scene. The public API exposes only
   // HRL_Voxel; chunking and GPU resources remain backend/internal details.
   HRL_VoxelWorld* voxel_world = nullptr;
-  std::unordered_map<HRL_id, HRL_Landscape*> landscapes;
-  std::unordered_map<HRL_id, HRL_Light*> lights;
-  std::unordered_map<HRL_id, HRL_VolumetricFog*> volumetric_fogs;
-  std::unordered_map<HRL_id, HRL_Decal*> decals;
-  std::unordered_map<HRL_id, HRL_Gizmo*> gizmos;
-  std::unordered_map<HRL_id, HRL_VFXSystem*> vfx_systems;
+  HRL_IdMap<HRL_Landscape*> landscapes;
+  HRL_IdMap<HRL_Light*> lights;
+  HRL_IdMap<HRL_VolumetricFog*> volumetric_fogs;
+  HRL_IdMap<HRL_Decal*> decals;
+  HRL_IdMap<HRL_Gizmo*> gizmos;
+  HRL_IdMap<HRL_VFXSystem*> vfx_systems;
 
   //Per-scene diagnostic rendering state.
   HRL_EDebugView debug_view = HRL_DEBUG_VIEW_NONE;
@@ -785,8 +791,8 @@ struct hrl_scene_t {
   bool environment_mapping_enabled = false;
   HRL_id environment_texture = HRL_INVALID_ID;
 
-  std::unordered_map<HRL_id, HRL_Viewport*> viewports;
-  std::unordered_map<HRL_id, HRL_Camera*> cameras;
+  HRL_IdMap<HRL_Viewport*> viewports;
+  HRL_IdMap<HRL_Camera*> cameras;
 
   //Effects
   hrl_fog_t fog;
@@ -850,26 +856,26 @@ struct HRL_Context {
   uint32_t window_height;
 
   //scenes
-  std::unordered_map<HRL_id, hrl_scene_t*> scenes;
+  HRL_IdMap<hrl_scene_t*> scenes;
 
   //ressources copié des scenes (pour favoriser l'acces)
-  std::unordered_map<HRL_id, HRL_Mesh*> meshes;
-  std::unordered_map<HRL_id, HRL_Landscape*> landscapes;
-  std::unordered_map<HRL_id, HRL_Light*> lights;
-  std::unordered_map<HRL_id, HRL_VolumetricFog*> volumetric_fogs;
-  std::unordered_map<HRL_id, HRL_Decal*> decals;
-  std::unordered_map<HRL_id, HRL_Gizmo*> gizmos;
-  std::unordered_map<HRL_id, HRL_VFXSystem*> vfx_systems;
-  std::unordered_map<HRL_id, HRL_VFXEmitter*> vfx_emitters;
-  std::unordered_map<HRL_id, HRL_VFXCurve*> vfx_curves;
-  std::unordered_map<HRL_id, HRL_Viewport*> viewports;
-  std::unordered_map<HRL_id, HRL_Camera*> cameras;
-  std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
-  std::unordered_map<HRL_id, HRL_Widget*> widgets;
+  HRL_IdMap<HRL_Mesh*> meshes;
+  HRL_IdMap<HRL_Landscape*> landscapes;
+  HRL_IdMap<HRL_Light*> lights;
+  HRL_IdMap<HRL_VolumetricFog*> volumetric_fogs;
+  HRL_IdMap<HRL_Decal*> decals;
+  HRL_IdMap<HRL_Gizmo*> gizmos;
+  HRL_IdMap<HRL_VFXSystem*> vfx_systems;
+  HRL_IdMap<HRL_VFXEmitter*> vfx_emitters;
+  HRL_IdMap<HRL_VFXCurve*> vfx_curves;
+  HRL_IdMap<HRL_Viewport*> viewports;
+  HRL_IdMap<HRL_Camera*> cameras;
+  HRL_IdMap<HRL_PostProcess*> post_processes;
+  HRL_IdMap<HRL_Widget*> widgets;
 
   //global ressources
-  std::unordered_map<HRL_id, HRL_Material*> materials;
-  std::unordered_map<HRL_id, HRL_Font*> fonts;
+  HRL_IdMap<HRL_Material*> materials;
+  HRL_IdMap<HRL_Font*> fonts;
 
   // 0=pending, 1=ready, 2=failed, 3=cancelled.
   std::unordered_map<HRL_id, int> async_resource_states;

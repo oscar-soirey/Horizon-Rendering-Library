@@ -1,5 +1,8 @@
 /**
  * Fonctions utiles pour la communication entre l'API (l'utilisateur final) et le backend
+ *
+ * Frontend and legacy OpenGL backends. New backends use backend_api.h and never
+ * call GetPrivateContext().
  */
 
 #ifndef HRL_UTILS_FUNCTIONS
@@ -7,29 +10,23 @@
 
 #include "../hrl.h"
 #include "object_types.h"
+#include "backend_api.h"
 
 #include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
 
-void SetErrorCode(HRL_EError e, HRL_ESeverity severity, const std::string& detail);
-
 // Internal renderer access; never exposed through the public HRL API.
 HRL_Context* GetPrivateContext();
-
-HRL_id GenerateHRL_ID();
 
 unsigned int GetWindowWidth();
 unsigned int GetWindowHeight();
 
-glm::vec3 GetForwardVector(glm::vec3 _rotation);
-glm::vec3 GetRightVector(glm::vec3 _rotation);
-glm::vec3 GetUpVector(glm::vec3 _rotation);
 
 
 //generate bitmap from text
-class stbtt_fontinfo;
+struct stbtt_fontinfo;
 BitmapResult GenerateBitmap(
 		const char* text, stbtt_fontinfo* font,
 		const std::vector<unsigned char>& ttf_buffer,

@@ -60,13 +60,13 @@ static glm::mat4 CalculateProjectionMatrix();
 static glm::mat4 CalculateViewMatrix();
 
 static void DrawSkySphere(const hrl_scene_t* scene);
-static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum, bool skip_screen_space_displacement = false);
-static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum);
+static void DrawOpaqueMeshes(HRL_id scene_id, const HRL_IdMap<HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum, bool skip_screen_space_displacement = false);
+static void DrawSprites(const HRL_IdMap<HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum);
 static void CreateSpriteGeometry();
 static void InitVFXRenderer();
 static void DrawVFX(const hrl_scene_t* scene);
 
-void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport);
+void DrawWidgets(const HRL_IdMap<HRL_Widget*>& widgets, const HRL_Viewport* viewport);
 static void DrawMeshDebugInfoTexts(const hrl_scene_t* scene, const HRL_Viewport* viewport);
 static void DrawScreenMessages(const hrl_scene_t* scene, const HRL_Viewport* viewport);
 static void DrawGizmos(const hrl_scene_t* scene, const HRL_Viewport* viewport, HRL_id viewport_id);
@@ -2841,7 +2841,7 @@ static void DrawScreenSpaceDisplacementMeshes(HRL_id scene_id, const hrl_scene_t
     glDepthFunc(GL_LESS);
 }
 
-static void DrawOpaqueMeshes(HRL_id scene_id, const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum, bool skip_screen_space_displacement)
+static void DrawOpaqueMeshes(HRL_id scene_id, const HRL_IdMap<HRL_Mesh*>& meshes, HRL_EDebugView debug_view, const FrustumPlaneSet& frustum, bool skip_screen_space_displacement)
 {
 	glEnable(GL_DEPTH_TEST);
 	glDepthMask(GL_TRUE);	glDepthFunc(GL_LESS);
@@ -3014,7 +3014,7 @@ static void BindSpriteSamplers(GLuint sampler)
 	glBindSampler((GLuint)AO_TEXTURE_UNIT, sampler);
 }
 
-static void DrawSprites(const std::unordered_map<HRL_id, HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum)
+static void DrawSprites(const HRL_IdMap<HRL_Mesh*>& meshes, const FrustumPlaneSet& frustum)
 {
 	struct SpriteItem { HRL_id id; HRL_Mesh* mesh; HRL_Material* material; glm::mat4 model; float distance2; };
 	std::vector<SpriteItem> sprites;
@@ -3776,7 +3776,7 @@ static void DrawScreenMessages(const hrl_scene_t* scene, const HRL_Viewport* vie
 	glViewport(0, 0, static_cast<GLsizei>(winW), static_cast<GLsizei>(winH));
 }
 
-void DrawWidgets(const std::unordered_map<HRL_id, HRL_Widget*>& widgets, const HRL_Viewport* viewport)
+void DrawWidgets(const HRL_IdMap<HRL_Widget*>& widgets, const HRL_Viewport* viewport)
 {
 	if (!viewport || widgets.empty())
 		return;
