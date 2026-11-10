@@ -70,6 +70,37 @@ HRL_API void* HRL_Vulkan_GetGraphicsQueue(void);
  */
 HRL_API uint64_t HRL_Vulkan_GetSurface(void);
 
+/**
+ * Returns HRL_TRUE when the GPU and its driver support hardware ray tracing
+ * (VK_KHR_acceleration_structure + VK_KHR_ray_query). Valid after
+ * HRL_InitContext(). The environment variable HRL_VULKAN_NO_RAYTRACING=1
+ * forces the non ray traced code paths.
+ */
+HRL_API int HRL_Vulkan_IsRayTracingSupported(void);
+
+/**
+ * Selects how the shadows of shadow casting lights are computed.
+ *
+ * Disabled (default): cascaded shadow maps for the first shadow casting
+ * directional light and shadow maps for up to 4 spot lights.
+ * Enabled: every shadow casting light (directional, spot and point) traces a
+ * shadow ray against the scene acceleration structure. Ignored, with the
+ * shadow maps kept, when ray tracing is not supported.
+ */
+HRL_API void HRL_Vulkan_SetRayTracedShadows(int enabled);
+
+/** Returns HRL_TRUE when ray traced shadows are active. */
+HRL_API int HRL_Vulkan_GetRayTracedShadows(void);
+
+/**
+ * Distance from the camera, in world units, covered by the cascaded shadow
+ * maps (default 150). Shorter distances give sharper shadows.
+ */
+HRL_API void HRL_Vulkan_SetShadowDistance(float distance);
+
+/** Name of the GPU selected by HRL, or an empty string before initialization. */
+HRL_API const char* HRL_Vulkan_GetDeviceName(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -23,7 +23,6 @@
 // HRL_ENABLE_VULKAN (CMake option COMPILE_VULKAN) adds the Vulkan backend.
 #ifdef HRL_ENABLE_VULKAN
 #include "backend/vulkan/vulkan_backend.h"
-#include <vulkan/vulkan.h>
 #endif
 
 #include <unordered_map>
@@ -260,46 +259,7 @@ HRL_Context* GetPrivateContext()
 	return &ctx_;
 }
 
-#ifdef HRL_ENABLE_VULKAN
-void HRL_Vulkan_SetSurfaceCallback(HRL_VulkanCreateSurfaceCallback callback, void* user_data)
-{
-	VulkanSetSurfaceCallback(callback, user_data);
-}
-
-void HRL_Vulkan_SetInstanceExtensions(const char* const* extensions, HRL_uint extension_count)
-{
-	VulkanSetInstanceExtensions(extensions, extension_count);
-}
-
-void* HRL_Vulkan_GetInstance(void)
-{
-	return reinterpret_cast<void*>(VulkanGetInstance());
-}
-
-void* HRL_Vulkan_GetPhysicalDevice(void)
-{
-	return reinterpret_cast<void*>(VulkanGetPhysicalDevice());
-}
-
-void* HRL_Vulkan_GetDevice(void)
-{
-	return reinterpret_cast<void*>(VulkanGetDevice());
-}
-
-void* HRL_Vulkan_GetGraphicsQueue(void)
-{
-	return reinterpret_cast<void*>(VulkanGetGraphicsQueue());
-}
-
-uint64_t HRL_Vulkan_GetSurface(void)
-{
-#if defined(VK_USE_64_BIT_PTR_DEFINES) && VK_USE_64_BIT_PTR_DEFINES
-	return reinterpret_cast<uint64_t>(VulkanGetSurface());
-#else
-	return static_cast<uint64_t>(VulkanGetSurface());
-#endif
-}
-#else
+#ifndef HRL_ENABLE_VULKAN
 // Vulkan backend not compiled : the hrl_vulkan.h entry points are inert.
 void HRL_Vulkan_SetSurfaceCallback(HRL_VulkanCreateSurfaceCallback, void*) {}
 void HRL_Vulkan_SetInstanceExtensions(const char* const*, HRL_uint) {}
@@ -308,6 +268,11 @@ void* HRL_Vulkan_GetPhysicalDevice(void) { return nullptr; }
 void* HRL_Vulkan_GetDevice(void) { return nullptr; }
 void* HRL_Vulkan_GetGraphicsQueue(void) { return nullptr; }
 uint64_t HRL_Vulkan_GetSurface(void) { return 0; }
+int HRL_Vulkan_IsRayTracingSupported(void) { return HRL_FALSE; }
+void HRL_Vulkan_SetRayTracedShadows(int) {}
+int HRL_Vulkan_GetRayTracedShadows(void) { return HRL_FALSE; }
+void HRL_Vulkan_SetShadowDistance(float) {}
+const char* HRL_Vulkan_GetDeviceName(void) { return ""; }
 #endif
 
 
@@ -864,6 +829,8 @@ void HRL_Init(HRL_E_APIs _api)
 	{
 		g_Backend = GetOpenGL33Backend();
 		g_Backend.RHI_Init();
+		SetErrorCode(HRL_NO_ERROR, HRL_SEVERITY_WEAK_WARNING,
+			"HRL_OPENGL_33 is deprecated: it receives bug fixes only. New features are developed for HRL_VULKAN.");
 		break;
 	}
 #endif
@@ -6962,7 +6929,19 @@ void HRL_SetDefaultFramebuffer(HRL_uint _framebuffer)
 
 void HRL_MaterialSetEmissiveColor(HRL_id matid, float r, float g, float b, float a)
 {
-
+	auto it = ctx_.materials.find(matid);
+	if (it == ctx_.materials.end() || !it->second)
+	{
+		SetErrorCode(HRL_ERROR_INVALID_ID, HRL_SEVERITY_ERROR, "HRL_MaterialSetEmissiveColor: invalid material ID");
+		return;
+	}
+	if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b) || !std::isfinite(a))
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_MaterialSetEmissiveColor: color contains NaN or infinity");
+		return;
+	}
+	// rgb : linear color, a : intensity multiplier. Read by the Vulkan renderer.
+	it->second->vec4Params_["EmissiveColor"] = glm::vec4(r, g, b, a);
 }
 
 HRL_id HRL_CreateMesh3D(HRL_id _sceneid, const HRL_Vertex3D* _vertices, size_t _vertexCount, const HRL_uint* _indices, size_t _indexCount)
