@@ -27,30 +27,6 @@ extern size_t res_default_roughness_png_len;
 extern unsigned char res_default_specular_png[];
 extern size_t res_default_specular_png_len;
 
-//res_world_ps_hlsl
-extern unsigned char res_world_ps_hlsl[];
-extern size_t res_world_ps_hlsl_len;
-
-//res_world_vs_hlsl
-extern unsigned char res_world_vs_hlsl[];
-extern size_t res_world_vs_hlsl_len;
-
-//res_ui_frag_metal
-extern unsigned char res_ui_frag_metal[];
-extern size_t res_ui_frag_metal_len;
-
-//res_ui_vert_metal
-extern unsigned char res_ui_vert_metal[];
-extern size_t res_ui_vert_metal_len;
-
-//res_world_frag_metal
-extern unsigned char res_world_frag_metal[];
-extern size_t res_world_frag_metal_len;
-
-//res_world_vert_metal
-extern unsigned char res_world_vert_metal[];
-extern size_t res_world_vert_metal_len;
-
 //res_debug_frag_glsl
 extern unsigned char res_debug_frag_glsl[];
 extern size_t res_debug_frag_glsl_len;
@@ -126,85 +102,5 @@ extern size_t res_ui_frag_glsl_len;
 //res_ui_vert_glsl
 extern unsigned char res_ui_vert_glsl[];
 extern size_t res_ui_vert_glsl_len;
-
-//res_vulkan_debug_frag_glsl
-extern unsigned char res_vulkan_debug_frag_glsl[];
-extern size_t res_vulkan_debug_frag_glsl_len;
-
-//res_vulkan_debug_vert_glsl
-extern unsigned char res_vulkan_debug_vert_glsl[];
-extern size_t res_vulkan_debug_vert_glsl_len;
-
-//res_vulkan_post_frag_glsl
-extern unsigned char res_vulkan_post_frag_glsl[];
-extern size_t res_vulkan_post_frag_glsl_len;
-
-//res_vulkan_post_vert_glsl
-extern unsigned char res_vulkan_post_vert_glsl[];
-extern size_t res_vulkan_post_vert_glsl_len;
-
-//res_vulkan_scene_effects_frag_glsl
-extern unsigned char res_vulkan_scene_effects_frag_glsl[];
-extern size_t res_vulkan_scene_effects_frag_glsl_len;
-
-//res_vulkan_shadow_frag_glsl
-extern unsigned char res_vulkan_shadow_frag_glsl[];
-extern size_t res_vulkan_shadow_frag_glsl_len;
-
-//res_vulkan_shadow_skinned_vert_glsl
-extern unsigned char res_vulkan_shadow_skinned_vert_glsl[];
-extern size_t res_vulkan_shadow_skinned_vert_glsl_len;
-
-//res_vulkan_shadow_static_vert_glsl
-extern unsigned char res_vulkan_shadow_static_vert_glsl[];
-extern size_t res_vulkan_shadow_static_vert_glsl_len;
-
-//res_vulkan_skinned_3dmesh_frag_glsl
-extern unsigned char res_vulkan_skinned_3dmesh_frag_glsl[];
-extern size_t res_vulkan_skinned_3dmesh_frag_glsl_len;
-
-//res_vulkan_skinned_3dmesh_vert_glsl
-extern unsigned char res_vulkan_skinned_3dmesh_vert_glsl[];
-extern size_t res_vulkan_skinned_3dmesh_vert_glsl_len;
-
-//res_vulkan_sky_sphere_frag_glsl
-extern unsigned char res_vulkan_sky_sphere_frag_glsl[];
-extern size_t res_vulkan_sky_sphere_frag_glsl_len;
-
-//res_vulkan_sky_sphere_vert_glsl
-extern unsigned char res_vulkan_sky_sphere_vert_glsl[];
-extern size_t res_vulkan_sky_sphere_vert_glsl_len;
-
-//res_vulkan_sprite_frag_glsl
-extern unsigned char res_vulkan_sprite_frag_glsl[];
-extern size_t res_vulkan_sprite_frag_glsl_len;
-
-//res_vulkan_sprite_vert_glsl
-extern unsigned char res_vulkan_sprite_vert_glsl[];
-extern size_t res_vulkan_sprite_vert_glsl_len;
-
-//res_vulkan_static_3dmesh_frag_glsl
-extern unsigned char res_vulkan_static_3dmesh_frag_glsl[];
-extern size_t res_vulkan_static_3dmesh_frag_glsl_len;
-
-//res_vulkan_static_3dmesh_vert_glsl
-extern unsigned char res_vulkan_static_3dmesh_vert_glsl[];
-extern size_t res_vulkan_static_3dmesh_vert_glsl_len;
-
-//res_vulkan_ui_frag_glsl
-extern unsigned char res_vulkan_ui_frag_glsl[];
-extern size_t res_vulkan_ui_frag_glsl_len;
-
-//res_vulkan_ui_vert_glsl
-extern unsigned char res_vulkan_ui_vert_glsl[];
-extern size_t res_vulkan_ui_vert_glsl_len;
-
-//res_vulkan_vfx_frag_glsl
-extern unsigned char res_vulkan_vfx_frag_glsl[];
-extern size_t res_vulkan_vfx_frag_glsl_len;
-
-//res_vulkan_vfx_vert_glsl
-extern unsigned char res_vulkan_vfx_vert_glsl[];
-extern size_t res_vulkan_vfx_vert_glsl_len;
 
 #endif
