@@ -21,8 +21,20 @@
 - The examples are part of the main CMake project (`-DHRL_BUILD_EXAMPLES=ON`): they link the `hrldll` target and include `src/` directly. The library and the executables are written to `build/bin`. The former `example/` folder (copied headers, copied `libhrldll`, prebuilt GLFW, copy of GLM) is replaced by `examples/opengl/` (targets `hrl_gl_showcase`, `hrl_gl_minimal`, `hrl_gl_vfx`, `hrl_gl_voxel`, `hrl_gl_widgets`); GLFW is downloaded by CMake when it is not installed. Their resources live in `examples/assets` (not versioned).
 - Third party: Vulkan Memory Allocator 3.1.0 (`third_party/vma`).
 
+### Architecture
+
+- `src/hrl.cpp` (10 600 lines) is split into `src/frontend/*.cpp`, one file per domain, with a private shared header. No behaviour change: the OpenGL regression test renders the same image before and after.
+- Objects are stored in `HRL_IdMap` (flat array sorted by id) instead of hash maps: contiguous iteration in creation order.
+- New backend entry point `RHI_RenderSceneFrame(const HRL_SceneFrame&)`: the frame of a scene (scene, materials, debug primitives, screenshot request) arrives in one structure. The Vulkan backend no longer reads the frontend state (`backend_isolation` test); the OpenGL backends keep the legacy entry points.
+- Vulkan renderer split into modules (`vk_frame_graph`, `vk_pipelines`, `vk_resources`, `vk_scene_data`, `vk_environment`, `vk_renderer`).
+- Vulkan frame graph: passes declare their images; barriers, rendering scopes and debug labels are generated; the HDR target is a pooled transient image.
+- Vulkan scene data cache: instances and materials are kept between frames and only what changed is recomputed (`HRL_Material::revision_`, transforms compared by value). 20 000 meshes: 4.2 ms → 1.5 ms of CPU per frame (`hrl_bench_scene`, software GPU).
+- `HRL_Vulkan_GetSceneStats` (instances, materials, drawn instances, passes, cache work).
+- Tests: `opengl_smoke` (regression of the deprecated backend, needs a display), `backend_isolation`, `hrl_bench_scene`.
+
 ### Removed
 
+- `src/hrl.cpp` (replaced by `src/frontend/`).
 - `src/backend/vulkan/vkgl/`, `vk_gl33_*.cpp`, `vk_core.*`, `vk_context.*`, `vk_compile.*`, `vulkan_shader.*`, `vulkan_texture.*`, `vulkan_builtin_shaders.h`, the old `src/shaders/vulkan/*.glsl`.
 - Empty placeholders: `src/backend/d3d11/`, `src/shaders/d3d/`, `src/shaders/metal/`.
 

@@ -10,7 +10,7 @@ on the previous ones; nothing is listed as done unless it runs in the tests.
 | Public C API | Coherent, opaque ids, backend independent | Kept |
 | Vulkan backend | OpenGL renderer compiled over an OpenGL-on-Vulkan layer (Vulkan 1.1, one command buffer, shaders compiled by spawning `glslangValidator` at run time) | Replaced by a native renderer |
 | OpenGL 3.3 | Complete forward renderer, single shadow map per light, no IBL, GI by software BVH in fragment shaders | Deprecated, frozen |
-| Frontend | `hrl.cpp` is one 10 000 line file with a global context of `unordered_map`s of raw pointers; backends read it directly | To split (step 6) |
+| Frontend | `hrl.cpp` was one 10 000 line file with a global context of `unordered_map`s of raw pointers; backends read it directly | Split into `src/frontend/`, flat id storage, Vulkan isolated behind `HRL_SceneFrame` |
 | D3D11 / Metal | Empty files | Removed |
 | Build | Hard coded SDK path, CMake 3.31 required, no tests | Fixed, tests added |
 | `HRL_MaterialSetEmissiveColor` | Declared, empty body | Implemented (Vulkan) |
@@ -20,7 +20,8 @@ on the previous ones; nothing is listed as done unless it runs in the tests.
 Device layer, geometry pool, bindless textures, multi-draw-indirect, PBR,
 cascaded and spot shadow maps, ray traced shadows (ray query), image based
 lighting, sky, fog, ACES tone mapping, LOD, picking, screenshots, debug
-primitives, off-screen rendering, tests, example.
+primitives, off-screen rendering, tests, example. Architecture: frontend split,
+frame graph, scene data cache, backend isolation (see `ARCHITECTURE.md`).
 
 ## Next steps
 
@@ -37,13 +38,16 @@ primitives, off-screen rendering, tests, example.
 5. **Ray tracing**: reflections, then diffuse GI with probes (DDGI) traced with
    hardware rays, with a screen space fallback; denoising relies on step 3.
    BLAS compaction and refit for skinned meshes.
-6. **Frontend**: split `hrl.cpp` by domain, replace the per-frame material
-   and instance rebuild with dirty tracking, handle-based storage instead of
-   hash maps of pointers.
+6. **Frontend** (done): `hrl.cpp` split by domain, flat id storage, scene data
+   cache with change tracking, Vulkan backend isolated from the frontend state.
+   Remaining: objects are still owned through raw pointers created and
+   deleted by the frontend; the OpenGL backends still read the frontend context.
 7. **GPU driven**: culling and LOD selection in compute, Hi-Z occlusion,
    draw-indirect-count; packed vertex format; texture streaming with a VRAM budget.
-8. **Render graph**: once steps 3 to 5 add enough passes to justify it, replace
-   the explicit pass sequence by a graph that owns transient images and barriers.
+8. **Frame graph** (first version done): passes, automatic barriers,
+   transient pool. To add with the passes of steps 3 to 5: pass culling and
+   reordering, transient aliasing inside a frame, compute passes as first
+   class citizens.
 9. **2D and tools**: sprites, text, widgets, gizmos, VFX, voxel worlds on Vulkan.
 
 Rust: no component currently justifies a second language and an FFI boundary.
