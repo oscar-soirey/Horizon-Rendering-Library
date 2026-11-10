@@ -1,0 +1,18 @@
+# Fails when a file of the given backend reaches into the frontend: the backend
+# may only use core/backend_api.h, core/render_common.h and core/object_types.h.
+file(GLOB BACKEND_FILES ${BACKEND_DIR}/*.cpp ${BACKEND_DIR}/*.h)
+set(FORBIDDEN "GetPrivateContext" "utils_functions.h" "frontend_internal.h" "frontend/" "GetWindowWidth" "GetWindowHeight")
+set(FAILED FALSE)
+foreach(FILE ${BACKEND_FILES})
+    file(READ ${FILE} CONTENT)
+    foreach(WORD ${FORBIDDEN})
+        string(FIND "${CONTENT}" "${WORD}" POSITION)
+        if(NOT POSITION EQUAL -1)
+            message(SEND_ERROR "${FILE} uses '${WORD}' (frontend state)")
+            set(FAILED TRUE)
+        endif()
+    endforeach()
+endforeach()
+if(NOT FAILED)
+    message(STATUS "backend isolation: OK")
+endif()
