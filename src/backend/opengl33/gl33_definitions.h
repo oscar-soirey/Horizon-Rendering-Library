@@ -42,7 +42,7 @@ typedef struct {
 
 static_assert(sizeof(GL_Light) == 144, "GL_Light must match the std140 Light layout");
 
-typedef struct {
+struct GL_Scene {
 	GLuint fbo;
 	// Scene color, bloom, object picking, and GI G-buffer attachments.
 	// textures[3] = linear diffuse albedo, textures[4] = world-space normal.
@@ -59,7 +59,7 @@ typedef struct {
 	int msaa_samples = 1;
 
 	int width = 0, height = 0;
-}GL_Scene;
+};
 
 
 

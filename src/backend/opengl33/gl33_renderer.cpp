@@ -390,7 +390,7 @@ static GL_33_GI* g_gl33_gi = nullptr;
 
 
 //Render context, used and updated every frame
-typedef struct {
+struct GL33_State {
 	//render context
 	HRL_Viewport* viewport;
 	GL33_Shader* shader;
@@ -411,7 +411,7 @@ typedef struct {
 	// Material/shader cache used by renderer-side state batching.
 	HRL_Material* bound_material = nullptr;
 	GL33_Shader* bound_shader = nullptr;
-} GL33_State;
+};
 static GL33_State* ctx_;
 
 static void ApplyVolumetricCloudsPass(GL_Scene* scene, const hrl_scene_t* hrlScene,

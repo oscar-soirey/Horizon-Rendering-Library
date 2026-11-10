@@ -20,11 +20,11 @@ typedef uint64_t HRL_BackendHandle;
 class HRL_Widget;
 
 //Errors
-typedef struct {
+struct HRL_Internal_Error {
   HRL_EError code;
   HRL_ESeverity severity;
   std::string detail;
-}HRL_Internal_Error;
+};
 
 //MESH
 struct HRL_MeshLODData {
@@ -153,7 +153,7 @@ struct HRL_SkeletalMesh final : HRL_Mesh {
 };
 
 //LIGHT
-typedef struct {
+struct HRL_Light {
   HRL_id scene_ = HRL_INVALID_ID;
   HRL_uint type_;
   float intensity_=2.f;
@@ -178,17 +178,17 @@ typedef struct {
   float shadow_bias_ = 0.0015f;
   float shadow_strength_ = 1.0f; // 0 = no shadow darkening, 1 = fully dark shadows
   int shadow_resolution_ = 2048;
-}HRL_Light;
+};
 
 //POST PROCESS
-typedef struct {
+struct HRL_PostProcess {
   HRL_id id_ = HRL_INVALID_ID;
   HRL_id material_ = HRL_INVALID_ID;
   int priority_ = 0;
-}HRL_PostProcess;
+};
 
 //MATERIAL
-typedef struct {
+struct HRL_Material {
   HRL_id shader_;
   std::unordered_map<std::string, int> intParams_;
   std::unordered_map<std::string, HRL_id> textureParams_;
@@ -210,10 +210,10 @@ typedef struct {
   // User-owned opaque pointer associated with this material.
   // HRL never allocates, frees, or dereferences this pointer.
   void* user_handle_ = nullptr;
-}HRL_Material;
+};
 
 //CAMERA
-typedef struct {
+struct HRL_Camera {
   HRL_uint type_;
 
   glm::vec3 position_;
@@ -228,10 +228,10 @@ typedef struct {
   // User-owned opaque pointer associated with this camera.
   // HRL never allocates, frees, or dereferences this pointer.
   void* user_handle_ = nullptr;
-}HRL_Camera;
+};
 
 //VIEWPORT
-typedef struct {
+struct HRL_Viewport {
   HRL_Camera* camera_;
 
   float x_;
@@ -244,15 +244,15 @@ typedef struct {
   std::unordered_map<HRL_id, HRL_PostProcess*> post_processes;
 
   std::unordered_map<HRL_id, HRL_Widget*> widgets;
-}HRL_Viewport;
+};
 
 
 //Debug//
 
-typedef struct {
+struct DebugVertex {
   float x, y, z;
   float r, g, b;
-}DebugVertex;
+};
 
 struct DebugRenderer {
   //for example : lines = [ A, B, C, D, E, F ], it will draw lines : A->B   C->D   E->F
@@ -273,13 +273,13 @@ struct BitmapResult {
 
 
 //texte - structure backend API only, pas besoin d'y acceder avec le backend
-typedef struct {
+struct HRL_Font {
   stbtt_fontinfo             info;
   std::vector<unsigned char> ttf_buffer;
-}HRL_Font;
+};
 
 //Fog
-typedef struct {
+struct hrl_fog_t {
   //mode
   bool enabled = false;
   HRL_uint mode = HRL_FOG_LINEAR;
@@ -291,7 +291,7 @@ typedef struct {
   float density = 0.1f;
   float range_start = 20.f;
   float range_end = 100.f;
-}hrl_fog_t;
+};
 
 // Localized volumetric fog is a regular scene object with its own stable HRL ID.
 struct HRL_VolumetricFog final {
@@ -322,16 +322,16 @@ struct HRL_Decal final {
 
 // Scene-wide volumetric fog. This is intentionally not an object because it
 // has no position/radius and affects the entire scene uniformly.
-typedef struct {
+struct hrl_global_volumetric_fog_t {
   bool enabled = false;
   glm::vec3 color = glm::vec3(0.65f, 0.72f, 0.80f);
   float density = 0.05f;
   HRL_uint steps = 16;
-}hrl_global_volumetric_fog_t;
+};
 
 // Screen-space radial light scattering / god rays. The position is the
 // world-space location of the light source used for the radial origin.
-typedef struct {
+struct hrl_god_rays_t {
   bool enabled = false;
   glm::vec3 position = glm::vec3(0.0f, 5.0f, 0.0f);
   glm::vec3 color = glm::vec3(1.0f);
@@ -339,7 +339,7 @@ typedef struct {
   float decay = 0.95f;
   float weight = 0.2f;
   HRL_uint samples = 48;
-}hrl_god_rays_t;
+};
 
 
 // VFX / particle system
@@ -516,10 +516,10 @@ struct HRL_Gizmo {
 };
 
 //Widget
-typedef struct {
+struct hrl_widget_t {
   glm::vec2 position;
   glm::vec2 size;
-}hrl_widget_t;
+};
 
 
 // Screen-space debug messages (Unreal-style stacked on-screen messages).
@@ -738,7 +738,7 @@ struct HRL_VoxelWorld final {
 bool HRL_EnsureVoxelChunkLoaded(HRL_VoxelWorld* world, int chunkX, int chunkY);
 
 //objects//
-typedef struct {
+struct hrl_scene_t {
   int draw_on_screen;
 
   //color picking
@@ -837,10 +837,10 @@ typedef struct {
   // scene every frame just to detect static changes.
   uint64_t gi_geometry_revision = 1;
   uint64_t gi_lighting_revision = 1;
-}hrl_scene_t;
+};
 
 
-typedef struct {
+struct HRL_Context {
   //errors
   HRL_Internal_Error last_error;
   HRL_CErrorCallback error_callback;
@@ -896,7 +896,7 @@ typedef struct {
 
   double vfx_last_frame_time = 0.0;
   bool vfx_has_frame_time = false;
-}HRL_Context;
+};
 
 
 #endif
