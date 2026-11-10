@@ -24,6 +24,10 @@
  *    `--'  `--'`--' '--'`-----'
  */
 
+/*
+ * DEPRECATED: the OpenGL backends are frozen (bug fixes only). New projects
+ * should use the Vulkan backend (HRL_VULKAN, hrl_vulkan.h).
+ */
 #ifndef HRL_GL_IMPL
 #define HRL_GL_IMPL
 

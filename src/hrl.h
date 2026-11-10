@@ -27,7 +27,7 @@
 #ifndef HRL_IMPL
 #define HRL_IMPL
 
-#define HRL_API_VERSION "0.8"
+#define HRL_API_VERSION "0.9"
 
 #ifdef __cplusplus
  #include <cstdint>
@@ -225,7 +225,18 @@ typedef struct HRL_SkeletalMeshData {
 #define HRL_MATERIAL_PARAM_TWO_SIDED "TwoSided"
 #endif
 
+/**
+ * Rendering backends.
+ *
+ * HRL_VULKAN is the primary backend: a native Vulkan 1.3 renderer where every
+ * new rendering feature is developed.
+ *
+ * HRL_OPENGL_33 is DEPRECATED. It keeps working for existing projects but is
+ * frozen: no new feature, no parity with Vulkan, fixes for stability only.
+ * HRL_OPENGL_ES_30 is a legacy mobile renderer in the same situation.
+ */
 typedef enum HRL_E_APIs{
+	/** @deprecated Frozen legacy backend, use HRL_VULKAN. */
 	HRL_OPENGL_33 = 0x0001,
 	HRL_OPENGL_45,
 	HRL_VULKAN,
@@ -276,7 +287,8 @@ typedef enum HRL_EFilterType{
 /**
  * Global illumination methods (indirect diffuse light).
  *
- * OpenGL 3.3 and Vulkan implement every method (they run the same renderer):
+ * Implemented by the deprecated OpenGL 3.3 backend only. The Vulkan backend
+ * reports them as unsupported until its hardware ray traced GI is available:
  *   - HRL_GI_SSGI         screen space : rays against the depth buffer, light of
  *                         the visible image only. Cheapest, no world data.
  *   - HRL_GI_VCT          voxel cone tracing in a 64^3 voxel volume of the scene.
@@ -1707,9 +1719,11 @@ extern "C" {
 	HRL_API void HRL_MaterialSetVec4(HRL_id _matid, const char* _uniformName, float x, float y, float z, float w);
 
 	/**
-	 * @brief Sets the emissive color tint of a material, additively blended with the emissive texture.
+	 * @brief Sets the emissive color of a material (Vulkan backend; ignored by OpenGL).
+	 * The emitted light is color * a * emissive texture (HRL_T_EMISSIVE, white when not set).
 	 * @param matid    ID of the target material.
-	 * @param r,g,b,a  Emissive color and alpha multiplier in [0..1].
+	 * @param r,g,b    Linear emissive color.
+	 * @param a        Intensity multiplier (may be greater than 1 for HDR emission).
 	 */
 	HRL_API void HRL_MaterialSetEmissiveColor(HRL_id matid, float r, float g, float b, float a);
 
