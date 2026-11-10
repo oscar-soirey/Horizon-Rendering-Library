@@ -78,3 +78,6 @@ Makefile
 # =========================
 dev/
 features.txt
+
+# Resources of the examples (large textures and models, not versioned)
+examples/assets/
