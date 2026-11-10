@@ -4,6 +4,7 @@
 //on peut inclure hrl.h car hrl.h n'inclura jamais ce fichier
 #include "../hrl.h"
 #include "object_types.h"
+#include "backend_api.h"
 
 #include <vector>
 
@@ -93,6 +94,11 @@ typedef struct {
 
 	//Color picking readback (pixel coordinates use the scene framebuffer convention: origin bottom-left)
 	HRL_id(*RHI_GetHoveredObject)(HRL_id scene, int mouseX, int mouseY, HRL_EMeshType* mesh_type);
+
+	//Scene rendering for backends isolated from the frontend state (Vulkan).
+	//When set, it is called instead of RHI_UpdateLights + RHI_RenderScene +
+	//RHI_DrawDebug + RHI_TakeScreenshot: the frame data arrives in one structure.
+	void(*RHI_RenderSceneFrame)(const HRL_SceneFrame& frame);
 }HRL_vtable;
 
 #endif
