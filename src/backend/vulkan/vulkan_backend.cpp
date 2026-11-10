@@ -8,8 +8,8 @@
 
 #include "vk_device.h"
 #include "vk_renderer.h"
+#include "../../core/backend_api.h"
 #include "../../core/render_common.h"
-#include "../../core/utils_functions.h"
 #include "../../hrl_vulkan.h"
 
 #include <stb/stb_image.h>
@@ -60,9 +60,9 @@ void VK_Resize(int width, int height)
 	if (width > 0 && height > 0) hrlvk::RendererResize((uint32_t)width, (uint32_t)height);
 }
 
-void VK_RenderScene(hrl_scene_t* scene, HRL_id id)
+void VK_RenderSceneFrame(const HRL_SceneFrame& frame)
 {
-	if (scene)
+	if (const hrl_scene_t* scene = frame.scene)
 	{
 		if (scene->voxel_world) Unsupported("voxel worlds");
 		if (!scene->landscapes.empty()) Unsupported("landscapes");
@@ -70,8 +70,13 @@ void VK_RenderScene(hrl_scene_t* scene, HRL_id id)
 		if (!scene->decals.empty()) Unsupported("decals");
 		if (scene->global_illumination_enabled) Unsupported("global illumination");
 	}
-	hrlvk::RendererRenderScene(scene, id);
+	hrlvk::RendererRenderScene(frame);
 }
+
+// Entry points of the legacy (OpenGL) frame path: never called for this
+// backend, which implements RHI_RenderSceneFrame.
+void VK_LegacyRenderScene(hrl_scene_t*, HRL_id) {}
+void VK_LegacyDrawDebug(const DebugRenderer&, float) {}
 
 int VK_CreateMesh(HRL_id id, const HRL_Vertex3D* v, size_t vc, const HRL_uint* i, size_t ic)
 {
@@ -172,9 +177,9 @@ HRL_vtable GetVulkanBackend()
 	t.RHI_InitContext = VK_InitContext;
 	t.RHI_Shutdown = VK_Shutdown;
 	t.RHI_WindowResizeCallback = VK_Resize;
-	t.RHI_TakeScreenshot = hrlvk::TakeScreenshot;
 	t.RHI_BeginFrame = hrlvk::RendererBeginFrame;
-	t.RHI_RenderScene = VK_RenderScene;
+	t.RHI_RenderScene = VK_LegacyRenderScene;
+	t.RHI_RenderSceneFrame = VK_RenderSceneFrame;
 	t.RHI_ResetFramebuffer = hrlvk::RendererEndFrame;
 	t.RHI_BindViewport = VK_BindViewport;
 	t.RHI_ComputeFrameMatrices = VK_Noop;
@@ -213,7 +218,7 @@ HRL_vtable GetVulkanBackend()
 	t.RHI_IsGlobalIlluminationMethodSupported = VK_GISupported;
 	t.RHI_GetGlobalIlluminationSupportedMethods = VK_GIMethods;
 	t.RHI_FogPropertyChanged = VK_FogChanged;
-	t.RHI_DrawDebug = hrlvk::RendererDrawDebug;
+	t.RHI_DrawDebug = VK_LegacyDrawDebug;
 	t.RHI_IsValidTexture = VK_IsValidTexture;
 	t.RHI_IsValidShader = VK_IsValidShader;
 	t.RHI_GetHoveredObject = hrlvk::GetHoveredObject;
@@ -248,3 +253,9 @@ void HRL_Vulkan_SetRayTracedShadows(int enabled) { hrlvk::SetRayTracedShadows(en
 int HRL_Vulkan_GetRayTracedShadows(void) { return hrlvk::RayTracedShadowsEnabled() ? HRL_TRUE : HRL_FALSE; }
 void HRL_Vulkan_SetShadowDistance(float distance) { hrlvk::SetShadowDistance(distance); }
 const char* HRL_Vulkan_GetDeviceName(void) { return hrlvk::GetDevice().caps.deviceName.c_str(); }
+
+int HRL_Vulkan_GetSceneStats(HRL_id scene, HRL_VulkanSceneStats* stats)
+{
+	if (!stats) return HRL_FALSE;
+	return hrlvk::GetSceneStats(scene, *stats) ? HRL_TRUE : HRL_FALSE;
+}

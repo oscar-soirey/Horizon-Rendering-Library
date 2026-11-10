@@ -101,6 +101,23 @@ HRL_API void HRL_Vulkan_SetShadowDistance(float distance);
 /** Name of the GPU selected by HRL, or an empty string before initialization. */
 HRL_API const char* HRL_Vulkan_GetDeviceName(void);
 
+/** Counters of the last rendered frame of a scene (diagnostics, profiling). */
+typedef struct HRL_VulkanSceneStats {
+    uint32_t instance_count;        /**< 3D meshes of the scene that can be drawn. */
+    uint32_t material_count;        /**< Materials used by those meshes. */
+    uint32_t drawn_instance_count;  /**< Instances that passed frustum culling, summed over the viewports. */
+    uint32_t render_pass_count;     /**< Render passes recorded for the scene. */
+    uint32_t scene_rebuilds;        /**< 1 when the cached scene data had to be rebuilt entirely. */
+    uint32_t transform_updates;     /**< Instances whose transform was recomputed. */
+    uint32_t material_updates;      /**< Materials whose GPU data was recomputed. */
+} HRL_VulkanSceneStats;
+
+/**
+ * Fills `stats` for a scene rendered by the Vulkan backend.
+ * Returns HRL_FALSE (and zeroes) for an unknown scene or another backend.
+ */
+HRL_API int HRL_Vulkan_GetSceneStats(HRL_id scene, HRL_VulkanSceneStats* stats);
+
 #ifdef __cplusplus
 }
 #endif

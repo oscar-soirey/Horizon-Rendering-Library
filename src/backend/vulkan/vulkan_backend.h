@@ -3,5 +3,5 @@
 
 #include "../../core/backend_vtable.h"
 
-// Backend table used by hrl.cpp when HRL_Init(HRL_VULKAN) is called.
+// Backend table used by the frontend when HRL_Init(HRL_VULKAN) is called.
 HRL_vtable GetVulkanBackend();

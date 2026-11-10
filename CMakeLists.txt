@@ -85,7 +85,25 @@ set(HRL_SOURCES
     third_party/ufbx/ufbx.c
     ${EMBEDDED_SOURCES}
 
-    src/hrl.cpp
+    # Frontend: implementation of the public API, one file per domain
+    src/frontend/context.cpp
+    src/frontend/scene.cpp
+    src/frontend/camera.cpp
+    src/frontend/mesh.cpp
+    src/frontend/skeletal.cpp
+    src/frontend/landscape.cpp
+    src/frontend/light.cpp
+    src/frontend/material.cpp
+    src/frontend/texture.cpp
+    src/frontend/fbx.cpp
+    src/frontend/effects.cpp
+    src/frontend/vfx.cpp
+    src/frontend/voxel.cpp
+    src/frontend/gizmo.cpp
+    src/frontend/widget.cpp
+    src/frontend/debug.cpp
+
+    # Core: CPU systems shared by the frontend and the backends
     src/core/utils_functions.cpp
     src/core/widgets.cpp
     src/core/render_common.cpp
@@ -180,6 +198,11 @@ if(HRL_ENABLE_VULKAN)
         ${HRL_GENERATED_DIR}/hrl_vk_shaders.cpp
         src/backend/vulkan/vk_mem_alloc.cpp
         src/backend/vulkan/vk_device.cpp
+        src/backend/vulkan/vk_frame_graph.cpp
+        src/backend/vulkan/vk_pipelines.cpp
+        src/backend/vulkan/vk_resources.cpp
+        src/backend/vulkan/vk_environment.cpp
+        src/backend/vulkan/vk_scene_data.cpp
         src/backend/vulkan/vk_renderer.cpp
         src/backend/vulkan/vulkan_backend.cpp
     )

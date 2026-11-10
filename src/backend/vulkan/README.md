@@ -6,10 +6,19 @@ structure: `docs/ARCHITECTURE.md`. Planned work: `docs/ROADMAP.md`.
 | File | Role |
 |-|-|
 | `vk_device.*` | Instance, GPU selection, device features, VMA allocator, swapchain, frames in flight, upload command buffer, deferred destruction, layout transitions |
-| `vk_renderer.*` | Bindless textures, geometry pool, acceleration structures, shadow / forward / sky / tone mapping passes, image based lighting, picking, screenshots |
+| `vk_frame_graph.*` | Pass declaration, automatic barriers and rendering scopes, transient image pool |
+| `vk_pipelines.cpp` | Descriptor set layouts and pipelines |
+| `vk_resources.cpp` | Bindless textures, geometry pool, bottom level acceleration structures |
+| `vk_scene_data.cpp` | Cached instances / materials, lights, cameras, shadow cascades |
+| `vk_environment.cpp` | Image based lighting |
+| `vk_renderer.*` | Render targets, frame of a scene, picking, screenshots |
+| `vk_renderer_internal.h` | Types shared by the renderer files |
 | `vulkan_backend.*` | `HRL_vtable` of the backend and the `hrl_vulkan.h` functions |
 | `vk_mem_alloc.cpp` | Implementation unit of Vulkan Memory Allocator (`third_party/vma`) |
 | `src/shaders/vulkan/` | GLSL 4.60 sources, compiled to SPIR-V by CMake and embedded |
+
+From the HRL core this backend only includes `backend_api.h`,
+`render_common.h` and `object_types.h` (enforced by the `backend_isolation` test).
 
 Requirements: Vulkan 1.3 with dynamic rendering, synchronization2, descriptor
 indexing (update-after-bind sampled images), multi-draw-indirect. Optional:

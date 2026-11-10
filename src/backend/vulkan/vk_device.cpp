@@ -1,7 +1,7 @@
 // HRL native Vulkan backend - device layer implementation.
 #include "vk_device.h"
 
-#include "../../core/utils_functions.h"
+#include "../../core/backend_api.h"
 
 #include <algorithm>
 #include <cstdlib>
