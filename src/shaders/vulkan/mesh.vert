@@ -13,7 +13,7 @@ layout(location = 1) out vec3 vNormal;
 layout(location = 2) out vec2 vUV;
 layout(location = 3) out vec3 vTangent;
 layout(location = 4) out vec3 vBitangent;
-layout(location = 5) flat out uint vInstance;
+layout(location = 5) flat out uvec2 vIds; // material, object id
 
 void main()
 {
@@ -25,6 +25,6 @@ void main()
 	vTangent = mat3(inst.model) * inTangent;
 	vBitangent = mat3(inst.model) * inBitangent;
 	vUV = inUV;
-	vInstance = uint(gl_InstanceIndex);
+	vIds = inst.ids.xy;
 	gl_Position = uView.viewProj * world;
 }

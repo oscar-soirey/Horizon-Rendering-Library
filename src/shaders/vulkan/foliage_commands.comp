@@ -1,0 +1,40 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Draw commands of a foliage kind from the counts of foliage_cull.comp:
+// one indexed command per part and mesh LOD, one command for the impostors.
+layout(local_size_x = 16) in;
+#include "foliage.glsl"
+
+layout(set = 0, binding = 0, std140) uniform FoliageData { FOLIAGE_UNIFORM_BLOCK } uFol;
+// counts[4], one, padding, then 12 indexed commands, then the impostor command.
+layout(set = 0, binding = 4, std430) buffer Draw { uint words[]; };
+
+void main()
+{
+	uint i = gl_LocalInvocationIndex;
+	if (i < 12u)
+	{
+		uint lod = i % 3u;
+		uvec4 r = uFol.lods[i];
+		uint base = 8u + i * 5u;
+		words[base + 0u] = r.x;
+		words[base + 1u] = r.w != 0u ? words[lod] : 0u;
+		words[base + 2u] = r.y;
+		words[base + 3u] = r.z;
+		words[base + 4u] = lod * uFol.ids.w;
+	}
+	else if (i == 12u)
+	{
+		uint base = 8u + 12u * 5u;
+		words[base + 0u] = 6u;
+		words[base + 1u] = uFol.ids.y != 0xFFFFFFFFu ? words[FOLIAGE_IMPOSTOR] : 0u;
+		words[base + 2u] = 0u;
+		words[base + 3u] = FOLIAGE_IMPOSTOR * uFol.ids.w;
+	}
+	else if (i == 13u)
+	{
+		// Draw counts read by vkCmdDraw*IndirectCount: 1 impostor command, 3 LOD commands per part.
+		words[4] = 1u;
+		words[5] = 3u;
+	}
+}

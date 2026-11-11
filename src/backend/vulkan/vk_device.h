@@ -122,6 +122,9 @@ public:
 
 	// Destroys a resource once no submitted command buffer can still use it.
 	void Defer(std::function<void()> fn);
+	// GPU memory used by this process and the amount it can use before the
+	// system starts evicting (VK_EXT_memory_budget when available, else estimates).
+	void MemoryUsage(uint64_t& usedBytes, uint64_t& budgetBytes);
 	// Waits for the GPU and runs every deferred destruction now.
 	void DrainDeletions();
 

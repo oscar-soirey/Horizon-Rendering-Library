@@ -48,6 +48,65 @@ void WriteBindless(const Texture& t)
 	vkUpdateDescriptorSets(Dev().device, 1, &w, 0, nullptr);
 }
 
+// Instance of the scene acceleration structure. Alpha tested geometry is
+// marked non-opaque: shadow rays test its texture (lighting.glsl) through its
+// entry in `table`.
+void AddRayInstance(RayScene& out, const glm::mat4& model, const MeshGPU& gpu, uint32_t material, bool masked)
+{
+	VkAccelerationStructureInstanceKHR inst{};
+	const glm::mat4 t = glm::transpose(model);
+	std::memcpy(&inst.transform, &t, sizeof(inst.transform));
+	inst.mask = 0xFF;
+	inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+	if (masked)
+	{
+		inst.flags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+		inst.instanceCustomIndex = (uint32_t)out.table.size() & 0xFFFFFFu;
+		out.table.push_back({gpu.lods[0].firstIndex, (int32_t)gpu.lods[0].vertexOffset, material, 0u});
+	}
+	inst.accelerationStructureReference = gpu.blas.address;
+	out.instances.push_back(inst);
+}
+
+uint32_t AllocBindlessSlot()
+{
+	if (!R.freeSlots.empty())
+	{
+		const uint32_t slot = R.freeSlots.back();
+		R.freeSlots.pop_back();
+		return slot;
+	}
+	if (R.nextSlot >= Dev().caps.maxBindlessTextures)
+	{
+		ReportError("texture limit reached (" + std::to_string(Dev().caps.maxBindlessTextures) + ")");
+		return kNoSlot;
+	}
+	return R.nextSlot++;
+}
+
+void WriteBindlessView(uint32_t slot, VkImageView view, VkSampler sampler)
+{
+	// Both entries of the slot (UNORM / sRGB in colour textures) get the same view.
+	VkDescriptorImageInfo infos[2] = {
+		{sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+		{sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+	VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+	w.dstSet = R.bindlessSet;
+	w.dstBinding = 0;
+	w.dstArrayElement = slot * 2u;
+	w.descriptorCount = 2;
+	w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	w.pImageInfo = infos;
+	vkUpdateDescriptorSets(Dev().device, 1, &w, 0, nullptr);
+}
+
+void FreeBindlessSlot(uint32_t slot)
+{
+	if (slot == kNoSlot) return;
+	// Reused only once no in-flight frame can sample it.
+	Dev().Defer([slot]() { R.freeSlots.push_back(slot); });
+}
+
 bool CreateTextureInternal(Texture& t, const unsigned char* rgba, int width, int height)
 {
 	Device& dev = Dev();
@@ -109,10 +168,13 @@ namespace
 {
 VkBufferUsageFlags GeometryUsage(bool index)
 {
-	VkBufferUsageFlags u = (index ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) |
+	// The vertex pool is also written by the skinning compute pass.
+	VkBufferUsageFlags u = (index ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : (VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) |
 		VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 	if (Dev().caps.rayQuery)
-		u |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+		// Shadow rays read the triangles of alpha tested surfaces (lighting.glsl).
+		u |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	return u;
 }
 
@@ -157,23 +219,21 @@ void DestroyBlas(Blas& blas)
 	blas = Blas{};
 }
 
-namespace
-{
-void BuildBlas(MeshGPU& mesh)
+bool BuildBlas(Blas& blas, VkDeviceAddress vertices, uint32_t stride, uint32_t vertexCount,
+	VkDeviceAddress indices, uint32_t indexCount, bool opaque)
 {
 	Device& dev = Dev();
-	const MeshLOD& lod = mesh.lods[0];
 	VkAccelerationStructureGeometryKHR geo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
 	geo.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-	geo.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+	geo.flags = opaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
 	auto& tri = geo.geometry.triangles;
 	tri.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
 	tri.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-	tri.vertexData.deviceAddress = R.vertexBuffer.address + VkDeviceSize(lod.vertexOffset) * sizeof(HRL_Vertex3D);
-	tri.vertexStride = sizeof(HRL_Vertex3D);
-	tri.maxVertex = lod.vertexCount - 1;
+	tri.vertexData.deviceAddress = vertices;
+	tri.vertexStride = stride;
+	tri.maxVertex = vertexCount - 1;
 	tri.indexType = VK_INDEX_TYPE_UINT32;
-	tri.indexData.deviceAddress = R.indexBuffer.address + VkDeviceSize(lod.firstIndex) * sizeof(uint32_t);
+	tri.indexData.deviceAddress = indices;
 
 	VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
 	info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
@@ -181,34 +241,34 @@ void BuildBlas(MeshGPU& mesh)
 	info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
 	info.geometryCount = 1;
 	info.pGeometries = &geo;
-	const uint32_t primitives = lod.indexCount / 3;
+	const uint32_t primitives = indexCount / 3;
 	VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
 	R.buildSizesAS(dev.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &primitives, &sizes);
 
 	Buffer scratch;
 	if (!dev.CreateBuffer(sizes.accelerationStructureSize,
-			VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, false, mesh.blas.storage, "blas") ||
+			VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, false, blas.storage, "blas") ||
 		!dev.CreateBuffer(sizes.buildScratchSize + R.scratchAlignment,
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, false, scratch, "blas scratch"))
 	{
-		dev.DestroyBuffer(mesh.blas.storage, false);
-		return;
+		dev.DestroyBuffer(blas.storage, false);
+		return false;
 	}
 	VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-	ci.buffer = mesh.blas.storage.handle;
+	ci.buffer = blas.storage.handle;
 	ci.size = sizes.accelerationStructureSize;
 	ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-	if (R.createAS(dev.device, &ci, nullptr, &mesh.blas.handle) != VK_SUCCESS)
+	if (R.createAS(dev.device, &ci, nullptr, &blas.handle) != VK_SUCCESS)
 	{
-		dev.DestroyBuffer(mesh.blas.storage, false);
+		dev.DestroyBuffer(blas.storage, false);
 		dev.DestroyBuffer(scratch, false);
-		return;
+		return false;
 	}
-	info.dstAccelerationStructure = mesh.blas.handle;
+	info.dstAccelerationStructure = blas.handle;
 	info.scratchData.deviceAddress = AlignUp(scratch.address, R.scratchAlignment);
 
 	VkCommandBuffer cmd = dev.UploadCmd();
-	// The geometry was copied into the pool by this same command buffer.
+	// The geometry may have been copied by this same command buffer.
 	VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
 	mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
 	mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -224,15 +284,25 @@ void BuildBlas(MeshGPU& mesh)
 	dev.DestroyBuffer(scratch);
 
 	VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
-	ai.accelerationStructure = mesh.blas.handle;
-	mesh.blas.address = R.addressAS(dev.device, &ai);
+	ai.accelerationStructure = blas.handle;
+	blas.address = R.addressAS(dev.device, &ai);
+	return true;
+}
+
+namespace
+{
+void BuildBlas(MeshGPU& mesh)
+{
+	const MeshLOD& lod = mesh.lods[0];
+	BuildBlas(mesh.blas, R.vertexBuffer.address + VkDeviceSize(lod.vertexOffset) * sizeof(HRL_Vertex3D), sizeof(HRL_Vertex3D),
+		lod.vertexCount, R.indexBuffer.address + VkDeviceSize(lod.firstIndex) * sizeof(uint32_t), lod.indexCount, true);
 }
 } // namespace
 
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
-int CreateMesh(HRL_id id, HRL_uint level, const HRL_Vertex3D* vertices, size_t vertexCount, const HRL_uint* indices, size_t indexCount)
+int CreateMesh(HRL_id id, HRL_uint level, const HRL_Vertex3D* vertices, size_t vertexCount, const HRL_uint* indices, size_t indexCount, bool rayTraced)
 {
 	if (!R.initialized || !vertices || vertexCount == 0) return HRL_FALSE;
 	Device& dev = Dev();
@@ -277,8 +347,35 @@ int CreateMesh(HRL_id id, HRL_uint level, const HRL_Vertex3D* vertices, size_t v
 	if (level == 0 && dev.caps.rayQuery)
 	{
 		DestroyBlas(mesh.blas);
-		BuildBlas(mesh);
+		if (rayTraced) BuildBlas(mesh);
 	}
+	return HRL_TRUE;
+}
+
+int CreateSkeletalMesh(HRL_id id, const HRL_SkeletalVertex* vertices, size_t vertexCount, const HRL_uint* indices, size_t indexCount)
+{
+	static_assert(sizeof(HRL_SkeletalVertex) == 88, "must match SkinVertex in skin.comp");
+	static_assert(sizeof(HRL_Vertex3D) == 56, "skin.comp writes 14 floats per vertex");
+	if (!R.initialized || !vertices || vertexCount == 0) return HRL_FALSE;
+	Device& dev = Dev();
+	// The pool range starts with the bind pose; the skinning pass overwrites it.
+	// Skinned geometry is not in the ray tracing scene (no acceleration structure).
+	std::vector<HRL_Vertex3D> bindPose(vertexCount);
+	for (size_t i = 0; i < vertexCount; ++i) bindPose[i] = vertices[i].vertex;
+	if (CreateMesh(id, 0, bindPose.data(), vertexCount, indices, indexCount, false) != HRL_TRUE) return HRL_FALSE;
+
+	MeshGPU& mesh = R.meshes[id];
+	dev.DestroyBuffer(mesh.skinSource);
+	const VkDeviceSize bytes = vertexCount * sizeof(HRL_SkeletalVertex);
+	if (!dev.CreateBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false, mesh.skinSource, "skin source") ||
+		!dev.UploadToBuffer(mesh.skinSource, 0, vertices, bytes))
+	{
+		DeleteMesh(id);
+		SetErrorCode(HRL_OUT_OF_MEMORY, HRL_SEVERITY_ERROR, "Vulkan: skeletal mesh upload failed");
+		return HRL_FALSE;
+	}
+	mesh.skinVertexCount = (uint32_t)vertexCount;
+	mesh.poseSerial = 0;
 	return HRL_TRUE;
 }
 
@@ -300,6 +397,7 @@ void DeleteMesh(HRL_id id)
 	std::vector<MeshLOD> lods = it->second.lods;
 	Dev().Defer([lods]() mutable { for (MeshLOD& l : lods) FreeLOD(l); });
 	DestroyBlas(it->second.blas);
+	Dev().DestroyBuffer(it->second.skinSource);
 	R.meshes.erase(it);
 	++R.meshTableRevision;
 }
@@ -331,6 +429,32 @@ void DeleteTexture(HRL_id id)
 }
 
 bool IsValidTexture(HRL_id id) { return R.textures.count(id) != 0; }
+
+int ReadTexturePixels(HRL_id id, std::vector<unsigned char>* rgba, int* width, int* height)
+{
+	Device& dev = Dev();
+	auto it = R.textures.find(id);
+	if (!rgba || it == R.textures.end() || !it->second.image) return HRL_FALSE;
+	Image& image = it->second.image;
+	const uint32_t w = image.extent.width, h = image.extent.height;
+	Buffer readback;
+	if (!dev.CreateBuffer(VkDeviceSize(w) * h * 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, readback)) return HRL_FALSE;
+	VkCommandBuffer cmd = dev.UploadCmd();
+	const VkImageLayout previous = image.layout;
+	dev.Transition(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	VkBufferImageCopy region{};
+	region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+	region.imageExtent = {w, h, 1};
+	vkCmdCopyImageToBuffer(cmd, image.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.handle, 1, &region);
+	dev.Transition(cmd, image, previous == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : previous);
+	dev.FlushUploads(true);
+	rgba->resize(size_t(w) * h * 4u);
+	std::memcpy(rgba->data(), readback.mapped, rgba->size());
+	dev.DestroyBuffer(readback, false);
+	if (width) *width = (int)w;
+	if (height) *height = (int)h;
+	return HRL_TRUE;
+}
 
 void GetTextureSize(HRL_id id, int* width, int* height)
 {

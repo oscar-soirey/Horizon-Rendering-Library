@@ -1,0 +1,89 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// GPU culling of the instances of one foliage kind for one view. One work
+// group per cell: the cell is tested first (frustum, distance, occlusion),
+// then its instances. Each visible instance goes to the list of its level of
+// detail; near a LOD boundary it goes to both levels with complementary
+// dithering (cross-fade).
+layout(local_size_x = 64) in;
+#include "cull_common.glsl"
+#include "foliage.glsl"
+
+layout(set = 0, binding = 0, std140) uniform FoliageData { FOLIAGE_UNIFORM_BLOCK } uFol;
+layout(set = 0, binding = 1, std430) readonly buffer Instances { FoliageInstance instances[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Visible { uint visible[]; };
+layout(set = 0, binding = 3, std430) readonly buffer Cells { FoliageCell cells[]; };
+layout(set = 0, binding = 4, std430) buffer Draw { uint counts[]; };
+layout(set = 0, binding = 5) uniform sampler2D uHzb;
+layout(set = 0, binding = 6, std140) uniform View { CullViewData uCull; };
+
+shared bool sVisible;
+
+bool BoxInFrustum(vec3 lo, vec3 hi)
+{
+	for (int i = 0; i < 6; ++i)
+	{
+		vec4 p = uCull.planes[i];
+		vec3 v = vec3(p.x >= 0.0 ? hi.x : lo.x, p.y >= 0.0 ? hi.y : lo.y, p.z >= 0.0 ? hi.z : lo.z);
+		if (dot(p.xyz, v) + p.w < 0.0) return false;
+	}
+	return true;
+}
+
+void Emit(uint region, uint instance, float coverage, bool complementary)
+{
+	uint slot = atomicAdd(counts[region], 1u);
+	visible[region * uFol.ids.w + slot] = PackVisible(instance, coverage, complementary);
+}
+
+void main()
+{
+	FoliageCell cell = cells[gl_WorkGroupID.x];
+	vec3 cam = uCull.camPos.xyz;
+	bool shadow = (uCull.params.w & CULL_FLAG_SHADOW) != 0u;
+	bool occlusion = (uCull.params.w & CULL_FLAG_OCCLUSION) != 0u;
+	if (gl_LocalInvocationIndex == 0u)
+	{
+		vec3 nearest = clamp(cam, cell.lo.xyz, cell.hi.xyz);
+		bool v = cell.range.y > 0u && distance(nearest, cam) <= uFol.draw.x && BoxInFrustum(cell.lo.xyz, cell.hi.xyz);
+		if (v && occlusion) v = !BoxOccluded(uHzb, uCull.viewProj, uCull.hzb, cell.lo.xyz, cell.hi.xyz);
+		sVisible = v;
+	}
+	barrier();
+	if (!sVisible) return;
+
+	int meshLods = int(uFol.heights.z);
+	float impostorStart = uFol.lodEnd.w;
+	for (uint k = gl_LocalInvocationIndex; k < cell.range.y; k += 64u)
+	{
+		uint index = cell.range.x + k;
+		FoliageInstance inst = instances[index];
+		float scale = inst.positionScale.w;
+		vec3 center = inst.positionScale.xyz + QuatRotate(inst.rotation, uFol.bounds.xyz * scale);
+		// The wind and the interactors move the plant a little out of its bounds.
+		float radius = uFol.bounds.w * scale * 1.15;
+		float d = distance(center, cam);
+		if (d - radius > uFol.draw.x || !SphereInFrustum(uCull.planes, center, radius)) continue;
+		if (occlusion && BoxOccluded(uHzb, uCull.viewProj, uCull.hzb, center - vec3(radius), center + vec3(radius))) continue;
+
+		float fade = clamp((uFol.draw.x - d) / max(uFol.draw.x - uFol.draw.y, 1e-3), 0.0, 1.0);
+		// Level of detail from the distance to the camera (also for the shadow views).
+		uint level = 0u;
+		while (int(level) < meshLods - 1 && d >= uFol.lodEnd[level]) ++level;
+		bool lastMesh = int(level) == meshLods - 1;
+		float end = lastMesh ? (impostorStart > 0.0 ? impostorStart : 1e30) : uFol.lodEnd[level];
+		if (impostorStart > 0.0 && d >= impostorStart) { level = FOLIAGE_IMPOSTOR; end = 1e30; }
+		uint next = lastMesh ? FOLIAGE_IMPOSTOR : level + 1u;
+
+		if (shadow)
+		{
+			// One level, no dithering: the shadow of a fading plant goes at mid-fade.
+			if (fade >= 0.5) Emit(level, index, 1.0, false);
+			continue;
+		}
+		float band = end * uFol.draw.z;
+		float t = level != FOLIAGE_IMPOSTOR && end < 1e29 ? clamp((d - (end - band)) / max(band, 1e-4), 0.0, 1.0) : 0.0;
+		if (t < 1.0) Emit(level, index, (1.0 - t) * fade, false);
+		if (t > 0.0) Emit(next, index, t * fade, true);
+	}
+}

@@ -37,7 +37,9 @@ layout(set = 0, binding = 0, std140) uniform ViewData
 	vec4 fogColor;
 	vec4 fogParams;       // x : start, y : end, z : density
 	vec4 envParams;       // x : specular mip count - 1, y : intensity
-	uvec4 counts;         // x : light count, y : VIEW_FLAG_*, z : debug view
+	uvec4 counts;         // x : light count, y : VIEW_FLAG_*, z : debug view, w : interactor count
+	vec4 wind;            // xy : direction (x, z), z : strength, w : gustiness
+	vec4 interactors[16]; // xyz : centre, w : radius (foliage / grass bending)
 } uView;
 
 struct Instance

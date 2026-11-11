@@ -92,6 +92,7 @@ set(HRL_SOURCES
     src/frontend/mesh.cpp
     src/frontend/skeletal.cpp
     src/frontend/landscape.cpp
+    src/frontend/foliage.cpp
     src/frontend/light.cpp
     src/frontend/material.cpp
     src/frontend/texture.cpp
@@ -188,6 +189,34 @@ if(HRL_ENABLE_VULKAN)
     hrl_vk_shader(env_cube_comp    env_cube.comp)
     hrl_vk_shader(env_filter_comp  env_filter.comp)
     hrl_vk_shader(brdf_lut_comp    brdf_lut.comp)
+    hrl_vk_shader(cull_comp        cull.comp)
+    hrl_vk_shader(hzb_comp         hzb.comp)
+    hrl_vk_shader(landscape_vert   landscape.vert)
+    hrl_vk_shader(landscape_shadow_vert landscape.vert HRL_SHADOW)
+    hrl_vk_shader(mesh_land_frag   mesh.frag HRL_LANDSCAPE)
+    hrl_vk_shader(mesh_land_rq_frag mesh.frag HRL_LANDSCAPE HRL_RAY_QUERY)
+    hrl_vk_shader(foliage_cull_comp foliage_cull.comp)
+    hrl_vk_shader(foliage_commands_comp foliage_commands.comp)
+    hrl_vk_shader(foliage_vert     foliage.vert)
+    hrl_vk_shader(foliage_shadow_vert foliage.vert HRL_SHADOW)
+    hrl_vk_shader(foliage_shadow_at_vert foliage.vert HRL_SHADOW HRL_ALPHA_TEST)
+    hrl_vk_shader(mesh_fol_frag    mesh.frag HRL_FOLIAGE)
+    hrl_vk_shader(mesh_fol_at_frag mesh.frag HRL_FOLIAGE HRL_ALPHA_TEST)
+    hrl_vk_shader(mesh_fol_rq_frag mesh.frag HRL_FOLIAGE HRL_RAY_QUERY)
+    hrl_vk_shader(mesh_fol_at_rq_frag mesh.frag HRL_FOLIAGE HRL_ALPHA_TEST HRL_RAY_QUERY)
+    hrl_vk_shader(impostor_vert    impostor.vert)
+    hrl_vk_shader(impostor_shadow_vert impostor.vert HRL_SHADOW)
+    hrl_vk_shader(impostor_frag    impostor.frag)
+    hrl_vk_shader(impostor_rq_frag impostor.frag HRL_RAY_QUERY)
+    hrl_vk_shader(impostor_shadow_frag impostor.frag HRL_SHADOW)
+    hrl_vk_shader(impostor_bake_vert impostor_bake.vert)
+    hrl_vk_shader(impostor_bake_frag impostor_bake.frag)
+    hrl_vk_shader(impostor_bake_at_frag impostor_bake.frag HRL_ALPHA_TEST)
+    hrl_vk_shader(grass_cull_comp  grass_cull.comp)
+    hrl_vk_shader(grass_vert       grass.vert)
+    hrl_vk_shader(grass_shadow_vert grass.vert HRL_SHADOW)
+    hrl_vk_shader(grass_frag       grass.frag)
+    hrl_vk_shader(grass_rq_frag    grass.frag HRL_RAY_QUERY)
 
     add_custom_command(
         OUTPUT ${HRL_GENERATED_DIR}/hrl_vk_shaders.cpp ${HRL_GENERATED_DIR}/hrl_vk_shaders.h
@@ -208,6 +237,11 @@ if(HRL_ENABLE_VULKAN)
         src/backend/vulkan/vk_resources.cpp
         src/backend/vulkan/vk_environment.cpp
         src/backend/vulkan/vk_scene_data.cpp
+        src/backend/vulkan/vk_culling.cpp
+        src/backend/vulkan/vk_landscape.cpp
+        src/backend/vulkan/vk_foliage.cpp
+        src/backend/vulkan/vk_impostor.cpp
+        src/backend/vulkan/vk_grass.cpp
         src/backend/vulkan/vk_renderer.cpp
         src/backend/vulkan/vulkan_backend.cpp
     )

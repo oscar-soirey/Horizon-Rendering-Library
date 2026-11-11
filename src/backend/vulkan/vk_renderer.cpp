@@ -2,6 +2,7 @@
 // scene, picking and screenshots.
 #include "vk_renderer.h"
 #include "vk_renderer_internal.h"
+#include "vk_jobs.h"
 
 namespace hrlvk
 {
@@ -24,6 +25,25 @@ void DestroyTlas(Tlas& t)
 	Dev().DestroyBuffer(t.instances);
 	Dev().DestroyBuffer(t.scratch);
 	t = Tlas{};
+}
+
+void DestroySceneTargets(SceneGPU& s);
+
+// Everything a scene owns on the GPU.
+void DestroySceneResources(SceneGPU& s)
+{
+	Device& dev = Dev();
+	DestroySceneTargets(s);
+	DestroyEnvironment(s.env);
+	for (Tlas& t : s.tlas) DestroyTlas(t);
+	for (HzbImage& h : s.hzb) DestroyHzb(h);
+	s.hzb.clear();
+	for (Buffer* b : {&s.instances, &s.records, &s.lodRanges, &s.state, &s.commands, &s.counts}) dev.DestroyBuffer(*b);
+	for (SceneGPU::Readback& rb : s.readback)
+	{
+		dev.DestroyBuffer(rb.counts);
+		dev.DestroyBuffer(rb.state);
+	}
 }
 
 void DestroySceneTargets(SceneGPU& s)
@@ -89,35 +109,52 @@ void SetViewport(VkCommandBuffer cmd, float x, float y, float w, float h, bool f
 	vkCmdSetScissor(cmd, 0, 1, &sc);
 }
 
-// Writes the indirect commands of the items accepted by `accept`, grouped by
-// bucket, and returns the slice + per-bucket ranges.
+// Indirect commands written on the CPU, grouped by bucket.
 struct IndirectList
 {
 	FrameSlice slice;
 	uint32_t first[BucketCount]{};
 	uint32_t count[BucketCount]{};
 	uint32_t total = 0;
+	VkDeviceSize countOffset = 0; // counts of the buckets, in the same buffer
 };
 
-template <typename Accept>
-IndirectList BuildIndirect(const SceneData& data, Accept accept)
+// Translucent meshes visible from a camera, sorted back to front. They are
+// few and their order matters, so they stay on the CPU.
+IndirectList BuildTranslucent(SceneData& data, const Camera& cam, const FrustumPlaneSet& frustum,
+	const HRL_Viewport* viewport, float viewportHeight)
 {
 	IndirectList list;
 	std::vector<const DrawItem*> selected[BucketCount];
-	for (const DrawItem& item : data.items)
-		if (accept(item)) selected[data.materialBuckets[item.material]].push_back(&item);
+	for (uint32_t index : data.translucentItems)
+	{
+		DrawItem& item = data.items[index];
+		if (!item.noCull && !IsMeshVisible(item.mesh, item.model, frustum)) continue;
+		const glm::vec3 center = glm::vec3(item.model * glm::vec4(item.mesh->bounds_center_, 1.f));
+		const glm::vec3 delta = center - cam.position;
+		item.distance2 = glm::dot(delta, delta);
+		int lod = SelectMeshLOD(item.mesh, item.model, cam.view, cam.projGL, viewportHeight, viewport);
+		lod = glm::clamp(lod, 0, (int)item.gpu->lods.size() - 1);
+		while (lod > 0 && !item.gpu->lods[(size_t)lod].valid) --lod;
+		item.lod = (uint32_t)lod;
+		const_cast<HRL_Mesh*>(item.mesh)->last_lod_level_ = lod;
+		selected[data.materialBuckets[item.material]].push_back(&item);
+	}
 	for (uint32_t b = 0; b < BucketCount; ++b)
 	{
-		// Front to back: maximises early depth rejection.
 		std::sort(selected[b].begin(), selected[b].end(),
-			[](const DrawItem* a, const DrawItem* c) { return a->distance2 < c->distance2; });
+			[](const DrawItem* x, const DrawItem* y) { return x->distance2 > y->distance2; });
 		list.first[b] = list.total;
 		list.count[b] = (uint32_t)selected[b].size();
 		list.total += list.count[b];
 	}
 	if (!list.total) return list;
-	list.slice = Dev().AllocFrame(VkDeviceSize(list.total) * sizeof(VkDrawIndexedIndirectCommand), 16);
-	if (!list.slice.ptr) { list.total = 0; return list; }
+	// Commands, then the draw count of each bucket (see DrawIndirect).
+	const VkDeviceSize commandBytes = VkDeviceSize(list.total) * sizeof(VkDrawIndexedIndirectCommand);
+	list.slice = Dev().AllocFrame(commandBytes + BucketCount * sizeof(uint32_t), 16);
+	if (!list.slice.ptr) { list = IndirectList{}; return list; }
+	list.countOffset = list.slice.offset + commandBytes;
+	std::memcpy(static_cast<char*>(list.slice.ptr) + commandBytes, list.count, sizeof(list.count));
 	auto* cmds = static_cast<VkDrawIndexedIndirectCommand*>(list.slice.ptr);
 	uint32_t i = 0;
 	for (uint32_t b = 0; b < BucketCount; ++b)
@@ -132,8 +169,11 @@ IndirectList BuildIndirect(const SceneData& data, Accept accept)
 void DrawIndirect(VkCommandBuffer cmd, const IndirectList& list, uint32_t bucket)
 {
 	if (!list.count[bucket]) return;
-	vkCmdDrawIndexedIndirect(cmd, list.slice.buffer,
+	// Same entry point as the GPU culled draws. (Mixing it with plain indirect
+	// draws in one render pass loses the plain draws on Mesa lavapipe 25.)
+	vkCmdDrawIndexedIndirectCount(cmd, list.slice.buffer,
 		list.slice.offset + VkDeviceSize(list.first[bucket]) * sizeof(VkDrawIndexedIndirectCommand),
+		list.slice.buffer, list.countOffset + bucket * sizeof(uint32_t),
 		list.count[bucket], sizeof(VkDrawIndexedIndirectCommand));
 }
 
@@ -168,19 +208,98 @@ void SetGeometryState(VkCommandBuffer cmd, VkDescriptorSet viewSet)
 	BindGeometry(cmd);
 }
 
-// The exposure of the first post-process material of the scene drives the tone mapper.
-float SceneExposure(const HRL_SceneFrame& frame)
+// Post-processing settings of a scene, read from the first post-process
+// material of its viewports ("exposure" in stops, "bloomStrength").
+struct PostSettings
 {
+	float exposure = 0.f;
+	float bloom = 0.f; // share of the blurred image mixed into the scene, 0 : off
+};
+
+PostSettings ScenePostSettings(const HRL_SceneFrame& frame)
+{
+	PostSettings post;
 	for (const auto& [vid, viewport] : frame.scene->viewports)
 		if (viewport)
 			for (const auto& [pid, pp] : viewport->post_processes)
 			{
 				if (!pp) continue;
 				auto m = frame.materials->find(pp->material_);
-				if (m != frame.materials->end() && m->second)
-					return MaterialFloat(m->second, "exposure", 0.f);
+				if (m == frame.materials->end() || !m->second) continue;
+				post.exposure = MaterialFloat(m->second, "exposure", 0.f);
+				// Energy conserving bloom: 4 % of the image is replaced by its blur
+				// at strength 1 (the default of the post-process material).
+				post.bloom = glm::clamp(0.04f * MaterialFloat(m->second, "bloomStrength", 1.f), 0.f, 1.f);
+				return post;
 			}
-	return 0.f;
+	return post;
+}
+
+VkDescriptorSet MakeSamplerSet(VkDescriptorSetLayout layout, const VkImageView* views, uint32_t count)
+{
+	const VkDescriptorSet set = AllocFrameSet(layout);
+	if (!set) return set;
+	VkDescriptorImageInfo infos[2];
+	VkWriteDescriptorSet writes[2]{};
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		infos[i] = {R.linearClamp, views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+		writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+		writes[i].dstSet = set;
+		writes[i].dstBinding = i;
+		writes[i].descriptorCount = 1;
+		writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		writes[i].pImageInfo = &infos[i];
+	}
+	vkUpdateDescriptorSets(Dev().device, count, writes, 0, nullptr);
+	return set;
+}
+
+struct BloomPush { float texelX, texelY; uint32_t mode; };
+
+// Adds the bloom passes: the HDR image is downsampled level by level, then the
+// levels are upsampled and accumulated back. Returns the half resolution
+// result, or `hdr` itself when the image is too small.
+FrameGraph::Handle AddBloomPasses(FrameGraph& graph, FrameGraph::Handle hdr, uint32_t width, uint32_t height)
+{
+	std::vector<FrameGraph::Handle> levels;
+	for (uint32_t i = 0; i < kMaxBloomLevels; ++i)
+	{
+		ImageDesc desc;
+		desc.format = kBloomFormat;
+		desc.width = width >> (i + 1);
+		desc.height = height >> (i + 1);
+		if (desc.width < 4 || desc.height < 4) break;
+		desc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		const FrameGraph::Handle level = graph.CreateTransient(desc, "bloom level");
+		if (!graph.GetImage(level).handle) break;
+		levels.push_back(level);
+	}
+	if (levels.empty()) return hdr;
+
+	auto addPass = [&](const char* name, FrameGraph::Handle source, FrameGraph::Handle target, uint32_t mode)
+	{
+		const Image& src = graph.GetImage(source);
+		const Image& dst = graph.GetImage(target);
+		const VkDescriptorSet set = MakeSamplerSet(R.samplerLayout, &src.view, 1);
+		if (!set) return;
+		const BloomPush push{1.f / (float)src.extent.width, 1.f / (float)src.extent.height, mode};
+		const float w = (float)dst.extent.width, h = (float)dst.extent.height;
+		const VkPipeline pipeline = mode == 2 ? R.bloomUpPipeline : R.bloomDownPipeline;
+		graph.AddPass(name, [=](VkCommandBuffer c)
+		{
+			SetViewport(c, 0, 0, w, h, false);
+			vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+			vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.bloomLayout, 0, 1, &set, 0, nullptr);
+			vkCmdPushConstants(c, R.bloomLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+			vkCmdDraw(c, 3, 1, 0, 0);
+		}).Use(source, Access::Sampled)
+		  .Color(target, mode == 2 ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+	};
+	addPass("bloom downsample", hdr, levels[0], 0);
+	for (size_t i = 1; i < levels.size(); ++i) addPass("bloom downsample", levels[i - 1], levels[i], 1);
+	for (size_t i = levels.size() - 1; i > 0; --i) addPass("bloom upsample", levels[i], levels[i - 1], 2);
+	return levels[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -204,23 +323,27 @@ void TlasBuildInfo(const Tlas& tlas, VkAccelerationStructureGeometryKHR& geo, Vk
 
 // Sizes the acceleration structure for the draw list and writes its instance
 // buffer. The build is recorded later by RecordTlasBuild.
-bool PrepareTlas(Tlas& tlas, const std::vector<DrawItem>& items)
+// Everything that casts ray traced shadows: meshes, landscapes, and the
+// foliage instances near the camera (kRayFoliageDistance, kRayFoliageBudget).
+RayScene CollectRayScene(const hrl_scene_t* scene, SceneData& data, const HRL_SceneFrame& frame, const glm::vec3& camera)
+{
+	RayScene out;
+	out.table.push_back({0u, 0, 0xFFFFFFFFu, 0u}); // entry 0: opaque geometry
+	CollectLandscapeRayInstances(scene, out.instances);
+	for (const DrawItem& item : data.items)
+	{
+		const Bucket bucket = data.materialBuckets[item.material];
+		// Translucent surfaces cast no shadow (as with shadow maps).
+		if (!item.gpu->blas.handle || IsTranslucent(bucket)) continue;
+		AddRayInstance(out, item.model, *item.gpu, item.material, IsMasked(bucket));
+	}
+	CollectFoliageRayInstances(scene, data, frame, camera, out);
+	return out;
+}
+
+bool PrepareTlas(Tlas& tlas, const std::vector<VkAccelerationStructureInstanceKHR>& instances)
 {
 	Device& dev = Dev();
-	std::vector<VkAccelerationStructureInstanceKHR> instances;
-	instances.reserve(items.size());
-	for (const DrawItem& item : items)
-	{
-		if (!item.gpu->blas.handle) continue;
-		VkAccelerationStructureInstanceKHR inst{};
-		const glm::mat4 t = glm::transpose(item.model);
-		std::memcpy(&inst.transform, &t, sizeof(inst.transform));
-		inst.instanceCustomIndex = item.instance & 0xFFFFFFu;
-		inst.mask = 0xFF;
-		inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-		inst.accelerationStructureReference = item.gpu->blas.address;
-		instances.push_back(inst);
-	}
 	const uint32_t count = (uint32_t)instances.size();
 
 	if (!tlas.handle || tlas.capacity < count)
@@ -255,6 +378,18 @@ bool PrepareTlas(Tlas& tlas, const std::vector<DrawItem>& items)
 
 void RecordTlasBuild(VkCommandBuffer cmd, const Tlas& tlas)
 {
+	{
+		// Bottom level structures built by the upload command buffer of this frame.
+		VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+		mb.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+		mb.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+		mb.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+		mb.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+		VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+		di.memoryBarrierCount = 1;
+		di.pMemoryBarriers = &mb;
+		vkCmdPipelineBarrier2(cmd, &di);
+	}
 	VkAccelerationStructureGeometryKHR geo;
 	VkAccelerationStructureBuildGeometryInfoKHR info;
 	TlasBuildInfo(tlas, geo, info);
@@ -303,7 +438,7 @@ bool RendererInit(uint32_t width, uint32_t height)
 		if (!R.createAS || !R.destroyAS || !R.buildSizesAS || !R.buildAS || !R.addressAS) return false;
 	}
 
-	if (!CreatePipelines()) return false;
+	if (!CreatePipelineCache() || !CreatePipelines()) return false;
 
 	VkSamplerCreateInfo sc{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
 	sc.magFilter = sc.minFilter = VK_FILTER_LINEAR;
@@ -351,14 +486,16 @@ void RendererShutdown()
 	dev.WaitIdle();
 	WritePendingScreenshots(true);
 
-	for (auto& [id, s] : R.scenes)
-	{
-		DestroySceneTargets(s);
-		DestroyEnvironment(s.env);
-		for (Tlas& t : s.tlas) DestroyTlas(t);
-	}
+	for (auto& [id, s] : R.scenes) DestroySceneResources(s);
 	R.scenes.clear();
-	for (auto& [id, m] : R.meshes) DestroyBlas(m.blas);
+	DestroyAllLandscapes();
+	DestroyAllFoliage();
+	DestroyAllGrass();
+	for (auto& [id, m] : R.meshes)
+	{
+		DestroyBlas(m.blas);
+		dev.DestroyBuffer(m.skinSource);
+	}
 	R.meshes.clear();
 	for (auto& [id, t] : R.textures) DestroyTextureInternal(t, false);
 	R.textures.clear();
@@ -376,6 +513,7 @@ void RendererShutdown()
 	// The deferred destructors use the renderer state (texture slots, geometry
 	// blocks, ray tracing entry points): run them before that state goes away.
 	dev.DrainDeletions();
+	JobsShutdown();
 	if (R.vertexBlock) { vmaClearVirtualBlock(R.vertexBlock); vmaDestroyVirtualBlock(R.vertexBlock); }
 	if (R.indexBlock) { vmaClearVirtualBlock(R.indexBlock); vmaDestroyVirtualBlock(R.indexBlock); }
 
@@ -383,15 +521,16 @@ void RendererShutdown()
 	for (auto& [key, s] : R.samplers) vkDestroySampler(d, s, nullptr);
 	if (R.linearClamp) vkDestroySampler(d, R.linearClamp, nullptr);
 	if (R.shadowSampler) vkDestroySampler(d, R.shadowSampler, nullptr);
-	for (VkPipeline p : R.meshPipelines) if (p) vkDestroyPipeline(d, p, nullptr);
-	for (VkPipeline p : {R.shadowPipeline, R.skyPipeline, R.tonemapPipeline, R.debugLinePipeline,
-			R.debugTrianglePipeline, R.envCubePipeline, R.envFilterPipeline, R.brdfLutPipeline})
-		if (p) vkDestroyPipeline(d, p, nullptr);
-	for (VkPipelineLayout l : {R.sceneLayout, R.computeLayout, R.tonemapLayout, R.debugLayout})
-		if (l) vkDestroyPipelineLayout(d, l, nullptr);
+	// Every pipeline / layout made by vk_pipelines.cpp is registered for destruction.
+	for (VkPipeline p : R.ownedPipelines) vkDestroyPipeline(d, p, nullptr);
+	if (R.pipelineCache)
+	{
+		SavePipelineCache();
+		vkDestroyPipelineCache(d, R.pipelineCache, nullptr);
+	}
+	for (VkPipelineLayout l : R.ownedPipelineLayouts) vkDestroyPipelineLayout(d, l, nullptr);
 	if (R.bindlessPool) vkDestroyDescriptorPool(d, R.bindlessPool, nullptr);
-	for (VkDescriptorSetLayout l : {R.viewLayout, R.bindlessLayout, R.imageLayout, R.samplerLayout})
-		if (l) vkDestroyDescriptorSetLayout(d, l, nullptr);
+	for (VkDescriptorSetLayout l : R.ownedSetLayouts) vkDestroyDescriptorSetLayout(d, l, nullptr);
 	R = State{};
 }
 
@@ -416,9 +555,7 @@ void DeleteScene(HRL_id id)
 {
 	auto it = R.scenes.find(id);
 	if (it == R.scenes.end()) return;
-	DestroySceneTargets(it->second);
-	DestroyEnvironment(it->second.env);
-	for (Tlas& t : it->second.tlas) DestroyTlas(t);
+	DestroySceneResources(it->second);
 	R.scenes.erase(it);
 }
 
@@ -460,15 +597,18 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 	auto sceneIt = R.scenes.find(frame.sceneId);
 	if (sceneIt == R.scenes.end()) return;
 	SceneGPU& gpu = sceneIt->second;
+	// The scene data cache follows the changes of each frame (moved meshes):
+	// a frame it does not see forces a rebuild.
 	if (!dev.InFrame()) RendererBeginFrame();
-	if (!dev.InFrame()) return;
+	if (!dev.InFrame()) { gpu.data.built = false; return; }
 
 	// Scene images follow the window unless the scene was resized explicitly.
 	if (!gpu.explicitSize && (gpu.width != std::max(R.width, 1u) || gpu.height != std::max(R.height, 1u)))
 		CreateSceneTargets(gpu, R.width, R.height);
-	if (!gpu.ids) return;
+	if (!gpu.ids) { gpu.data.built = false; return; }
 
 	// ---- Scene data ----------------------------------------------------------
+	ReadCullingResults(gpu);
 	UpdateSceneData(gpu.data, frame);
 	SceneData& data = gpu.data;
 	const bool rayTracedShadows = R.rtShadows && dev.caps.rayQuery;
@@ -476,15 +616,18 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 	if (lighting.shadowResolution)
 		EnsureShadowMaps(lighting.shadowResolution, kCascades + (uint32_t)lighting.spotShadowLights.size());
 
-	const FrameSlice instanceSlice = dev.AllocFrame(std::max<size_t>(data.instances.size(), 1) * sizeof(InstanceData), 256);
+	// Materials of the landscapes (and other non-mesh geometry) join the table.
+	for (const auto& [landscapeId, landscape] : scene->landscapes)
+		if (landscape) MaterialIndex(data, frame, landscape->material_);
+	ResolveFoliageMaterials(scene, data, frame);
 	const FrameSlice materialSlice = dev.AllocFrame(std::max<size_t>(data.materials.size(), 1) * sizeof(MaterialData), 256);
 	const FrameSlice lightSlice = dev.AllocFrame(std::max<size_t>(lighting.lights.size(), 1) * sizeof(LightData), 256);
-	if (!instanceSlice.ptr || !materialSlice.ptr || !lightSlice.ptr) return;
-	if (!data.instances.empty()) std::memcpy(instanceSlice.ptr, data.instances.data(), data.instances.size() * sizeof(InstanceData));
+	if (!materialSlice.ptr || !lightSlice.ptr) return;
 	if (!data.materials.empty()) std::memcpy(materialSlice.ptr, data.materials.data(), data.materials.size() * sizeof(MaterialData));
 	if (!lighting.lights.empty()) std::memcpy(lightSlice.ptr, lighting.lights.data(), lighting.lights.size() * sizeof(LightData));
 
 	// ---- Frame graph ---------------------------------------------------------
+	gpu.stats.passes = gpu.stats.skinned = 0; // `drawn` comes from ReadCullingResults
 	FrameGraph graph(dev, R.transients);
 	ImageDesc hdrDesc;
 	hdrDesc.format = kHdrFormat;
@@ -505,12 +648,89 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 	if (environmentDirty)
 		graph.AddPass("environment", [&gpu, scene](VkCommandBuffer c) { RecordEnvironment(c, gpu, scene); });
 
+	// Skinning: one compute dispatch per skeletal mesh whose pose changed.
+	struct SkinJob { VkDescriptorSet set; uint32_t push[3]; };
+	std::vector<SkinJob> skinJobs;
+	for (uint32_t skinnedIndex : data.skinnedItems)
+	{
+		const DrawItem& item = data.items[skinnedIndex];
+		if (!item.gpu->skinSource || item.mesh->type_ != HRL_3D_SKELETAL_MESH) continue;
+		const HRL_SkeletalMesh* skeletal = static_cast<const HRL_SkeletalMesh*>(item.mesh);
+		if (skeletal->bone_matrices_.empty() || item.gpu->poseSerial == skeletal->pose_serial_) continue;
+		const size_t boneBytes = skeletal->bone_matrices_.size() * sizeof(glm::mat4);
+		const FrameSlice bones = dev.AllocFrame(boneBytes, 256);
+		const VkDescriptorSet set = AllocFrameSet(R.skinLayout);
+		if (!bones.ptr || !set) continue;
+		std::memcpy(bones.ptr, skeletal->bone_matrices_.data(), boneBytes);
+		const VkDescriptorBufferInfo infos[3] = {
+			{item.gpu->skinSource.handle, 0, VK_WHOLE_SIZE},
+			{bones.buffer, bones.offset, bones.size},
+			// Only the vertex range of this mesh is bound for writing.
+			{R.vertexBuffer.handle, VkDeviceSize(item.gpu->lods[0].vertexOffset) * sizeof(HRL_Vertex3D),
+				VkDeviceSize(item.gpu->skinVertexCount) * sizeof(HRL_Vertex3D)}};
+		VkWriteDescriptorSet writes[3]{};
+		for (uint32_t i = 0; i < 3; ++i)
+		{
+			writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+			writes[i].dstSet = set;
+			writes[i].dstBinding = i;
+			writes[i].descriptorCount = 1;
+			writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			writes[i].pBufferInfo = &infos[i];
+		}
+		vkUpdateDescriptorSets(dev.device, 3, writes, 0, nullptr);
+		skinJobs.push_back({set, {item.gpu->skinVertexCount, 0u, (uint32_t)skeletal->bone_matrices_.size()}});
+		item.gpu->poseSerial = skeletal->pose_serial_;
+	}
+	gpu.stats.skinned = (uint32_t)skinJobs.size();
+	if (!skinJobs.empty())
+		graph.AddPass("skinning", [skinJobs](VkCommandBuffer c)
+		{
+			// Earlier draws (previous frame, other scenes) may still read these vertices.
+			VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+			mb.srcStageMask = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT;
+			mb.srcAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
+			mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			mb.dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+			VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+			di.memoryBarrierCount = 1;
+			di.pMemoryBarriers = &mb;
+			vkCmdPipelineBarrier2(c, &di);
+
+			vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, R.skinPipeline);
+			for (const SkinJob& job : skinJobs)
+			{
+				vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, R.skinPipelineLayout, 0, 1, &job.set, 0, nullptr);
+				vkCmdPushConstants(c, R.skinPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(job.push), job.push);
+				vkCmdDispatch(c, (job.push[0] + 63u) / 64u, 1, 1);
+			}
+			// The skinned vertices are read as vertex attributes by the passes that follow.
+			mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			mb.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+			mb.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT;
+			mb.dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
+			vkCmdPipelineBarrier2(c, &di);
+		});
+
+	PrepareLandscapes(scene, graph);
+	const std::vector<FoliageDraw> foliage = PrepareFoliage(scene, data, frame, graph);
+
+	RayScene rayScene;
+	rayScene.table.push_back({0u, 0, 0xFFFFFFFFu, 0u});
 	// The shaders always declare the acceleration structure: keep a valid one
 	// bound, but only rebuild it when shadow rays are actually traced.
 	Tlas& tlas = gpu.tlas[dev.FrameNumber() % kFramesInFlight];
 	if (dev.caps.rayQuery && (rayTracedShadows || !tlas.handle))
 	{
-		if (!PrepareTlas(tlas, data.items)) return;
+		if (rayTracedShadows)
+		{
+			// Foliage near the first camera of the scene.
+			glm::vec3 camera(0.f);
+			for (const auto& [viewportId, viewport] : scene->viewports)
+				if (viewport && viewport->camera_) { camera = viewport->camera_->position_; break; }
+			rayScene = CollectRayScene(scene, data, frame, camera);
+		}
+		if (!PrepareTlas(tlas, rayScene.instances)) return;
 		graph.AddPass("tlas build", [&tlas](VkCommandBuffer c) { RecordTlasBuild(c, tlas); });
 	}
 
@@ -520,9 +740,15 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 	bool cleared = false;
 	glm::mat4 lastViewProj(1.f);
 	float lastRect[4] = {0.f, 0.f, (float)gpu.width, (float)gpu.height};
-	gpu.stats = SceneGPU::Stats{};
 
 	// Viewports in creation order (the scene stores them by ascending id).
+	// Table of the alpha tested ray tracing instances (lighting.glsl).
+	const FrameSlice rayTableSlice = dev.AllocFrame(rayScene.table.size() * sizeof(RtGeometry), 256);
+	if (!rayTableSlice.ptr) return;
+	std::memcpy(rayTableSlice.ptr, rayScene.table.data(), rayScene.table.size() * sizeof(RtGeometry));
+
+	struct ViewportRect { const HRL_Viewport* viewport; float x, y, w, h; };
+	std::vector<ViewportRect> viewports;
 	for (const auto& [viewportId, viewport] : scene->viewports)
 	{
 		if (!viewport || !viewport->camera_) continue;
@@ -532,7 +758,21 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		// HRL viewport rectangles have their origin at the bottom left.
 		const float vy = (float)gpu.height - std::round(viewport->y_ * (float)gpu.height) - vh;
 		if (vw < 1.f || vh < 1.f || vx < 0.f || vy < 0.f || vx + vw > (float)gpu.width || vy + vh > (float)gpu.height) continue;
+		viewports.push_back({viewport, vx, vy, vw, vh});
+	}
+	// Culling views of the frame: two per viewport (occlusion phases), then
+	// one per shadow map of each viewport.
+	const uint32_t shadowViewCount = (lighting.cascadeLight ? kCascades : 0u) + (uint32_t)lighting.spotShadowLights.size();
+	const uint32_t mainViewSlots = 2u * (uint32_t)viewports.size();
+	if (!PrepareCulling(gpu, mainViewSlots + shadowViewCount * (uint32_t)viewports.size(), graph)) return;
+	if (gpu.hzb.size() < viewports.size()) gpu.hzb.resize(viewports.size());
+	uint32_t nextShadowSlot = mainViewSlots;
+	uint32_t translucentDraws = 0;
 
+	for (size_t vi = 0; vi < viewports.size(); ++vi)
+	{
+		const HRL_Viewport* viewport = viewports[vi].viewport;
+		const float vx = viewports[vi].x, vy = viewports[vi].y, vw = viewports[vi].w, vh = viewports[vi].h;
 		const Camera cam = MakeCamera(viewport->camera_, vw, vh);
 		ViewData view{};
 		view.view = cam.view;
@@ -551,7 +791,11 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		uint32_t debugView = 0;
 		if (scene->debug_view == HRL_DEBUG_VIEW_UNLIT) debugView = 1;
 		else if (scene->debug_view == HRL_DEBUG_VIEW_NORMAL) debugView = 2;
-		view.counts = glm::uvec4((uint32_t)lighting.lights.size(), flags, debugView, 0);
+		uint32_t interactorCount = 0;
+		for (const HRL_FoliageInteractor& it : scene->foliage_interactors)
+			if (it.radius > 0.f) view.interactors[interactorCount++] = glm::vec4(it.position, it.radius);
+		view.wind = scene->wind;
+		view.counts = glm::uvec4((uint32_t)lighting.lights.size(), flags, debugView, interactorCount);
 
 		std::vector<ShadowView> shadowViews;
 		if (lighting.cascadeLight)
@@ -564,24 +808,12 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			const glm::mat4 lv = glm::lookAt(l->position_, l->position_ + dir, up);
 			const float fov = glm::radians(glm::clamp(l->outerCutoff, 1.f, 89.f) * 2.f);
 			ShadowView sv;
+			sv.lightDir = dir;
 			sv.viewProj = glm::perspectiveRH_ZO(fov, 1.f, 0.1f, 100.f) * lv;
 			sv.cullClip = glm::perspective(fov, 1.f, 0.1f, 100.f) * lv;
 			sv.layer = kCascades + (uint32_t)i;
 			view.spotViewProj[i] = sv.viewProj;
 			shadowViews.push_back(sv);
-		}
-
-		// LOD and distance of every item for this camera.
-		const FrustumPlaneSet frustum = BuildFrustum(cam.projGL * cam.view);
-		for (DrawItem& item : data.items)
-		{
-			const glm::vec3 center = glm::vec3(item.model * glm::vec4(item.mesh->bounds_center_, 1.f));
-			const glm::vec3 delta = center - cam.position;
-			item.distance2 = glm::dot(delta, delta);
-			int lod = SelectMeshLOD(item.mesh, item.model, cam.view, cam.projGL, vh, viewport);
-			lod = glm::clamp(lod, 0, (int)item.gpu->lods.size() - 1);
-			while (lod > 0 && !item.gpu->lods[(size_t)lod].valid) --lod;
-			item.lod = (uint32_t)lod;
 		}
 
 		// View descriptor set.
@@ -591,7 +823,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		std::memcpy(viewSlice.ptr, &view, sizeof(view));
 		const VkDescriptorBufferInfo buffers[4] = {
 			{viewSlice.buffer, viewSlice.offset, sizeof(ViewData)},
-			{instanceSlice.buffer, instanceSlice.offset, instanceSlice.size},
+			{gpu.instances.handle, 0, VK_WHOLE_SIZE},
 			{materialSlice.buffer, materialSlice.offset, materialSlice.size},
 			{lightSlice.buffer, lightSlice.offset, lightSlice.size}};
 		const Environment& env = gpu.env;
@@ -600,7 +832,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			{R.linearClamp, hasEnvironment ? env.irradiance.view : R.dummyCube.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 			{R.linearClamp, hasEnvironment ? env.prefiltered.view : R.dummyCube.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 			{R.linearClamp, R.brdfLut.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-		VkWriteDescriptorSet writes[9]{};
+		VkWriteDescriptorSet writes[12]{};
 		for (uint32_t i = 0; i < 8; ++i)
 		{
 			writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -620,6 +852,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		}
 		VkWriteDescriptorSetAccelerationStructureKHR asWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
 		uint32_t writeCount = 8;
+		VkDescriptorBufferInfo rayBuffers[3]{};
 		if (dev.caps.rayQuery)
 		{
 			asWrite.accelerationStructureCount = 1;
@@ -629,34 +862,119 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			writes[8].dstBinding = 8;
 			writes[8].descriptorCount = 1;
 			writes[8].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-			writeCount = 9;
+			// Triangles of the alpha tested shadow casters.
+			rayBuffers[0] = {R.vertexBuffer.handle, 0, VK_WHOLE_SIZE};
+			rayBuffers[1] = {R.indexBuffer.handle, 0, VK_WHOLE_SIZE};
+			rayBuffers[2] = {rayTableSlice.buffer, rayTableSlice.offset, rayTableSlice.size};
+			for (uint32_t i = 0; i < 3; ++i)
+			{
+				writes[9 + i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+				writes[9 + i].dstSet = viewSet;
+				writes[9 + i].dstBinding = 9 + i;
+				writes[9 + i].descriptorCount = 1;
+				writes[9 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+				writes[9 + i].pBufferInfo = &rayBuffers[i];
+			}
+			writeCount = 12;
 		}
 		vkUpdateDescriptorSets(dev.device, writeCount, writes, 0, nullptr);
+		if (vi == 0) PrepareImpostors(scene, data, frame, graph, viewSet);
 
-		// Shadow maps: one pass per cascade / spot light, culled for the light.
+		// ---- Landscapes: LOD follows this camera in every view of the viewport ----
+		const std::vector<LandscapeDraw> landscapes = PrepareLandscapeDraws(scene, data, frame, cam.position);
+		struct LandscapeView { LandscapeDraw draw; LandscapeNodes nodes; };
+		auto selectLandscapes = [&](const FrustumPlaneSet& frustum)
+		{
+			std::vector<LandscapeView> out;
+			for (const LandscapeDraw& d : landscapes)
+			{
+				const LandscapeNodes nodes = SelectLandscapeNodes(d, cam.position, frustum);
+				if (nodes.count) out.push_back({d, nodes});
+			}
+			return out;
+		};
+		auto drawLandscapes = [viewSet](VkCommandBuffer c, const std::vector<LandscapeView>& list, bool shadow)
+		{
+			if (list.empty()) return;
+			vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow ? R.landscapeShadowPipeline : R.landscapePipeline);
+			const VkDescriptorSet sets[2] = {viewSet, R.bindlessSet};
+			vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.landscapeLayout, 0, 2, sets, 0, nullptr);
+			for (const LandscapeView& v : list) DrawLandscape(c, v.draw, v.nodes);
+			// Back to the mesh geometry and layout.
+			SetGeometryState(c, viewSet);
+		};
+
+		// ---- Culling, phase 1: LOD of every mesh, meshes visible last frame ----
+		const bool occlusion = R.occlusionCulling && vi < 24;
+		CullRequest request;
+		request.viewProj = view.viewProj;
+		request.frustum = BuildFrustum(cam.projGL * cam.view);
+		request.camPos = cam.position;
+		request.camForward = GetForwardVector(viewport->camera_->rotation_);
+		request.projScale = std::abs(cam.projGL[1][1]);
+		request.flags = cam.perspective ? CullFlagPerspective : 0u;
+		request.phase = occlusion ? 1u : 0u;
+		request.viewportBit = occlusion ? 1u << (kStateVisibleShift + (uint32_t)vi) : 0u;
+		const CulledList phase1 = AddCullPass(graph, gpu, 2u * (uint32_t)vi, request, 0);
+
+		const std::vector<GrassDraw> grass = PrepareGrass(scene, cam.position);
+
+		// ---- Shadow maps: one pass per cascade / spot light, culled for the light ----
 		const float shadowSize = (float)R.shadowResolution;
 		for (const ShadowView& sv : shadowViews)
 		{
-			const FrustumPlaneSet lightFrustum = BuildFrustum(sv.cullClip);
-			const IndirectList list = BuildIndirect(data, [&](const DrawItem& item)
-				{ return IsMeshVisible(item.mesh, item.model, lightFrustum); });
+			CullRequest shadowRequest;
+			shadowRequest.viewProj = sv.viewProj;
+			shadowRequest.frustum = BuildFrustum(sv.cullClip);
+			shadowRequest.flags = CullFlagShadow;
+			// Translucent surfaces cast no shadow: they are not in the culled buckets.
+			const CulledList casters = AddCullPass(graph, gpu, nextShadowSlot++, shadowRequest, 0);
+			const std::vector<LandscapeView> landscapeCasters = selectLandscapes(shadowRequest.frustum);
+			std::vector<FoliageDraw> foliageCasters;
+			for (const FoliageDraw& fd : foliage)
+				if (fd.foliage->cast_shadows)
+				{
+					AddFoliageCull(graph, fd, shadowRequest, cam.position, 0);
+					foliageCasters.push_back(fd);
+				}
+			// Grass shadows (when enabled) only in the two nearest cascades: further away they are below a texel.
+			std::vector<GrassDraw> grassCasters;
+			if (sv.layer < 2)
+				for (const GrassDraw& gd : grass)
+					if (gd.grass->cast_shadows)
+					{
+						AddGrassCull(graph, gd, shadowRequest, cam.position, 0);
+						grassCasters.push_back(gd);
+					}
 			const glm::mat4 lightViewProj = sv.viewProj;
-			graph.AddPass("shadow map", [=](VkCommandBuffer c)
+			const glm::vec3 lightDir = sv.lightDir;
+			graph.AddPass("shadow map", [=, &gpu](VkCommandBuffer c)
 			{
-				if (!list.total) return;
+				if (casters.empty && landscapeCasters.empty() && foliageCasters.empty() && grassCasters.empty()) return;
 				SetViewport(c, 0, 0, shadowSize, shadowSize, false);
 				vkCmdSetDepthBias(c, 1.5f, 0.f, 2.f);
-				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.shadowPipeline);
+				if (!landscapeCasters.empty())
+				{
+					vkCmdPushConstants(c, R.landscapeLayout, VF, 0, sizeof(glm::mat4), &lightViewProj);
+					drawLandscapes(c, landscapeCasters, true);
+				}
 				SetGeometryState(c, viewSet);
 				vkCmdPushConstants(c, R.sceneLayout, VF, 0, sizeof(glm::mat4), &lightViewProj);
-				for (uint32_t b = 0; b < BucketCount; ++b) DrawIndirect(c, list, b);
+				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.shadowPipeline);
+				DrawCulled(c, gpu, casters, BucketOpaque);
+				DrawCulled(c, gpu, casters, BucketOpaqueTwoSided);
+				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.shadowMaskedPipeline);
+				DrawCulled(c, gpu, casters, BucketMasked);
+				DrawCulled(c, gpu, casters, BucketMaskedTwoSided);
+				for (const FoliageDraw& fd : foliageCasters) DrawFoliage(c, fd, true, lightViewProj, lightDir);
+				for (const GrassDraw& gd : grassCasters) DrawGrass(c, gd, true, lightViewProj);
 			}).Depth(shadows, VK_ATTACHMENT_LOAD_OP_CLEAR, 1.f, R.shadowLayers[sv.layer]);
 		}
 
-		// Forward pass: HDR colour + object ids, then the sky where nothing was drawn.
-		const IndirectList visible = BuildIndirect(data, [&](const DrawItem& item)
-			{ return IsMeshVisible(item.mesh, item.model, frustum); });
-		gpu.stats.drawn += visible.total;
+		// ---- Translucent meshes: few, sorted back to front on the CPU ----
+		const IndirectList translucent = BuildTranslucent(data, cam, request.frustum, viewport, vh);
+		translucentDraws += translucent.total;
+
 		SkyPush sky{};
 		const bool drawSky = scene->sky_sphere_enabled;
 		if (drawSky)
@@ -668,6 +986,48 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			auto texture = R.textures.find(scene->sky_texture);
 			sky.texture = texture != R.textures.end() ? texture->second.slot : 0xFFFFFFFFu;
 		}
+		auto drawOpaque = [&gpu](VkCommandBuffer c, const CulledList& list)
+		{
+			for (uint32_t b = 0; b < kCulledBuckets; ++b)
+			{
+				if (list.empty || !list.capacity[b]) continue;
+				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.meshPipelines[b]);
+				DrawCulled(c, gpu, list, b);
+			}
+		};
+		auto drawEnd = [=](VkCommandBuffer c)
+		{
+			if (drawSky)
+			{
+				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.skyPipeline);
+				vkCmdPushConstants(c, R.sceneLayout, VF, 0, sizeof(sky), &sky);
+				vkCmdDraw(c, 3, 1, 0, 0);
+			}
+			// Translucent surfaces blend over the opaque scene and the sky.
+			for (uint32_t b = BucketTranslucent; b < BucketCount; ++b)
+			{
+				if (!translucent.count[b]) continue;
+				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.meshPipelines[b]);
+				DrawIndirect(c, translucent, b);
+			}
+		};
+
+		const std::vector<LandscapeView> visibleLandscapes = selectLandscapes(request.frustum);
+		auto drawFoliage = [foliage](VkCommandBuffer c)
+		{
+			for (const FoliageDraw& fd : foliage) DrawFoliage(c, fd, false, glm::mat4(1.f), glm::vec3(0.f));
+		};
+		auto drawGrass = [grass](VkCommandBuffer c)
+		{
+			for (const GrassDraw& gd : grass) DrawGrass(c, gd, false, glm::mat4(1.f));
+		};
+		if (!occlusion)
+		{
+			for (const FoliageDraw& fd : foliage) AddFoliageCull(graph, fd, request, cam.position, 0, vi == 0);
+			for (const GrassDraw& gd : grass) AddGrassCull(graph, gd, request, cam.position, 0);
+		}
+
+		// ---- Forward pass (phase 1): HDR colour + object ids ----
 		// The first viewport clears the targets; the next ones only reset their
 		// own rectangle (they may overlap an earlier viewport).
 		const bool clearRectangle = cleared;
@@ -686,18 +1046,16 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				const VkClearRect rect{{{(int32_t)vx, (int32_t)vy}, {(uint32_t)vw, (uint32_t)vh}}, 0, 1};
 				vkCmdClearAttachments(c, 2, clears, 1, &rect);
 			}
+			// Landscapes first: the largest occluders, drawn every frame.
+			drawLandscapes(c, visibleLandscapes, false);
 			SetGeometryState(c, viewSet);
-			for (uint32_t b = 0; b < BucketCount; ++b)
+			drawOpaque(c, phase1);
+			if (!occlusion)
 			{
-				if (!visible.count[b]) continue;
-				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.meshPipelines[b]);
-				DrawIndirect(c, visible, b);
-			}
-			if (drawSky)
-			{
-				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.skyPipeline);
-				vkCmdPushConstants(c, R.sceneLayout, VF, 0, sizeof(sky), &sky);
-				vkCmdDraw(c, 3, 1, 0, 0);
+				drawFoliage(c);
+				drawGrass(c);
+				SetGeometryState(c, viewSet);
+				drawEnd(c);
 			}
 		}).Use(shadows, Access::Sampled)
 		  .Color(hdr, load)
@@ -705,11 +1063,43 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		  .Depth(depth, load, 0.f); // reversed-Z: 0 is the far plane
 		cleared = true;
 
+		// ---- Occlusion: HZB of phase 1, phase 2 culling and drawing ----
+		if (occlusion)
+		{
+			const Hzb hzb = AddHzbPasses(graph, gpu.hzb[vi], depth, gpu.depth.view, (uint32_t)vx, (uint32_t)vy, (uint32_t)vw, (uint32_t)vh);
+			request.phase = 2;
+			if (hzb.mips)
+			{
+				request.flags |= CullFlagOcclusion;
+				request.hzbView = hzb.view;
+				request.hzbSize = hzb.size;
+				request.hzbMips = hzb.mips;
+			}
+			const CulledList phase2 = AddCullPass(graph, gpu, 2u * (uint32_t)vi + 1u, request, hzb.image);
+			// Foliage is tested against the depth of phase 1 (landscapes, large meshes).
+			for (const FoliageDraw& fd : foliage) AddFoliageCull(graph, fd, request, cam.position, hzb.image, vi == 0);
+			for (const GrassDraw& gd : grass) AddGrassCull(graph, gd, request, cam.position, hzb.image);
+			graph.AddPass("forward (phase 2)", [=](VkCommandBuffer c)
+			{
+				SetViewport(c, vx, vy, vw, vh, true);
+				SetGeometryState(c, viewSet);
+				drawOpaque(c, phase2);
+				drawFoliage(c);
+				drawGrass(c);
+				SetGeometryState(c, viewSet);
+				drawEnd(c);
+			}).Use(shadows, Access::Sampled)
+			  .Color(hdr, VK_ATTACHMENT_LOAD_OP_LOAD)
+			  .Color(ids, VK_ATTACHMENT_LOAD_OP_LOAD)
+			  .Depth(depth, VK_ATTACHMENT_LOAD_OP_LOAD);
+		}
+
 		lastViewProj = view.viewProj;
 		lastRect[0] = vx; lastRect[1] = vy; lastRect[2] = vw; lastRect[3] = vh;
 		R.lastView = cam.view;
 		R.lastProjGL = cam.projGL;
 	}
+	AddCullingReadback(gpu, graph, mainViewSlots, translucentDraws);
 
 	// No camera: the scene is black and holds no object.
 	if (!cleared)
@@ -720,25 +1110,23 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 
 	// Tone mapping into the LDR scene image.
 	const float fullWidth = (float)gpu.width, fullHeight = (float)gpu.height;
-	if (const VkDescriptorSet toneSet = AllocFrameSet(R.samplerLayout))
+	const PostSettings post = ScenePostSettings(frame);
+	const FrameGraph::Handle bloom = post.bloom > 0.f ? AddBloomPasses(graph, hdr, gpu.width, gpu.height) : hdr;
+	const VkImageView toneViews[2] = {graph.GetImage(hdr).view, graph.GetImage(bloom).view};
+	if (const VkDescriptorSet toneSet = MakeSamplerSet(R.tonemapSetLayout, toneViews, 2))
 	{
-		const VkDescriptorImageInfo source{R.linearClamp, graph.GetImage(hdr).view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-		VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-		w.dstSet = toneSet;
-		w.descriptorCount = 1;
-		w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		w.pImageInfo = &source;
-		vkUpdateDescriptorSets(dev.device, 1, &w, 0, nullptr);
-		struct TonePush { float exposure; uint32_t encode; };
-		const TonePush push{SceneExposure(frame), R.ldrFormat == VK_FORMAT_R8G8B8A8_UNORM ? 1u : 0u};
-		graph.AddPass("tone mapping", [=](VkCommandBuffer c)
+		struct TonePush { float exposure; uint32_t encode; float bloom; };
+		const TonePush push{post.exposure, R.ldrFormat == VK_FORMAT_R8G8B8A8_UNORM ? 1u : 0u, bloom != hdr ? post.bloom : 0.f};
+		auto& pass = graph.AddPass("tone mapping", [=](VkCommandBuffer c)
 		{
 			SetViewport(c, 0, 0, fullWidth, fullHeight, false);
 			vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.tonemapPipeline);
 			vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.tonemapLayout, 0, 1, &toneSet, 0, nullptr);
 			vkCmdPushConstants(c, R.tonemapLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
 			vkCmdDraw(c, 3, 1, 0, 0);
-		}).Use(hdr, Access::Sampled).Color(ldr, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+		});
+		pass.Use(hdr, Access::Sampled).Color(ldr, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+		if (bloom != hdr) pass.Use(bloom, Access::Sampled);
 	}
 
 	// Debug primitives of the frame, over the tone mapped image, depth tested.
@@ -821,6 +1209,9 @@ void RendererEndFrame()
 	Device& dev = Dev();
 	if (!R.initialized || !dev.InFrame()) return;
 	R.transients.EndFrame();
+	ReleaseUnusedLandscapes();
+	ReleaseUnusedFoliage();
+	ReleaseUnusedGrass();
 	dev.EndFrame();
 }
 
@@ -850,7 +1241,7 @@ HRL_id GetHoveredObject(HRL_id scene, int mouseX, int mouseY, HRL_EMeshType* typ
 	std::memcpy(&id, readback.mapped, sizeof(id));
 	dev.DestroyBuffer(readback, false);
 	if (id == kNoObject) return HRL_INVALID_ID;
-	if (type) *type = HRL_3D_MESH;
+	if (type) *type = R.landscapes.count(id) ? HRL_LANDSCAPE : (R.foliage.count(id) ? HRL_FOLIAGE : HRL_3D_MESH);
 	return id;
 }
 
@@ -867,6 +1258,7 @@ bool GetSceneStats(HRL_id scene, HRL_VulkanSceneStats& stats)
 	stats.scene_rebuilds = gpu.data.rebuilds;
 	stats.transform_updates = gpu.data.transformUpdates;
 	stats.material_updates = gpu.data.materialUpdates;
+	stats.skinned_mesh_count = gpu.stats.skinned;
 	return true;
 }
 
@@ -877,4 +1269,6 @@ bool RayTracingSupported() { return Dev().IsInitialized() && Dev().caps.rayQuery
 void SetRayTracedShadows(bool enabled) { R.rtShadows = enabled; }
 bool RayTracedShadowsEnabled() { return R.rtShadows && RayTracingSupported(); }
 void SetShadowDistance(float distance) { if (distance > 0.f) R.shadowDistance = distance; }
+void SetOcclusionCulling(bool enabled) { R.occlusionCulling = enabled; }
+bool OcclusionCulling() { return R.occlusionCulling; }
 } // namespace hrlvk

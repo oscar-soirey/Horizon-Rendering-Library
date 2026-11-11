@@ -18,7 +18,9 @@ void RendererBeginFrame();
 void RendererRenderScene(const HRL_SceneFrame& frame);
 void RendererEndFrame();
 
-int CreateMesh(HRL_id id, HRL_uint level, const HRL_Vertex3D* vertices, size_t vertexCount, const HRL_uint* indices, size_t indexCount);
+// rayTraced: build the acceleration structure of the mesh (LOD 0, when supported).
+int CreateMesh(HRL_id id, HRL_uint level, const HRL_Vertex3D* vertices, size_t vertexCount, const HRL_uint* indices, size_t indexCount, bool rayTraced = true);
+int CreateSkeletalMesh(HRL_id id, const HRL_SkeletalVertex* vertices, size_t vertexCount, const HRL_uint* indices, size_t indexCount);
 void DeleteMeshLODs(HRL_id id);
 void DeleteMesh(HRL_id id);
 
@@ -26,6 +28,7 @@ HRL_id CreateTexture(HRL_id id, const unsigned char* rgba, int width, int height
 void DeleteTexture(HRL_id id);
 bool IsValidTexture(HRL_id id);
 void GetTextureSize(HRL_id id, int* width, int* height);
+int ReadTexturePixels(HRL_id id, std::vector<unsigned char>* rgba, int* width, int* height);
 void SetTextureFilter(HRL_id id, HRL_EFilterType filter, bool minFilter);
 
 void CreateScene(HRL_id id, bool onScreen);
@@ -40,10 +43,16 @@ void GetProjectionMatrix(float* out);
 
 bool GetSceneStats(HRL_id scene, HRL_VulkanSceneStats& stats);
 
+// File the pipeline cache is loaded from / saved to (null or empty: none).
+void SetPipelineCachePath(const char* path);
+
 bool RayTracingSupported();
 void SetRayTracedShadows(bool enabled);
 bool RayTracedShadowsEnabled();
 void SetShadowDistance(float distance);
+void SetOcclusionCulling(bool enabled);
+bool GetFoliageStats(HRL_id foliage, HRL_VulkanFoliageStats& stats);
+bool OcclusionCulling();
 } // namespace hrlvk
 
 #endif

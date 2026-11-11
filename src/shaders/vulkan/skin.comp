@@ -1,0 +1,59 @@
+#version 460
+// Skeletal skinning: writes the skinned vertices of a mesh into its range of
+// the shared vertex buffer, so every later pass draws it like a static mesh.
+layout(local_size_x = 64) in;
+
+struct SkinVertex   // HRL_SkeletalVertex
+{
+	float position[3];
+	float normal[3];
+	float uv[2];
+	float tangent[3];
+	float bitangent[3];
+	uint bones[4];
+	float weights[4];
+};
+layout(set = 0, binding = 0, std430) readonly buffer Source { SkinVertex source[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Bones { mat4 bones[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Vertices { float vertices[]; }; // HRL_Vertex3D : 14 floats
+layout(push_constant) uniform Push
+{
+	uint vertexCount;
+	uint firstVertex;
+	uint boneCount;
+} pc;
+
+void main()
+{
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= pc.vertexCount) return;
+	SkinVertex v = source[i];
+
+	mat4 skin = mat4(0.0);
+	float total = 0.0;
+	for (int k = 0; k < 4; ++k)
+	{
+		if (v.bones[k] < pc.boneCount && v.weights[k] != 0.0)
+		{
+			skin += bones[v.bones[k]] * v.weights[k];
+			total += v.weights[k];
+		}
+	}
+	if (total == 0.0) skin = mat4(1.0); // vertex bound to no bone
+
+	vec3 position = (skin * vec4(v.position[0], v.position[1], v.position[2], 1.0)).xyz;
+	mat3 skin3 = mat3(skin);
+	vec3 normal = skin3 * vec3(v.normal[0], v.normal[1], v.normal[2]);
+	vec3 tangent = skin3 * vec3(v.tangent[0], v.tangent[1], v.tangent[2]);
+	vec3 bitangent = skin3 * vec3(v.bitangent[0], v.bitangent[1], v.bitangent[2]);
+	normal = dot(normal, normal) > 0.0 ? normalize(normal) : normal;
+	tangent = dot(tangent, tangent) > 0.0 ? normalize(tangent) : tangent;
+	bitangent = dot(bitangent, bitangent) > 0.0 ? normalize(bitangent) : bitangent;
+
+	uint o = (pc.firstVertex + i) * 14u;
+	vertices[o + 0u] = position.x; vertices[o + 1u] = position.y; vertices[o + 2u] = position.z;
+	vertices[o + 3u] = normal.x; vertices[o + 4u] = normal.y; vertices[o + 5u] = normal.z;
+	vertices[o + 6u] = v.uv[0]; vertices[o + 7u] = v.uv[1];
+	vertices[o + 8u] = tangent.x; vertices[o + 9u] = tangent.y; vertices[o + 10u] = tangent.z;
+	vertices[o + 11u] = bitangent.x; vertices[o + 12u] = bitangent.y; vertices[o + 13u] = bitangent.z;
+}

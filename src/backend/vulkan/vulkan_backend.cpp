@@ -65,7 +65,6 @@ void VK_RenderSceneFrame(const HRL_SceneFrame& frame)
 	if (const hrl_scene_t* scene = frame.scene)
 	{
 		if (scene->voxel_world) Unsupported("voxel worlds");
-		if (!scene->landscapes.empty()) Unsupported("landscapes");
 		if (!scene->vfx_systems.empty()) Unsupported("VFX systems");
 		if (!scene->decals.empty()) Unsupported("decals");
 		if (scene->global_illumination_enabled) Unsupported("global illumination");
@@ -86,10 +85,9 @@ int VK_CreateMeshLOD(HRL_id id, HRL_uint level, const HRL_Vertex3D* v, size_t vc
 {
 	return hrlvk::CreateMesh(id, level, v, vc, i, ic);
 }
-int VK_CreateSkeletalMesh(HRL_id, const HRL_SkeletalVertex*, size_t, const HRL_uint*, size_t, HRL_uint)
+int VK_CreateSkeletalMesh(HRL_id id, const HRL_SkeletalVertex* v, size_t vc, const HRL_uint* i, size_t ic, HRL_uint)
 {
-	Unsupported("skeletal meshes");
-	return HRL_FALSE;
+	return hrlvk::CreateSkeletalMesh(id, v, vc, i, ic);
 }
 int VK_CreateSpriteMesh(HRL_id)
 {
@@ -146,8 +144,12 @@ HRL_id VK_CreateShaderWithId(HRL_id, const char*, size_t, const char*, size_t)
 	Unsupported("custom shaders (surface functions)");
 	return HRL_INVALID_ID;
 }
-// The built-in 3D material shader is always available.
-int VK_IsValidShader(HRL_id shader) { return shader == HRL_MESH_3D_SHADER ? HRL_TRUE : HRL_FALSE; }
+// The built-in shaders that have a Vulkan implementation.
+int VK_IsValidShader(HRL_id shader)
+{
+	return (shader == HRL_MESH_3D_SHADER || shader == HRL_SKINNED_3D_MESH_SHADER || shader == HRL_DEFAULT_POST_PROCESS_SHADER)
+		? HRL_TRUE : HRL_FALSE;
+}
 
 void VK_GetModelMatrix(HRL_Mesh* mesh, float* out)
 {
@@ -220,6 +222,7 @@ HRL_vtable GetVulkanBackend()
 	t.RHI_FogPropertyChanged = VK_FogChanged;
 	t.RHI_DrawDebug = VK_LegacyDrawDebug;
 	t.RHI_IsValidTexture = VK_IsValidTexture;
+	t.RHI_ReadTexturePixels = hrlvk::ReadTexturePixels;
 	t.RHI_IsValidShader = VK_IsValidShader;
 	t.RHI_GetHoveredObject = hrlvk::GetHoveredObject;
 	return t;
@@ -252,7 +255,26 @@ int HRL_Vulkan_IsRayTracingSupported(void) { return hrlvk::RayTracingSupported()
 void HRL_Vulkan_SetRayTracedShadows(int enabled) { hrlvk::SetRayTracedShadows(enabled != 0); }
 int HRL_Vulkan_GetRayTracedShadows(void) { return hrlvk::RayTracedShadowsEnabled() ? HRL_TRUE : HRL_FALSE; }
 void HRL_Vulkan_SetShadowDistance(float distance) { hrlvk::SetShadowDistance(distance); }
+void HRL_Vulkan_SetOcclusionCulling(int enabled) { hrlvk::SetOcclusionCulling(enabled != 0); }
+int HRL_Vulkan_GetFoliageStats(HRL_id foliage, HRL_VulkanFoliageStats* stats)
+{
+	if (!stats) return HRL_FALSE;
+	return hrlvk::GetFoliageStats(foliage, *stats) ? HRL_TRUE : HRL_FALSE;
+}
+int HRL_Vulkan_GetOcclusionCulling(void) { return hrlvk::OcclusionCulling() ? HRL_TRUE : HRL_FALSE; }
 const char* HRL_Vulkan_GetDeviceName(void) { return hrlvk::GetDevice().caps.deviceName.c_str(); }
+
+void HRL_Vulkan_SetPipelineCachePath(const char* path) { hrlvk::SetPipelineCachePath(path); }
+
+int HRL_Vulkan_GetMemoryUsage(uint64_t* used_bytes, uint64_t* budget_bytes)
+{
+	uint64_t used = 0, budget = 0;
+	const bool ok = hrlvk::GetDevice().IsInitialized();
+	if (ok) hrlvk::GetDevice().MemoryUsage(used, budget);
+	if (used_bytes) *used_bytes = used;
+	if (budget_bytes) *budget_bytes = budget;
+	return ok ? HRL_TRUE : HRL_FALSE;
+}
 
 int HRL_Vulkan_GetSceneStats(HRL_id scene, HRL_VulkanSceneStats* stats)
 {

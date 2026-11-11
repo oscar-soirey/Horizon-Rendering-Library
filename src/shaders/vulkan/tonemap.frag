@@ -1,9 +1,11 @@
 #version 460
 layout(set = 0, binding = 0) uniform sampler2D uScene;
+layout(set = 0, binding = 1) uniform sampler2D uBloom;
 layout(push_constant) uniform Push
 {
 	float exposure;     // stops
 	uint encodeSRGB;    // 1 when the target is not an sRGB format
+	float bloom;        // share of the blurred image, 0 : off
 } pc;
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 outColor;
@@ -21,7 +23,9 @@ vec3 RRTAndODTFit(vec3 v)
 
 void main()
 {
-	vec3 color = texture(uScene, vUV).rgb * exp2(pc.exposure);
+	vec3 color = texture(uScene, vUV).rgb;
+	if (pc.bloom > 0.0) color = mix(color, texture(uBloom, vUV).rgb, pc.bloom);
+	color *= exp2(pc.exposure);
 	color = clamp(ACESOutput * RRTAndODTFit(ACESInput * color), 0.0, 1.0);
 	if (pc.encodeSRGB != 0u)
 		color = mix(color * 12.92, 1.055 * pow(color, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, color));

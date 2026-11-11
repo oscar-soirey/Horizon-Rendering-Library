@@ -193,8 +193,9 @@ bool Device::PickPhysicalDevice()
 		const bool required = f13.dynamicRendering && f13.synchronization2 &&
 			f12.runtimeDescriptorArray && f12.descriptorBindingPartiallyBound &&
 			f12.shaderSampledImageArrayNonUniformIndexing && f12.descriptorBindingSampledImageUpdateAfterBind &&
-			f12.descriptorBindingUpdateUnusedWhilePending &&
-			f11.shaderDrawParameters && f2.features.multiDrawIndirect && f2.features.drawIndirectFirstInstance;
+			f12.descriptorBindingUpdateUnusedWhilePending && f12.drawIndirectCount &&
+			f11.shaderDrawParameters && f2.features.multiDrawIndirect && f2.features.drawIndirectFirstInstance &&
+			f2.features.independentBlend;
 		if (!required)
 		{
 			rejected += std::string(props.deviceName) + " (missing required features); ";
@@ -282,6 +283,9 @@ bool Device::CreateDevice()
 	caps.maxBindlessTextures = std::min<uint32_t>(16384u,
 		std::min(p12.maxPerStageDescriptorUpdateAfterBindSamplers, p12.maxPerStageDescriptorUpdateAfterBindSampledImages) / 2u);
 
+	// Accurate memory usage / budget figures (HRL_Vulkan_GetMemoryUsage).
+	const bool memoryBudget = HasExtension(available, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+	if (memoryBudget) deviceExtensions_.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 	if (rt)
 	{
 		deviceExtensions_.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
@@ -307,12 +311,14 @@ bool Device::CreateDevice()
 	e12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
 	e12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
 	e12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+	e12.drawIndirectCount = VK_TRUE; // GPU culling
 	e12.bufferDeviceAddress = rt ? VK_TRUE : VK_FALSE;
 	VkPhysicalDeviceVulkan11Features e11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &e12};
 	e11.shaderDrawParameters = VK_TRUE;
 	VkPhysicalDeviceFeatures2 enabled{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &e11};
 	enabled.features.multiDrawIndirect = VK_TRUE;
 	enabled.features.drawIndirectFirstInstance = VK_TRUE;
+	enabled.features.independentBlend = VK_TRUE; // colour blends, object ids do not
 	enabled.features.samplerAnisotropy = supported.features.samplerAnisotropy;
 	enabled.features.depthClamp = supported.features.depthClamp;
 	enabled.features.depthBiasClamp = supported.features.depthBiasClamp;
@@ -338,6 +344,7 @@ bool Device::CreateDevice()
 	ai.instance = instance;
 	ai.vulkanApiVersion = VK_API_VERSION_1_3;
 	if (rt) ai.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+	if (memoryBudget) ai.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
 	r = vmaCreateAllocator(&ai, &allocator);
 	if (r != VK_SUCCESS) { ReportError("vmaCreateAllocator", r); return false; }
 	return true;
@@ -364,20 +371,20 @@ bool Device::CreateFrames()
 
 		const VkDescriptorPoolSize sizes[] = {
 			{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 256},
-			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024},
+			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
 			{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2048},
 			{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 256},
 			{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 64},
 		};
 		VkDescriptorPoolCreateInfo di{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-		di.maxSets = 512;
+		di.maxSets = 2048;
 		di.poolSizeCount = caps.rayQuery ? 5u : 4u;
 		di.pPoolSizes = sizes;
 		if (vkCreateDescriptorPool(device, &di, nullptr, &f.descriptorPool) != VK_SUCCESS) return false;
 
 		if (!CreateBuffer(kFrameLinearSize,
 			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true, f.linear, "frame linear"))
+			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, f.linear, "frame linear"))
 			return false;
 	}
 
@@ -738,7 +745,7 @@ FrameSlice Device::AllocFrame(VkDeviceSize size, VkDeviceSize alignment)
 		const VkDeviceSize newSize = std::max(old.size * 2, size * 2);
 		if (!CreateBuffer(newSize,
 			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true, f.linear, "frame linear"))
+			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, f.linear, "frame linear"))
 			return {};
 		offset = 0;
 	}
@@ -804,6 +811,24 @@ void Device::Defer(std::function<void()> fn)
 	// Outside a frame the resource can still be referenced by the pending
 	// upload commands, which are submitted with frame frameNumber_.
 	deletions_.emplace_back(frameNumber_, std::move(fn));
+}
+
+void Device::MemoryUsage(uint64_t& usedBytes, uint64_t& budgetBytes)
+{
+	usedBytes = budgetBytes = 0;
+	if (!allocator) return;
+	VkPhysicalDeviceMemoryProperties props{};
+	vkGetPhysicalDeviceMemoryProperties(physical, &props);
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+	vmaSetCurrentFrameIndex(allocator, (uint32_t)frameNumber_);
+	vmaGetHeapBudgets(allocator, budgets);
+	// GPU memory: the device local heaps (on integrated GPUs, shared system memory).
+	for (uint32_t i = 0; i < props.memoryHeapCount; ++i)
+		if (props.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+		{
+			usedBytes += budgets[i].usage;
+			budgetBytes += budgets[i].budget;
+		}
 }
 
 void Device::DrainDeletions()

@@ -33,6 +33,8 @@ constexpr uint32_t kPrefilterMips = 6;
 constexpr uint32_t kIrradianceSize = 32;
 constexpr uint32_t kBrdfLutSize = 256;
 constexpr uint32_t kNoObject = 0xFFFFFFFFu;
+constexpr VkFormat kBloomFormat = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+constexpr uint32_t kMaxBloomLevels = 6;
 
 // ---- GPU structures (see src/shaders/vulkan/common.glsl) -------------------
 struct ViewData
@@ -44,11 +46,37 @@ struct ViewData
 	glm::mat4 spotViewProj[kMaxSpotShadows];
 	glm::vec4 shadowInfo, fogColor, fogParams, envParams;
 	glm::uvec4 counts;
+	glm::vec4 wind;
+	glm::vec4 interactors[16];
 };
 struct InstanceData { glm::mat4 model, normalMatrix; glm::uvec4 ids; };
 struct MaterialData { glm::vec4 baseColor, emissive, params; glm::uvec4 tex0, tex1, flags; };
 struct LightData { glm::vec4 position, direction, color, spot; };
 struct SkyPush { glm::mat4 rotation; glm::vec4 top, horizon, bottom; uint32_t texture; float lod; };
+
+// GPU culling (see cull.comp / cull_common.glsl).
+constexpr uint32_t kCulledBuckets = 4; // opaque and masked buckets; translucent ones are sorted on the CPU
+enum : uint32_t { CullFlagOcclusion = 1, CullFlagPerspective = 2, CullFlagShadow = 4 };
+enum : uint32_t { RecordAutoLod = 1, RecordDistanceLod = 2 };
+struct DrawRecord
+{
+	glm::vec4 sphere;   // local bounds centre, radius (0 : never culled)
+	glm::uvec4 info;    // instance, bucket, first LOD range, LOD count
+	glm::vec4 lod;      // base distance or screen threshold, scale, min distance, max distance
+	glm::uvec4 lodMode; // flags, forced LOD (~0u : none), hysteresis (float bits)
+};
+struct LodRange { uint32_t indexCount, firstIndex; int32_t vertexOffset; uint32_t pad; };
+struct CullView
+{
+	glm::mat4 viewProj;
+	glm::vec4 planes[6];
+	glm::vec4 camPos;     // w : proj[1][1]
+	glm::vec4 hzb;        // xy : mip 0 size, z : mip count
+	glm::uvec4 params;    // item count, phase, viewport bit, flags
+	glm::uvec4 bucketBase;
+	glm::vec4 lodInfo;    // xyz : camera forward
+};
+constexpr uint32_t kStateVisibleShift = 8; // State bits 8.. : visible last frame, one per viewport
 struct FilterPush { float roughness; float envResolution; uint32_t mode; uint32_t sampleCount; };
 
 enum : uint32_t { ViewFlagIBL = 1, ViewFlagRTShadows = 2, ViewFlagFog = 4, ViewFlagFogExp = 8 };
@@ -56,7 +84,16 @@ enum : uint32_t { MatRoughnessValue = 1, MatMetallicValue = 2, MatSpecularValue 
 	MatRoughnessInvert = 16, MatAlphaInvert = 32 };
 
 // Draw buckets: one pipeline each.
-enum Bucket : uint32_t { BucketOpaque, BucketOpaqueTwoSided, BucketMasked, BucketMaskedTwoSided, BucketCount };
+enum Bucket : uint32_t
+{
+	BucketOpaque, BucketOpaqueTwoSided,
+	BucketMasked, BucketMaskedTwoSided,           // alpha test
+	BucketTranslucent, BucketTranslucentTwoSided, // alpha blended, drawn back to front after the sky
+	BucketCount
+};
+inline bool IsMasked(uint32_t bucket) { return bucket == BucketMasked || bucket == BucketMaskedTwoSided; }
+inline bool IsTranslucent(uint32_t bucket) { return bucket >= BucketTranslucent; }
+inline bool IsTwoSided(uint32_t bucket) { return (bucket & 1u) != 0; }
 
 // ---- Resources -------------------------------------------------------------
 struct Texture
@@ -87,7 +124,13 @@ struct MeshLOD
 struct MeshGPU
 {
 	std::vector<MeshLOD> lods;
-	Blas blas; // LOD 0, only when ray tracing is available
+	Blas blas; // LOD 0, only when ray tracing is available (static meshes)
+
+	// Skeletal meshes: source vertices with bone weights. The skinned result is
+	// written by a compute pass into the LOD 0 range of the vertex pool.
+	Buffer skinSource;
+	uint32_t skinVertexCount = 0;
+	mutable uint64_t poseSerial = 0; // HRL_SkeletalMesh::pose_serial_ last skinned
 };
 
 struct Tlas
@@ -118,6 +161,7 @@ struct DrawItem
 	glm::mat4 model{1.f};
 	uint32_t instance = 0;   // index in SceneData::instances
 	uint32_t material = 0;   // index in SceneData::materials
+	bool noCull = false;     // skinned meshes: their bounds follow the animation
 	float distance2 = 0.f;   // per viewport
 	uint32_t lod = 0;        // per viewport
 };
@@ -127,35 +171,177 @@ struct DrawItem
 // changed are recomputed (see vk_scene_data.cpp).
 struct SceneData
 {
-	struct MeshKey
-	{
-		HRL_id id = HRL_INVALID_ID;
-		const HRL_Mesh* mesh = nullptr;
-		HRL_id material = HRL_INVALID_ID;
-		float radius = 0.f;
-		int32_t item = -1; // index in items, -1 when the mesh cannot be drawn
-		glm::vec3 position{0.f}, rotation{0.f}, scale{1.f}, pivot{0.f};
-	};
 	struct MaterialKey
 	{
 		const HRL_Material* material = nullptr;
 		uint64_t revision = 0;
 	};
-	std::vector<MeshKey> keys;               // every 3D mesh of the scene, in scene order
+	std::unordered_map<HRL_id, uint32_t> itemOfMesh; // mesh id -> item
+	std::vector<uint32_t> skinnedItems;
 	std::vector<DrawItem> items;
 	std::vector<InstanceData> instances;     // parallel to items
 	std::vector<MaterialData> materials;
 	std::vector<Bucket> materialBuckets;     // parallel to materials
-	std::vector<MaterialKey> materialKeys;   // parallel to materials
+	std::vector<MaterialKey> materialKeys;   // parallel to materials (material null: default material)
+	std::unordered_map<HRL_id, uint32_t> materialIndexOf;
 
 	bool built = false;
 	uint64_t meshTableRevision = 0;
+	uint64_t sceneMeshRevision = 0;          // hrl_scene_t::mesh_revision
 	uint64_t textureRevision = 0;
 	size_t materialCount = 0;
 	HRL_id lastMaterialId = HRL_INVALID_ID;
 
+	// GPU culling inputs (parallel to items), rebuilt with them.
+	std::vector<DrawRecord> records;
+	std::vector<LodRange> lodRanges;
+	std::vector<uint32_t> translucentItems;  // sorted on the CPU every frame
+	std::vector<uint32_t> autoLodItems;      // items whose LOD is reported back to the mesh
+	uint32_t bucketBase[kCulledBuckets]{};   // first command of each culled bucket in a view
+	uint32_t culledItems = 0;                // items of the culled buckets
+	uint64_t serial = 0;                     // incremented by every rebuild
+	// Instances changed since the last upload (all of them after a rebuild).
+	std::vector<uint32_t> dirtyInstances;
+	bool uploadAll = true;
+
 	// Work done by the last update (diagnostics, tests).
 	uint32_t rebuilds = 0, transformUpdates = 0, materialUpdates = 0;
+};
+
+// Landscapes (see vk_landscape.cpp).
+constexpr uint32_t kLandscapeMaxLods = 16;
+struct LandscapeUniform // landscape.glsl
+{
+	glm::mat4 model, normalMatrix;
+	glm::vec4 samples, spacing, uvScale, morphCamera;
+	glm::uvec4 ids;
+	glm::vec4 morph[kLandscapeMaxLods];
+};
+struct LandscapeGPU
+{
+	Image heights;                       // R32F, sampled through the bindless array
+	uint32_t slot = 0xFFFFFFFFu;
+	uint32_t width = 0, height = 0;
+	uint64_t revision = 0;               // HRL_Landscape::heights_revision_ uploaded
+	uint32_t levels = 0;                 // quadtree levels, 0 : leaves
+	std::vector<glm::uvec2> dims;        // nodes per level
+	std::vector<std::vector<glm::vec2>> minMax; // height range of each node
+	Blas blas;                           // ray tracing mesh
+	Buffer blasVertices, blasIndices;
+	bool blasDirty = true;
+	uint64_t lastFrame = 0;
+};
+struct LandscapeDraw
+{
+	HRL_id id = HRL_INVALID_ID;
+	const HRL_Landscape* landscape = nullptr;
+	VkDescriptorSet set = VK_NULL_HANDLE;
+	glm::mat4 model{1.f};
+	float ranges[kLandscapeMaxLods]{};
+};
+struct LandscapeNodes
+{
+	FrameSlice slice;
+	uint32_t count = 0;
+};
+
+// Foliage (see vk_foliage.cpp / vk_impostor.cpp).
+constexpr uint32_t kImpostorFrames = 8;     // views per side of the hemi-octahedral atlas
+constexpr uint32_t kImpostorFrameSize = 128; // pixels per view
+struct FoliageUniform // FOLIAGE_UNIFORM_BLOCK of foliage.glsl
+{
+	glm::vec4 bounds, heights, lodEnd, draw;
+	glm::uvec4 ids, materials;
+	glm::uvec4 lods[12];
+	glm::vec4 impostor;
+};
+struct FoliageCellData { glm::vec4 lo, hi; glm::uvec4 range; };
+struct FoliageCellGPU
+{
+	VmaVirtualAllocation alloc = VK_NULL_HANDLE;
+	uint32_t offset = 0, capacity = 0, count = 0; // in instances
+	uint64_t revision = 0;
+};
+struct FoliageGPU
+{
+	Buffer instances;                     // every instance, sub-allocated per cell
+	VmaVirtualBlock block = VK_NULL_HANDLE;
+	uint32_t poolCapacity = 0;
+	std::vector<FoliageCellGPU> cells;    // parallel to HRL_Foliage::cells
+	uint64_t cellsRevision = 0;
+	uint64_t instancesRevision = 0;       // HRL_Foliage::instances_revision uploaded
+	Buffer cellTable;                     // non-empty cells (FoliageCellData), device local
+	uint32_t cellCount = 0;
+	Buffer visible;                       // 4 regions (LOD 0, 1, 2, impostor) of regionCapacity entries
+	uint32_t regionCapacity = 0;
+	Buffer draw;                          // counts and indirect commands
+	// Impostor atlas (albedo + alpha, normal + roughness).
+	Image impostorAlbedo, impostorNormal;
+	VkImageView impostorAlbedoMip0 = VK_NULL_HANDLE, impostorNormalMip0 = VK_NULL_HANDLE;
+	uint32_t albedoSlot = 0xFFFFFFFFu, normalSlot = 0xFFFFFFFFu;
+	glm::vec3 impostorCenter{0.f};
+	float impostorHalfSize = 1.f;
+	uint64_t impostorRevision = 0;        // HRL_Foliage::geometry_revision baked
+	bool impostorReady = false;
+	uint64_t lastFrame = 0;
+	// Ray tracing structures of each part and LOD: a shadow ray starting on a
+	// plant hits the same triangles as were rasterized (no self shadowing).
+	Blas lodBlas[4][3];
+	uint64_t blasRevision = 0;
+	// Counts of the first camera view, read back when its frame slot comes back.
+	Buffer readback[kFramesInFlight];
+	bool readbackPending[kFramesInFlight]{};
+	uint32_t stats[4]{};
+};
+struct FoliageDraw
+{
+	HRL_id id = HRL_INVALID_ID;
+	const HRL_Foliage* foliage = nullptr;
+	FrameSlice uniform;
+	VkBuffer cells = VK_NULL_HANDLE;
+	uint32_t cellCount = 0, partCount = 0;
+	VkDescriptorSet set = VK_NULL_HANDLE;   // set 2 of the foliage pipelines
+	bool masked[4]{}, twoSided[4]{};
+	bool impostors = false;
+};
+
+// Ray traced shadows: instances of the acceleration structure and the
+// geometry of its alpha tested entries (RtGeometry in lighting.glsl).
+struct RtGeometry { uint32_t firstIndex; int32_t vertexOffset; uint32_t material, pad; };
+struct RayScene
+{
+	std::vector<VkAccelerationStructureInstanceKHR> instances;
+	std::vector<RtGeometry> table;
+};
+constexpr float kRayFoliageDistance = 100.f;  // foliage casts ray traced shadows up to this distance
+constexpr uint32_t kRayFoliageBudget = 65536;  // instances per frame at most
+
+// Grass (see vk_grass.cpp).
+struct GrassUniform // GRASS_UNIFORM_BLOCK of grass.glsl
+{
+	glm::mat4 model, invModel;
+	glm::vec4 samples, spacing, blade, baseColor, tipColor, grid;
+	glm::uvec4 ids;
+};
+struct GrassGPU
+{
+	Buffer tiles, draw;          // draw : count, then one command per tile
+	uint32_t maxTiles = 0;
+	uint64_t lastFrame = 0;
+};
+struct GrassDraw
+{
+	HRL_id id = HRL_INVALID_ID;
+	const HRL_Grass* grass = nullptr;
+	FrameSlice uniform;
+	VkDescriptorSet set = VK_NULL_HANDLE; // set 2 of the grass pipelines
+	uint32_t tiles = 0;
+};
+
+struct HzbImage
+{
+	Image image;
+	std::vector<VkImageView> mips; // one storage view per mip
 };
 
 struct SceneGPU
@@ -170,8 +356,24 @@ struct SceneGPU
 	Tlas tlas[kFramesInFlight];
 	SceneData data;
 	uint64_t renderedFrame = ~0ull;
+
+	// Hierarchical depth of each viewport (in viewport order).
+	std::vector<HzbImage> hzb;
+	// GPU culling buffers (device local, persistent).
+	Buffer instances, records, lodRanges, state, commands, counts;
+	uint32_t commandViews = 0;    // views the command buffer has room for
+	uint64_t uploadedSerial = 0;  // SceneData::serial of the uploaded records
+	// Read back once the frame that wrote them is complete: draw counts
+	// (statistics) and the LOD state (HRL_GetMeshLODLevel).
+	struct Readback
+	{
+		Buffer counts, state;
+		uint64_t serial = 0;       // SceneData::serial when written, 0 : nothing
+		uint32_t mainViews = 0;    // count slots of camera views (phase 1 and 2)
+		uint32_t translucent = 0;  // translucent draws (CPU side)
+	} readback[kFramesInFlight];
 	// Last rendered frame (diagnostics).
-	struct Stats { uint32_t drawn = 0, passes = 0; } stats;
+	struct Stats { uint32_t drawn = 0, passes = 0, skinned = 0; } stats;
 };
 
 struct PendingScreenshot
@@ -187,26 +389,74 @@ struct State
 	bool initialized = false;
 	uint32_t width = 0, height = 0;
 	bool rtShadows = false;
+	bool occlusionCulling = true;
 	float shadowDistance = 150.f;
 
 	// Layouts / pipelines
 	VkDescriptorSetLayout viewLayout = VK_NULL_HANDLE;
 	VkDescriptorSetLayout bindlessLayout = VK_NULL_HANDLE;
 	VkDescriptorSetLayout imageLayout = VK_NULL_HANDLE;   // sampler + storage image (compute)
-	VkDescriptorSetLayout samplerLayout = VK_NULL_HANDLE; // one sampler (tone mapping)
+	VkDescriptorSetLayout samplerLayout = VK_NULL_HANDLE; // one sampler (bloom)
+	VkDescriptorSetLayout tonemapSetLayout = VK_NULL_HANDLE; // scene + bloom
 	VkPipelineLayout sceneLayout = VK_NULL_HANDLE;
 	VkPipelineLayout computeLayout = VK_NULL_HANDLE;
 	VkPipelineLayout tonemapLayout = VK_NULL_HANDLE;
+	VkPipelineLayout bloomLayout = VK_NULL_HANDLE;
 	VkPipelineLayout debugLayout = VK_NULL_HANDLE;
 	VkPipeline meshPipelines[BucketCount]{};
 	VkPipeline shadowPipeline = VK_NULL_HANDLE;
+	VkPipeline shadowMaskedPipeline = VK_NULL_HANDLE; // alpha tested casters
 	VkPipeline skyPipeline = VK_NULL_HANDLE;
 	VkPipeline tonemapPipeline = VK_NULL_HANDLE;
+	VkPipeline skinPipeline = VK_NULL_HANDLE;
+	VkDescriptorSetLayout cullSetLayout = VK_NULL_HANDLE;
+	VkPipelineLayout cullLayout = VK_NULL_HANDLE;
+	VkPipeline cullPipeline = VK_NULL_HANDLE;
+	VkPipeline hzbPipeline = VK_NULL_HANDLE;
+	VkDescriptorSetLayout foliageSetLayout = VK_NULL_HANDLE;     // set 2 of the foliage pipelines
+	VkDescriptorSetLayout foliageCullSetLayout = VK_NULL_HANDLE;
+	VkPipelineLayout foliageLayout = VK_NULL_HANDLE;
+	VkPipelineLayout foliageCullLayout = VK_NULL_HANDLE;
+	VkPipeline foliagePipelines[4]{};      // (masked ? 2 : 0) + (two sided ? 1 : 0)
+	VkPipeline foliageShadowPipeline = VK_NULL_HANDLE;
+	VkPipeline foliageShadowMaskedPipeline = VK_NULL_HANDLE;
+	VkPipeline foliageCullPipeline = VK_NULL_HANDLE;
+	VkPipeline foliageCommandsPipeline = VK_NULL_HANDLE;
+	VkPipeline impostorPipeline = VK_NULL_HANDLE;
+	VkPipeline impostorShadowPipeline = VK_NULL_HANDLE;
+	VkPipeline impostorBakePipelines[2]{};  // opaque, alpha tested
+	VkDescriptorSetLayout grassSetLayout = VK_NULL_HANDLE;
+	VkDescriptorSetLayout grassCullSetLayout = VK_NULL_HANDLE;
+	VkPipelineLayout grassLayout = VK_NULL_HANDLE;
+	VkPipelineLayout grassCullLayout = VK_NULL_HANDLE;
+	VkPipeline grassPipeline = VK_NULL_HANDLE;
+	VkPipeline grassShadowPipeline = VK_NULL_HANDLE;
+	VkPipeline grassCullPipeline = VK_NULL_HANDLE;
+	VkDescriptorSetLayout landscapeSetLayout = VK_NULL_HANDLE;
+	VkPipelineLayout landscapeLayout = VK_NULL_HANDLE;
+	VkPipeline landscapePipeline = VK_NULL_HANDLE;
+	VkPipeline landscapeShadowPipeline = VK_NULL_HANDLE;
+
+	// Foliage and landscapes
+	std::unordered_map<HRL_id, FoliageGPU> foliage;
+	std::unordered_map<HRL_id, GrassGPU> grass;
+	std::unordered_map<HRL_id, LandscapeGPU> landscapes;
+	Buffer landscapePatchVertices, landscapePatchIndices;
+	uint32_t landscapePatchIndexCount = 0;
+	VkDescriptorSetLayout skinLayout = VK_NULL_HANDLE; // source, bones, vertex pool
+	VkPipelineLayout skinPipelineLayout = VK_NULL_HANDLE;
+	VkPipeline bloomDownPipeline = VK_NULL_HANDLE;
+	VkPipeline bloomUpPipeline = VK_NULL_HANDLE; // additive
 	VkPipeline debugLinePipeline = VK_NULL_HANDLE;
 	VkPipeline debugTrianglePipeline = VK_NULL_HANDLE;
 	VkPipeline envCubePipeline = VK_NULL_HANDLE;
 	VkPipeline envFilterPipeline = VK_NULL_HANDLE;
 	VkPipeline brdfLutPipeline = VK_NULL_HANDLE;
+	VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+	// Destroyed at shutdown (registered by vk_pipelines.cpp).
+	std::vector<VkPipeline> ownedPipelines;
+	std::vector<VkPipelineLayout> ownedPipelineLayouts;
+	std::vector<VkDescriptorSetLayout> ownedSetLayouts;
 	VkFormat ldrFormat = VK_FORMAT_R8G8B8A8_SRGB;
 
 	// Bindless textures
@@ -260,6 +510,9 @@ inline Device& Dev() { return GetDevice(); }
 inline VkDeviceAddress AlignUp(VkDeviceAddress v, VkDeviceSize a) { return (v + a - 1) / a * a; }
 
 // ---- vk_pipelines.cpp -------------------------------------------------------
+// Loads the pipeline cache file when a path was given (see SetPipelineCachePath).
+bool CreatePipelineCache();
+void SavePipelineCache();
 bool CreatePipelines();
 // Descriptor set valid for the current frame only.
 VkDescriptorSet AllocFrameSet(VkDescriptorSetLayout layout);
@@ -272,6 +525,100 @@ void DestroyTextureInternal(Texture& t, bool releaseSlot);
 uint32_t TextureSlot(const HRL_Material* m, const char* key, uint32_t fallback);
 bool EnsurePoolCapacity(Buffer& buffer, VkDeviceSize needed, bool index);
 void DestroyBlas(Blas& blas);
+// Records the build in the upload command buffer. The inputs must stay alive until it ran.
+bool BuildBlas(Blas& blas, VkDeviceAddress vertices, uint32_t stride, uint32_t vertexCount,
+	VkDeviceAddress indices, uint32_t indexCount, bool opaque);
+// Bindless slots for images that are not HRL textures (landscape heights...).
+constexpr uint32_t kNoSlot = 0xFFFFFFFFu;
+uint32_t AllocBindlessSlot();
+void WriteBindlessView(uint32_t slot, VkImageView view, VkSampler sampler);
+void FreeBindlessSlot(uint32_t slot);
+
+// ---- vk_culling.cpp ---------------------------------------------------------
+// Uploads what changed in the scene data to the persistent GPU buffers and
+// sizes them for `views` culling views this frame. Adds a pass to `graph`.
+bool PrepareCulling(SceneGPU& gpu, uint32_t views, FrameGraph& graph);
+// Reads the results of the frame that last used this frame slot.
+void ReadCullingResults(SceneGPU& gpu);
+// Copies the counts / LOD state for ReadCullingResults (last pass of the scene).
+void AddCullingReadback(SceneGPU& gpu, FrameGraph& graph, uint32_t mainViews, uint32_t translucentDraws);
+
+struct CulledList
+{
+	uint32_t view = 0;                 // slot in the command / count buffers
+	uint32_t capacity[kCulledBuckets]{};
+	bool empty = true;
+};
+struct CullRequest
+{
+	glm::mat4 viewProj{1.f};
+	FrustumPlaneSet frustum{};
+	glm::vec3 camPos{0.f}, camForward{0.f, 0.f, -1.f};
+	float projScale = 1.f;
+	uint32_t phase = 0;      // 0 : single pass, 1 / 2 : two-phase occlusion
+	uint32_t viewportBit = 0;
+	uint32_t flags = 0;
+	VkImageView hzbView = VK_NULL_HANDLE;
+	glm::vec2 hzbSize{1.f};
+	uint32_t hzbMips = 1;
+};
+// Adds a compute pass that culls the scene for one view.
+CulledList AddCullPass(FrameGraph& graph, SceneGPU& gpu, uint32_t view, const CullRequest& request, FrameGraph::Handle hzb);
+void DrawCulled(VkCommandBuffer cmd, const SceneGPU& gpu, const CulledList& list, uint32_t bucket);
+
+struct Hzb
+{
+	FrameGraph::Handle image = 0;
+	VkImageView view = VK_NULL_HANDLE; // all mips, sampled
+	glm::vec2 size{1.f};
+	uint32_t mips = 0;                 // 0 : no HZB
+};
+// Hierarchical depth of the viewport rectangle of `depth`, written to `target`.
+Hzb AddHzbPasses(FrameGraph& graph, HzbImage& target, FrameGraph::Handle depth, VkImageView depthView,
+	uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+void DestroyHzb(HzbImage& hzb);
+
+// ---- vk_landscape.cpp --------------------------------------------------------
+// Uploads the changed heights of the landscapes of a scene (adds a pass).
+void PrepareLandscapes(const hrl_scene_t* scene, FrameGraph& graph);
+void CollectLandscapeRayInstances(const hrl_scene_t* scene, std::vector<VkAccelerationStructureInstanceKHR>& out);
+// One per landscape: uniform data for a camera (the LOD of every view of a viewport follows its camera).
+std::vector<LandscapeDraw> PrepareLandscapeDraws(const hrl_scene_t* scene, SceneData& data,
+	const HRL_SceneFrame& frame, const glm::vec3& camera);
+LandscapeNodes SelectLandscapeNodes(const LandscapeDraw& draw, const glm::vec3& camera, const FrustumPlaneSet& frustum);
+// Needs the landscape pipeline and the view / bindless sets bound.
+void DrawLandscape(VkCommandBuffer cmd, const LandscapeDraw& draw, const LandscapeNodes& nodes);
+void ReleaseUnusedLandscapes();
+void DestroyAllLandscapes();
+
+// ---- vk_foliage.cpp / vk_impostor.cpp -------------------------------------------
+// Adds the part materials to the material table (before it is uploaded).
+void ResolveFoliageMaterials(const hrl_scene_t* scene, SceneData& data, const HRL_SceneFrame& frame);
+// Uploads the changed instances (adds a pass) and returns what the views draw.
+std::vector<FoliageDraw> PrepareFoliage(const hrl_scene_t* scene, SceneData& data, const HRL_SceneFrame& frame, FrameGraph& graph);
+// Culls a foliage kind for one view; the next DrawFoliage of it draws the result.
+void AddFoliageCull(FrameGraph& graph, const FoliageDraw& draw, const CullRequest& request, const glm::vec3& lodCamera,
+	FrameGraph::Handle hzb, bool readback = false);
+// Needs the view / bindless sets bound with a layout compatible with foliageLayout.
+void DrawFoliage(VkCommandBuffer cmd, const FoliageDraw& draw, bool shadow, const glm::mat4& lightViewProj, const glm::vec3& lightDir);
+void ReleaseUnusedFoliage();
+void DestroyAllFoliage();
+// Foliage instances near `camera` for the ray tracing structure.
+void CollectFoliageRayInstances(const hrl_scene_t* scene, SceneData& data, const HRL_SceneFrame& frame,
+	const glm::vec3& camera, RayScene& out);
+void AddRayInstance(RayScene& out, const glm::mat4& model, const MeshGPU& gpu, uint32_t material, bool masked);
+// Impostors: baked when the geometry of a foliage kind changes (adds passes).
+void PrepareImpostors(const hrl_scene_t* scene, SceneData& data, const HRL_SceneFrame& frame, FrameGraph& graph, VkDescriptorSet viewSet);
+void DrawImpostors(VkCommandBuffer cmd, const FoliageDraw& draw, bool shadow, const glm::mat4& lightViewProj, const glm::vec3& lightDir);
+void DestroyImpostor(FoliageGPU& g);
+
+// ---- vk_grass.cpp ------------------------------------------------------------
+// Needs the landscapes prepared (heights uploaded) first.
+std::vector<GrassDraw> PrepareGrass(const hrl_scene_t* scene, const glm::vec3& camera);
+void AddGrassCull(FrameGraph& graph, const GrassDraw& draw, const CullRequest& request, const glm::vec3& camera, FrameGraph::Handle hzb);
+void DrawGrass(VkCommandBuffer cmd, const GrassDraw& draw, bool shadow, const glm::mat4& lightViewProj);
+void ReleaseUnusedGrass();
+void DestroyAllGrass();
 
 // ---- vk_environment.cpp -----------------------------------------------------
 glm::mat4 SkyRotation(const glm::vec3& degrees);
@@ -287,6 +634,9 @@ void RecordBrdfLut(VkCommandBuffer cmd);
 float MaterialFloat(const HRL_Material* m, const char* name, float fallback);
 // Brings the cached scene data in line with the frontend scene.
 void UpdateSceneData(SceneData& data, const HRL_SceneFrame& frame);
+// Index of a material in data.materials, added when it is not there yet
+// (landscapes, foliage). An unknown material gives the default material.
+uint32_t MaterialIndex(SceneData& data, const HRL_SceneFrame& frame, HRL_id material);
 
 struct LightSetup
 {
@@ -312,6 +662,7 @@ Camera MakeCamera(const HRL_Camera* c, float width, float height);
 
 struct ShadowView
 {
+	glm::vec3 lightDir{0.f, -1.f, 0.f}; // direction the light travels
 	glm::mat4 viewProj{1.f};   // Vulkan clip space, depth 0..1
 	glm::mat4 cullClip{1.f};   // OpenGL clip space, for the CPU frustum test
 	uint32_t layer = 0;

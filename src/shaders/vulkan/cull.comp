@@ -1,0 +1,141 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// GPU culling of the 3D meshes of a scene for one view: frustum, occlusion
+// (two phases, see vk_culling.cpp) and LOD selection. Writes the indirect
+// draw commands of the visible meshes, grouped by bucket.
+layout(local_size_x = 64) in;
+#include "cull_common.glsl"
+
+struct Instance { mat4 model; mat4 normalMatrix; uvec4 ids; };
+layout(set = 0, binding = 0, std430) readonly buffer Instances { Instance instances[]; };
+
+struct DrawRecord
+{
+	vec4 sphere;   // local bounds: center, radius (radius 0 : never culled)
+	uvec4 info;    // instance, bucket, first LOD range, LOD count
+	vec4 lod;      // distance mode : base distance, scale, min, max / screen mode : threshold, scale
+	uvec4 lodMode; // x : flags (1 automatic, 2 distance mode), y : forced LOD (~0 : none), z : hysteresis (float bits)
+};
+layout(set = 0, binding = 1, std430) readonly buffer Records { DrawRecord records[]; };
+
+struct LodRange { uint indexCount; uint firstIndex; int vertexOffset; uint pad; };
+layout(set = 0, binding = 2, std430) readonly buffer Lods { LodRange lods[]; };
+
+// Per item: bits 0-3 last LOD, bit 8 + viewport : visible in the last frame.
+layout(set = 0, binding = 3, std430) buffer State { uint state[]; };
+
+struct DrawCommand { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+layout(set = 0, binding = 4, std430) writeonly buffer Commands { DrawCommand commands[]; };
+layout(set = 0, binding = 5, std430) buffer Counts { uint counts[]; };
+layout(set = 0, binding = 6) uniform sampler2D uHzb;
+layout(set = 0, binding = 7, std140) uniform View { CullViewData uCull; };
+
+#define REC_AUTO_LOD 1u
+#define REC_DISTANCE 2u
+
+float Boundary(DrawRecord r, int level)
+{
+	return r.lod.x * pow(r.lod.y, float(level));
+}
+
+// Same rules as SelectMeshLOD (src/core/render_common.cpp).
+int SelectLod(DrawRecord r, vec3 center, float radius, int current)
+{
+	int maxLevel = int(r.info.w) - 1;
+	if ((r.lodMode.x & REC_AUTO_LOD) == 0u || maxLevel <= 0) return 0;
+	if (r.lodMode.y != 0xFFFFFFFFu) return clamp(int(r.lodMode.y), 0, maxLevel);
+	bool distanceMode = (r.lodMode.x & REC_DISTANCE) != 0u;
+	float metric;
+	if (distanceMode) metric = length(center - uCull.camPos.xyz);
+	else
+	{
+		bool perspective = (uCull.params.w & CULL_FLAG_PERSPECTIVE) != 0u;
+		float z = max(abs(dot(center - uCull.camPos.xyz, uCull.lodInfo.xyz)), 1e-4);
+		metric = perspective ? uCull.camPos.w * radius / z : uCull.camPos.w * radius;
+	}
+	int desired = maxLevel;
+	float threshold = r.lod.x;
+	if (distanceMode)
+	{
+		if (metric <= r.lod.z) desired = 0;
+		else if (metric >= r.lod.w) desired = maxLevel;
+		else
+			for (int level = 1; level <= maxLevel; ++level)
+			{
+				if (metric < threshold) { desired = level - 1; break; }
+				threshold *= r.lod.y;
+			}
+	}
+	else
+		for (int level = 1; level <= maxLevel; ++level)
+		{
+			if (metric >= threshold) { desired = level - 1; break; }
+			threshold *= r.lod.y;
+		}
+
+	float hysteresis = uintBitsToFloat(r.lodMode.z);
+	current = clamp(current, 0, maxLevel);
+	if (hysteresis <= 0.0 || desired == current) return desired;
+	if (desired > current)
+	{
+		float b = Boundary(r, current);
+		bool crossed = distanceMode ? metric >= b * (1.0 + hysteresis) : metric <= b * (1.0 - hysteresis);
+		return crossed ? desired : current;
+	}
+	float b = Boundary(r, desired);
+	bool crossed = distanceMode ? metric <= b * (1.0 - hysteresis) : metric >= b * (1.0 + hysteresis);
+	return crossed ? desired : current;
+}
+
+void Emit(DrawRecord r, int level)
+{
+	uint bucket = r.info.y;
+	uint slot = atomicAdd(counts[bucket], 1u);
+	LodRange range = lods[r.info.z + uint(level)];
+	commands[uCull.bucketBase[bucket] + slot] = DrawCommand(range.indexCount, 1u, range.firstIndex, range.vertexOffset, r.info.x);
+}
+
+void main()
+{
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uCull.params.x) return;
+	DrawRecord r = records[i];
+	if (r.info.y >= 4u) return; // translucent: sorted on the CPU
+
+	mat4 model = instances[r.info.x].model;
+	vec3 center = (model * vec4(r.sphere.xyz, 1.0)).xyz;
+	float scale = max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
+	float radius = r.sphere.w * scale;
+	bool alwaysVisible = r.sphere.w <= 0.0;
+	bool inFrustum = alwaysVisible || SphereInFrustum(uCull.planes, center, radius);
+
+	uint s = state[i];
+	uint phase = uCull.params.y;
+	uint viewBit = uCull.params.z;
+	bool shadow = (uCull.params.w & CULL_FLAG_SHADOW) != 0u;
+
+	if (shadow)
+	{
+		if (inFrustum) Emit(r, int(s & 15u));
+		return;
+	}
+
+	if (phase <= 1u)
+	{
+		// LOD of this frame, kept for the second phase and the shadow views.
+		int level = SelectLod(r, center, radius, int(s & 15u));
+		s = (s & ~15u) | uint(level);
+		state[i] = s;
+		bool wasVisible = phase == 0u || viewBit == 0u || (s & viewBit) != 0u;
+		if (inFrustum && wasVisible) Emit(r, level);
+		return;
+	}
+
+	// Phase 2: test against the depth of what phase 1 drew.
+	bool wasVisible = viewBit == 0u || (s & viewBit) != 0u;
+	bool visible = inFrustum;
+	if (visible && !alwaysVisible && (uCull.params.w & CULL_FLAG_OCCLUSION) != 0u)
+		visible = !BoxOccluded(uHzb, uCull.viewProj, uCull.hzb, center - vec3(radius), center + vec3(radius));
+	if (visible && !(inFrustum && wasVisible)) Emit(r, int(s & 15u));
+	if (viewBit != 0u) state[i] = visible ? (s | viewBit) : (s & ~viewBit);
+}

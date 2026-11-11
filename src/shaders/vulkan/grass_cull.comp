@@ -1,0 +1,80 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+// Grass tiles around the camera: frustum, distance, occlusion. One indirect
+// draw per visible tile; far tiles draw fewer, simpler blades.
+layout(local_size_x = 64) in;
+#include "cull_common.glsl"
+#include "grass.glsl"
+
+layout(set = 0, binding = 0, std140) uniform GrassData { GRASS_UNIFORM_BLOCK } uGrass;
+layout(set = 0, binding = 1, std430) writeonly buffer Tiles { GrassTile tiles[]; };
+struct DrawCommand { uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; };
+layout(set = 0, binding = 2, std430) writeonly buffer Commands { DrawCommand commands[]; };
+layout(set = 0, binding = 3, std430) buffer Count { uint drawCount; };
+layout(set = 0, binding = 4) uniform sampler2D uHzb;
+layout(set = 0, binding = 5, std140) uniform View { CullViewData uCull; };
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+
+float HeightAt(vec2 world)
+{
+	vec3 local = (uGrass.invModel * vec4(world.x, 0.0, world.y, 1.0)).xyz;
+	vec2 size = uGrass.spacing.xy * (uGrass.samples.xy - 1.0);
+	vec2 s = (local.xz / size + 0.5) * (uGrass.samples.xy - 1.0);
+	float h = textureLod(uTextures[nonuniformEXT(uGrass.ids.x * 2u)], (s + 0.5) * uGrass.samples.zw, 0.0).r * uGrass.spacing.z;
+	return (uGrass.model * vec4(local.x, h, local.z, 1.0)).y;
+}
+
+bool InsideLandscape(vec2 world)
+{
+	vec3 local = (uGrass.invModel * vec4(world.x, 0.0, world.y, 1.0)).xyz;
+	vec2 size = uGrass.spacing.xy * (uGrass.samples.xy - 1.0);
+	return all(lessThanEqual(abs(local.xz), size * 0.5));
+}
+
+void main()
+{
+	uint index = gl_GlobalInvocationID.x;
+	uint side = uint(uGrass.grid.w);
+	if (index >= side * side) return;
+	float size = uGrass.grid.z;
+	vec2 origin = uGrass.grid.xy + vec2(float(index % side), float(index / side)) * size;
+	vec2 center = origin + size * 0.5;
+	vec3 cam = uCull.camPos.xyz;
+	float distance2D = length(max(abs(center - cam.xz) - size * 0.5, vec2(0.0)));
+	float far = uGrass.tipColor.w;
+	if (distance2D > far) return;
+	if (!InsideLandscape(origin) && !InsideLandscape(origin + size) &&
+		!InsideLandscape(vec2(origin.x + size, origin.y)) && !InsideLandscape(vec2(origin.x, origin.y + size))) return;
+
+	// Height range of the tile from 9 samples, with a margin for what lies between.
+	float lo = 1e30, hi = -1e30;
+	for (int y = 0; y <= 2; ++y)
+		for (int x = 0; x <= 2; ++x)
+		{
+			float h = HeightAt(origin + vec2(x, y) * size * 0.5);
+			lo = min(lo, h);
+			hi = max(hi, h);
+		}
+	float margin = size * 0.5;
+	vec3 bmin = vec3(origin.x, lo - margin, origin.y);
+	vec3 bmax = vec3(origin.x + size, hi + margin + uGrass.blade.x * 1.5, origin.y + size);
+	for (int i = 0; i < 6; ++i)
+	{
+		vec4 p = uCull.planes[i];
+		vec3 v = vec3(p.x >= 0.0 ? bmax.x : bmin.x, p.y >= 0.0 ? bmax.y : bmin.y, p.z >= 0.0 ? bmax.z : bmin.z);
+		if (dot(p.xyz, v) + p.w < 0.0) return;
+	}
+	if ((uCull.params.w & CULL_FLAG_OCCLUSION) != 0u && BoxOccluded(uHzb, uCull.viewProj, uCull.hzb, bmin, bmax)) return;
+
+	// Fewer blades with the distance; the blades left are wider (vertex shader).
+	float d = length(vec3(center.x, (lo + hi) * 0.5, center.y) - cam);
+	float keep = clamp(1.0 - (d - far * 0.25) / (far * 0.75), 0.0, 1.0);
+	keep = max(keep * keep, 0.06);
+	uint blades = min(uint(uGrass.blade.w * size * size * keep + 0.5), 65535u);
+	if (blades == 0u) return;
+	bool near = d < far * 0.3;
+	uint slot = atomicAdd(drawCount, 1u);
+	tiles[slot].data = vec4(origin, keep, near ? 1.0 : 0.0);
+	commands[slot] = DrawCommand(near ? 15u : 3u, blades, 0u, slot << 16);
+}

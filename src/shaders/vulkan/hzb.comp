@@ -1,0 +1,28 @@
+#version 460
+// Hierarchical depth buffer: each texel keeps the farthest depth (reversed-Z:
+// the smallest value) of the area it covers. Mip 0 is built from the depth of
+// a viewport, the next mips from the previous one.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D uSource;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D uDest;
+layout(push_constant) uniform Push
+{
+	ivec2 srcOffset;
+	ivec2 srcSize;
+	ivec2 dstSize;
+	int srcLod;
+} pc;
+
+void main()
+{
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(p, pc.dstSize))) return;
+	vec2 scale = vec2(pc.srcSize) / vec2(pc.dstSize);
+	ivec2 hi = min(ivec2(ceil(vec2(p + 1) * scale)) - 1, pc.srcSize - 1);
+	ivec2 lo = min(ivec2(floor(vec2(p) * scale)), hi);
+	float d = 1.0;
+	for (int y = lo.y; y <= hi.y; ++y)
+		for (int x = lo.x; x <= hi.x; ++x)
+			d = min(d, texelFetch(uSource, pc.srcOffset + ivec2(x, y), pc.srcLod).r);
+	imageStore(uDest, p, vec4(d));
+}

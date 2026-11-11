@@ -1,28 +1,27 @@
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_nonuniform_qualifier : require
-#ifdef HRL_RAY_QUERY
-#extension GL_EXT_ray_query : require
-#endif
+// Lit surface of meshes, landscapes (HRL_LANDSCAPE) and foliage (HRL_FOLIAGE).
 #include "common.glsl"
 #include "brdf.glsl"
-
-layout(set = 0, binding = 4) uniform sampler2DArrayShadow uShadowMaps;
-layout(set = 0, binding = 5) uniform samplerCube uIrradiance;
-layout(set = 0, binding = 6) uniform samplerCube uPrefiltered;
-layout(set = 0, binding = 7) uniform sampler2D uBrdfLut;
-#ifdef HRL_RAY_QUERY
-layout(set = 0, binding = 8) uniform accelerationStructureEXT uTlas;
-#endif
 // Every texture twice: index 2*i is the UNORM view, 2*i+1 the sRGB view.
 layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+#include "material_alpha.glsl"
+#include "lighting.glsl"
+#ifdef HRL_LANDSCAPE
+#include "landscape.glsl"
+#endif
 
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec2 vUV;
-layout(location = 3) in vec3 vTangent;
+layout(location = 3) in vec3 vTangent;   // landscape: xy = height texture coordinate
 layout(location = 4) in vec3 vBitangent;
-layout(location = 5) flat in uint vInstance;
+layout(location = 5) flat in uvec2 vIds; // material, object id
+#ifdef HRL_FOLIAGE
+layout(location = 6) flat in uint vDither; // bits 0-6 coverage, bit 7 complementary pattern
+layout(location = 7) in vec3 vRestPos;     // position without the wind
+#endif
 
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out uint outObjectId;
@@ -30,186 +29,88 @@ layout(location = 1) out uint outObjectId;
 vec4 SampleLinear(uint tex, vec2 uv) { return texture(uTextures[nonuniformEXT(tex * 2u)], uv); }
 vec4 SampleSRGB(uint tex, vec2 uv) { return texture(uTextures[nonuniformEXT(tex * 2u + 1u)], uv); }
 
-float SampleShadowLayer(vec4 clip, float layer, float bias)
-{
-	vec3 p = clip.xyz / clip.w;
-	vec2 uv = p.xy * 0.5 + 0.5;
-	if (p.z <= 0.0 || p.z >= 1.0 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
-		return 1.0;
-	float texel = uView.shadowInfo.x;
-	float sum = 0.0;
-	// 3x3 PCF, each tap is a hardware 2x2 bilinear comparison.
-	for (int y = -1; y <= 1; ++y)
-		for (int x = -1; x <= 1; ++x)
-			sum += texture(uShadowMaps, vec4(uv + vec2(x, y) * texel, layer, p.z - bias));
-	return sum / 9.0;
-}
-
-float CascadeShadow(vec3 worldPos, vec3 N, vec3 L, float bias)
-{
-	float viewDepth = -(uView.view * vec4(worldPos, 1.0)).z;
-	int cascade = HRL_MAX_CASCADES - 1;
-	for (int i = 0; i < HRL_MAX_CASCADES; ++i)
-		if (viewDepth < uView.cascadeSplits[i]) { cascade = i; break; }
-	if (viewDepth >= uView.cascadeSplits[HRL_MAX_CASCADES - 1]) return 1.0;
-
-	// Normal offset grows with the cascade texel footprint and the grazing angle.
-	float slope = 1.0 - clamp(dot(N, L), 0.0, 1.0);
-	float cascadeScale = uView.cascadeSplits[cascade] / uView.cascadeSplits[0];
-	vec3 offsetPos = worldPos + N * (0.02 + 0.06 * slope) * cascadeScale;
-	float shadow = SampleShadowLayer(uView.cascadeViewProj[cascade] * vec4(offsetPos, 1.0), float(cascade), bias);
-
-	// Blend into the next cascade near the split to hide the resolution change.
-	float range = uView.shadowInfo.y * uView.cascadeSplits[cascade];
-	float t = (viewDepth - (uView.cascadeSplits[cascade] - range)) / max(range, 1e-4);
-	if (t > 0.0 && cascade < HRL_MAX_CASCADES - 1)
-	{
-		float next = SampleShadowLayer(uView.cascadeViewProj[cascade + 1] * vec4(offsetPos, 1.0), float(cascade + 1), bias);
-		shadow = mix(shadow, next, clamp(t, 0.0, 1.0));
-	}
-	return shadow;
-}
-
-#ifdef HRL_RAY_QUERY
-float TraceShadow(vec3 origin, vec3 dir, float tMax)
-{
-	rayQueryEXT rq;
-	rayQueryInitializeEXT(rq, uTlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-		0xFF, origin, 0.0, dir, tMax);
-	rayQueryProceedEXT(rq);
-	return rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
-}
-#endif
-
-float LightShadow(Light light, vec3 worldPos, vec3 N, vec3 L, float lightDistance)
-{
-	float slot = light.color.a;
-	if (slot < -0.5) return 1.0;
-	float shadow = 1.0;
-#ifdef HRL_RAY_QUERY
-	if ((uView.counts.y & VIEW_FLAG_RT_SHADOWS) != 0u)
-	{
-		vec3 origin = worldPos + N * (0.002 + 0.002 * length(worldPos - uView.camPos.xyz));
-		shadow = TraceShadow(origin, L, lightDistance);
-	}
-	else
-#endif
-	if (slot < 0.5)
-		shadow = CascadeShadow(worldPos, N, L, light.spot.w);
-	else if (slot < float(HRL_MAX_SPOT_SHADOWS) + 0.5)
-	{
-		int s = int(slot) - 1;
-		vec3 offsetPos = worldPos + N * 0.02;
-		shadow = SampleShadowLayer(uView.spotViewProj[s] * vec4(offsetPos, 1.0), float(HRL_MAX_CASCADES + s), light.spot.w);
-	}
-	return mix(1.0, shadow, clamp(light.spot.z, 0.0, 1.0));
-}
-
 void main()
 {
-	Instance inst = instances[vInstance];
-	Material mat = materials[inst.ids.x];
+#ifdef HRL_FOLIAGE
+	// Dithered fade (distance, LOD cross-fade): two LODs of one instance keep
+	// complementary pixels, so the transition shows no hole and no double.
+	if (vDither != 127u)
+	{
+		float coverage = float(vDither & 127u) / 127.0;
+		float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+		bool keep = (vDither & 128u) != 0u ? noise >= 1.0 - coverage : noise < coverage;
+		if (!keep) discard;
+	}
+#endif
+	Material mat = materials[vIds.x];
 	uint flags = mat.flags.x;
 
 	vec4 albedoSample = SampleSRGB(mat.tex0.x, vUV);
-	// Same opacity rule as the OpenGL backend: the opacity value replaces the alpha map.
-	float alphaMap = SampleLinear(mat.tex1.y, vUV).r;
-	if ((flags & MAT_ALPHA_INVERT) != 0u) alphaMap = 1.0 - alphaMap;
-	float alpha = albedoSample.a * mat.baseColor.a * ((flags & MAT_OPACITY_VALUE) != 0u ? mat.params.w : alphaMap);
+	float alpha = MaterialAlpha(mat, vUV, albedoSample.a);
 #ifdef HRL_ALPHA_TEST
 	if (alpha < 0.5) discard;
 #endif
 
-	vec3 baseColor = albedoSample.rgb * mat.baseColor.rgb;
+	Surface s;
+	s.position = vWorldPos;
+	s.baseColor = albedoSample.rgb * mat.baseColor.rgb;
 	float roughness = SampleLinear(mat.tex0.z, vUV).r;
 	if ((flags & MAT_ROUGHNESS_INVERT) != 0u) roughness = 1.0 - roughness;
 	if ((flags & MAT_ROUGHNESS_VALUE) != 0u) roughness = mat.params.x;
-	roughness = clamp(roughness, 0.045, 1.0);
+	s.roughness = roughness;
 	float metallic = (flags & MAT_METALLIC_VALUE) != 0u ? mat.params.y : SampleLinear(mat.tex0.w, vUV).r;
-	metallic = clamp(metallic, 0.0, 1.0);
-	float specular = (flags & MAT_SPECULAR_VALUE) != 0u ? mat.params.z : SampleLinear(mat.tex1.z, vUV).r;
-	float ao = SampleLinear(mat.tex1.x, vUV).r;
-	vec3 emissive = mat.emissive.rgb * SampleSRGB(mat.tex1.w, vUV).rgb;
+	s.metallic = clamp(metallic, 0.0, 1.0);
+	s.specular = (flags & MAT_SPECULAR_VALUE) != 0u ? mat.params.z : SampleLinear(mat.tex1.z, vUV).r;
+	s.ao = SampleLinear(mat.tex1.x, vUV).r;
+	s.emissive = mat.emissive.rgb * SampleSRGB(mat.tex1.w, vUV).rgb;
+	s.transmission = 0.0;
 
-	// Tangent frame. A degenerate tangent falls back to the geometric normal.
+	// Geometric normal and tangent frame.
+#ifdef HRL_LANDSCAPE
+	// Per pixel normal of the height field (central differences), whatever the LOD.
+	vec2 texel = uLand.samples.zw;
+	vec2 hc = vTangent.xy;
+	uint slot = uLand.ids.z * 2u;
+	float hl = textureLod(uTextures[nonuniformEXT(slot)], hc - vec2(texel.x, 0.0), 0.0).r;
+	float hr = textureLod(uTextures[nonuniformEXT(slot)], hc + vec2(texel.x, 0.0), 0.0).r;
+	float hd = textureLod(uTextures[nonuniformEXT(slot)], hc - vec2(0.0, texel.y), 0.0).r;
+	float hu = textureLod(uTextures[nonuniformEXT(slot)], hc + vec2(0.0, texel.y), 0.0).r;
+	vec3 localN = normalize(vec3(-(hr - hl) * uLand.spacing.z / (2.0 * uLand.spacing.x), 1.0,
+		-(hu - hd) * uLand.spacing.z / (2.0 * uLand.spacing.y)));
+	vec3 N = normalize(mat3(uLand.normalMatrix) * localN);
+	vec3 tangent = normalize(mat3(uLand.model) * vec3(1.0, 0.0, 0.0));
+	vec3 bitangent = cross(N, tangent);
+	// Shadow rays start on the full resolution surface (the one in the ray
+	// tracing structure), not on the coarser LOD that was rasterized.
+	vec2 sampleCoord = hc * uLand.samples.xy - 0.5;
+	s.shadowPosition = (uLand.model * vec4(LandscapeLocal(sampleCoord, LandscapeTriangleHeight(sampleCoord)), 1.0)).xyz;
+#else
 	vec3 N = normalize(vNormal);
 	if (!gl_FrontFacing) N = -N;
+	vec3 tangent = vTangent, bitangent = vBitangent;
+	s.shadowPosition = vWorldPos;
+#endif
+#ifdef HRL_FOLIAGE
+	// Shadow rays start where the plant is in the ray tracing structure (no wind).
+	s.shadowPosition = vRestPos;
+#ifdef HRL_ALPHA_TEST
+	// Leaves: some light passes through.
+	s.transmission = 0.4;
+#endif
+#endif
+
+	// Normal map. A degenerate tangent keeps the geometric normal.
 	vec3 nt = SampleLinear(mat.tex0.y, vUV).xyz * 2.0 - 1.0;
-	vec3 T = vTangent - N * dot(N, vTangent);
+	vec3 T = tangent - N * dot(N, tangent);
 	if (dot(T, T) > 1e-8)
 	{
 		T = normalize(T);
 		vec3 B = cross(N, T);
-		if (dot(B, vBitangent) < 0.0) B = -B;
+		if (dot(B, bitangent) < 0.0) B = -B;
 		N = normalize(T * nt.x + B * nt.y + N * nt.z);
 	}
+	s.normal = N;
 
-	vec3 V = normalize(uView.camPos.xyz - vWorldPos);
-	vec3 diffuseColor = baseColor * (1.0 - metallic);
-	vec3 F0 = mix(vec3(0.04) * clamp(specular, 0.0, 1.0), baseColor, metallic);
-
-	vec3 color = vec3(0.0);
-	vec3 ambient = vec3(0.0);
-	uint lightCount = uView.counts.x;
-	for (uint i = 0u; i < lightCount; ++i)
-	{
-		Light light = lights[i];
-		int type = int(light.position.w);
-		if (type == LIGHT_SKY)
-		{
-			ambient += diffuseColor * light.color.rgb;
-			continue;
-		}
-		vec3 L;
-		float attenuation = 1.0;
-		float dist = 1e4;
-		if (type == LIGHT_DIRECTIONAL)
-			L = normalize(-light.direction.xyz);
-		else
-		{
-			vec3 toLight = light.position.xyz - vWorldPos;
-			dist = length(toLight);
-			L = toLight / max(dist, 1e-4);
-			attenuation = 1.0 / (1.0 + light.direction.w * dist * dist);
-			if (type == LIGHT_SPOT)
-				attenuation *= smoothstep(light.spot.y, light.spot.x, dot(L, normalize(-light.direction.xyz)));
-		}
-		if (attenuation <= 1e-5 || dot(N, L) <= 0.0) continue;
-		float shadow = LightShadow(light, vWorldPos, N, L, dist);
-		if (shadow <= 0.0) continue;
-		color += EvalBRDF(N, V, L, diffuseColor, F0, roughness) * light.color.rgb * attenuation * shadow;
-	}
-
-	if ((uView.counts.y & VIEW_FLAG_IBL) != 0u)
-	{
-		float NdotV = max(dot(N, V), 1e-4);
-		vec3 R = reflect(-V, N);
-		vec3 irradiance = texture(uIrradiance, N).rgb;
-		vec3 prefiltered = textureLod(uPrefiltered, R, roughness * uView.envParams.x).rgb;
-		vec2 brdf = texture(uBrdfLut, vec2(NdotV, roughness)).rg;
-		// Multiple scattering compensation (Fdez-Aguera 2019).
-		vec3 FssEss = F0 * brdf.x + brdf.y;
-		float Ems = 1.0 - (brdf.x + brdf.y);
-		vec3 Favg = F0 + (1.0 - F0) / 21.0;
-		vec3 FmsEms = Ems * FssEss * Favg / (1.0 - Favg * Ems);
-		vec3 kD = diffuseColor * (1.0 - FssEss - FmsEms);
-		ambient += (FssEss * prefiltered + (FmsEms + kD) * irradiance) * uView.envParams.y;
-	}
-	color += ambient * ao + emissive;
-
-	uint debugView = uView.counts.z;
-	if (debugView == 1u) color = baseColor;
-	else if (debugView == 2u) color = N * 0.5 + 0.5;
-
-	if ((uView.counts.y & VIEW_FLAG_FOG) != 0u)
-	{
-		float d = length(uView.camPos.xyz - vWorldPos);
-		float f = (uView.counts.y & VIEW_FLAG_FOG_EXP) != 0u
-			? 1.0 - exp(-uView.fogParams.z * d)
-			: clamp((d - uView.fogParams.x) / max(uView.fogParams.y - uView.fogParams.x, 1e-4), 0.0, 1.0);
-		color = mix(color, uView.fogColor.rgb, f);
-	}
-
-	outColor = vec4(color, alpha);
-	outObjectId = inst.ids.y;
+	outColor = vec4(ShadeSurface(s), alpha);
+	outObjectId = vIds.y;
 }
