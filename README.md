@@ -83,7 +83,7 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 
 > **OpenGL deprecation.** The OpenGL 3.3 backend still builds and keeps its current behaviour, but it is frozen: no new feature, no feature parity with Vulkan, only fixes needed for stability or compilation. `HRL_Init(HRL_OPENGL_33)` reports a `HRL_SEVERITY_WEAK_WARNING` once. New projects should use `HRL_VULKAN`.
 
-> **Vulkan backend rewrite (API 0.9).** Until 0.8 the Vulkan backend ran the OpenGL renderer through an OpenGL-on-Vulkan layer. It is now a native Vulkan 1.3 renderer, focused on 3D. The features it does not have yet are listed below; they report `HRL_INVALID_BACKEND_OPERATION` (warning, once) instead of rendering. See `docs/ARCHITECTURE.md` and `docs/ROADMAP.md`.
+> **Vulkan backend rewrite (API 0.9).** Until 0.8 the Vulkan backend ran the OpenGL renderer through an OpenGL-on-Vulkan layer. It is now a native Vulkan 1.3 renderer with the features of the OpenGL backend (2D, UI, effects, voxel worlds, custom shaders) and more; the comparison is below. See `docs/ARCHITECTURE.md` and `docs/ROADMAP.md`.
 
 ---
 
@@ -101,7 +101,7 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 |Point / directional / spot / sky lights|✅ (no fixed light limit)|✅ (32 lights)|
 |Directional shadows|✅ 4 stable cascades, PCF, alpha tested casters|✅ single map|
 |Spot light shadows|✅ (4)|✅|
-|Point light shadows|✅ with ray traced shadows only|✅ cube maps|
+|Point light shadows|✅ shadow maps (4 lights, 6 faces each), or ray traced|✅ cube maps|
 |Hardware ray traced shadows (`HRL_Vulkan_SetRayTracedShadows`)|✅ when the GPU supports it|❌|
 |Image based lighting (prefiltered specular + irradiance + BRDF LUT)|✅|❌ (single reflection lookup)|
 |Sky sphere (gradient or equirectangular texture)|✅|✅|
@@ -109,17 +109,23 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 |Bloom (post-process material, `bloomStrength`)|✅|✅|
 |Fog (linear / exponential)|✅|✅|
 |Color picking, screenshots, debug primitives, unlit / normal debug views|✅|✅|
-|Custom shaders (`HRL_CreateShader`)|❌ planned as surface functions|✅ GLSL 3.30|
+|Custom shaders (`HRL_CreateShader`)|✅ surface / vertex functions (lit, shadows, ray tracing), compiled at run time (glslang)|✅ GLSL 3.30 vertex + fragment|
 |Landscapes|✅ continuous LOD (CDLOD), float heights, edits, ray traced|✅ (8-bit heightmaps only)|
 |Foliage: mesh instances (LOD, impostors, wind, interaction, scatter / paint / erase)|✅ GPU culled, millions of instances|❌|
 |Procedural GPU grass|✅|❌|
-|Custom post-process materials, MSAA|❌ planned (TAA instead of MSAA)|✅|
-|SSAO, SSR, decals, volumetric fog, clouds, god rays|❌ planned|✅|
-|Global illumination|❌ planned (hardware ray traced, with fallback)|✅ software BVH in shaders|
-|Sprites, widgets, text, gizmos, VFX, 2D voxel worlds|❌ not started (3D first)|✅|
+|Custom post-process materials|✅ the OpenGL 3.30 post-process shaders, as they are|✅|
+|Colour controls of the built-in post-process (contrast, saturation, hue, tint, vignette, grain, fade, sharpen, chromatic aberration, invert)|✅|✅|
+|Anti-aliasing|✅ FXAA (default), TAA (`HRL_Vulkan_SetAntiAliasing`); no MSAA|✅ MSAA|
+|SSAO, SSR, decals, local / global volumetric fog, clouds, god rays|✅ the OpenGL effect shaders, compiled at run time|✅|
+|Screen space displacement materials|✅|✅|
+|Global illumination|✅ `HRL_GI_DDGI` (probe volume); SSGI, VCT, LPV: OpenGL only|✅ software BVH in shaders|
+|Sprites (regions, draw order, picking), widgets, SDF text, on-screen messages, mesh info, gizmos|✅|✅|
+|VFX particles (billboards, stretched, mesh particles, blend modes)|✅|✅|
+|2D voxel worlds (flat / blocky / smooth, type textures, emissive voxels and their light)|✅|✅|
+|VSync control|✅ `HRL_Vulkan_SetVSync`|Application|
 |FBX import, asynchronous loading (CPU side)|✅|✅|
 
-### Global illumination (OpenGL 3.3 only)
+### Global illumination
 
 ```c
 HRL_SetGlobalIlluminationMethod(scene, HRL_GI_DDGI);
@@ -136,7 +142,7 @@ HRL_SetGlobalIlluminationIntensity(scene, 1.0f); // optional
 |`HRL_GI_RAY_TRACING`|Ray traced bounces per pixel + temporal denoising|Accurate, a bit noisy when moving|
 |`HRL_GI_PATH_TRACING`|Progressive path tracing (6 bounces)|Reference, converges while the camera is still|
 
-Ray tracing is done in shaders on a BVH of the scene, so no ray tracing hardware is needed. These methods belong to the deprecated OpenGL 3.3 backend; the Vulkan backend will get its own hardware ray traced GI. The world space methods use the static 3D meshes and the landscapes, and update automatically when they or the lights change.
+With OpenGL 3.3, ray tracing is done in shaders on a BVH of the scene, so no ray tracing hardware is needed; the world space methods use the static 3D meshes and the landscapes, and update automatically when they or the lights change. With Vulkan, `HRL_GI_DDGI` is available: a probe volume traced on the CPU against the static meshes (a few probes per frame until it converges), sampled by every lit surface; `HRL_IsGlobalIlluminationMethodSupported` reports the others as unsupported.
 
 ---
 
@@ -228,6 +234,8 @@ HRL_InitContext(width, height, NULL);
 if (HRL_Vulkan_IsRayTracingSupported())
     HRL_Vulkan_SetRayTracedShadows(HRL_TRUE);   // optional
 ```
+
+Anti-aliasing and presentation: `HRL_Vulkan_SetAntiAliasing(HRL_VULKAN_AA_NONE / FXAA / TAA)` (FXAA by default; `HRL_SetAntialiasingMode` with more than one sample selects TAA), `HRL_Vulkan_SetVSync(HRL_FALSE)` presents without vertical synchronisation (MAILBOX, else IMMEDIATE). Tone mapping (ACES) is on by default; a post-process material with `toneMappingEnabled` set to 0 shows the colours as they are, as the OpenGL default (2D games).
 
 Without a surface callback the Vulkan backend renders off-screen (scenes, screenshots and picking still work). Environment variables: `HRL_VULKAN_VALIDATION=1` enables the Khronos validation layer (messages go to the HRL error callback), `HRL_VULKAN_NO_RAYTRACING=1` disables hardware ray tracing, `HRL_VULKAN_THREADS=n` sets the number of threads used to prepare a frame, `HRL_VULKAN_PIPELINE_CACHE=file` keeps compiled pipelines between runs (also `HRL_Vulkan_SetPipelineCachePath`). Diagnostics: `HRL_Vulkan_GetSceneStats`, `HRL_Vulkan_GetMemoryUsage`.
 
@@ -346,6 +354,28 @@ void HRL_MaterialSetTexture(HRL_id matid, const char* name, HRL_id textureid);
 ```
 
 HRL provides built-in default shaders for common cases: `HRL_SpriteShader`, `HRL_Mesh2DShader`, `HRL_Mesh3DShader`, `HRL_DebugShader`.
+
+#### Custom shaders with Vulkan
+
+The Vulkan backend compiles `HRL_CreateShader` sources at run time (HRL is built with glslang from the Vulkan SDK, CMake option `HRL_VULKAN_RUNTIME_SHADERS`); compilation errors are reported by `HRL_CreateShader`. Two kinds of sources are accepted:
+
+* **Surface shaders** (3D meshes): the fragment source defines `void Surface(HRL_SurfaceInput i, inout HRL_Surface s)`, which receives the surface computed from the material (textures, tint, roughness...) and changes it; the vertex source may define `void Vertex(inout HRL_VertexData v)` to move the vertices. Lighting, shadows (alpha tested by the surface opacity), fog, ray tracing and picking are done by HRL. The structures and helpers are in `src/shaders/vulkan/custom.glsl`.
+* **Post-process shaders**: the OpenGL 3.30 fragment shaders written for `HRL_CreatePostProcess` work as they are (`in vec2 uv`, `uScene`, `uBrightScene`, `uDepth`, `uNormal`, `uScreenSize`, `uTime`).
+
+In both, `uniform` declarations of `float`, `int`, `uint`, `bool`, `vecN`, `ivecN`, `mat3`, `mat4` (and arrays for post-processes) and `sampler2D` are material parameters, set with `HRL_MaterialSet*`; their initializer is the default value.
+
+```c
+const char* frag =
+    "uniform vec3 Glow = vec3(1.0, 0.4, 0.0);\n"
+    "uniform float Speed = 2.0;\n"
+    "void Surface(HRL_SurfaceInput i, inout HRL_Surface s)\n"
+    "{\n"
+    "    s.emissive = Glow * (0.5 + 0.5 * sin(i.time * Speed));\n"
+    "}\n";
+HRL_id shader = HRL_CreateShader(NULL, 0, frag, strlen(frag));
+HRL_id material = HRL_CreateMaterial(shader);
+HRL_MaterialSetFloat(material, "Speed", 4.0f);
+```
 
 ---
 

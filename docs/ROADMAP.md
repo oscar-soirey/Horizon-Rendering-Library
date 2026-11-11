@@ -29,36 +29,35 @@ landscapes; foliage (GPU culled instances, LOD cross-fades, impostors, wind,
 interaction, scatter / paint / erase, ray traced alpha tested shadows);
 procedural grass.
 
+Then the parity with OpenGL: sprites, widgets, texts, gizmos (2D overlays
+built by the frontend), VFX particles, 2D voxel worlds with the light of the
+emissive voxels, custom shaders (surface / vertex functions, OpenGL
+post-process shaders, compiled at run time with glslang), the screen space
+effects of OpenGL (decals, SSR, SSAO, volumetric fog, god rays, clouds:
+their shaders compiled at run time), screen space displacement, FXAA and TAA,
+VSync control, point light shadow maps, DDGI probes.
+
 ## Next steps
 
-1. **3D parity** (done: skeletal meshes, translucency, alpha tested
-   shadows, landscapes). Remaining: point light shadow maps for GPUs without
-   ray tracing, acceleration structures of skinned meshes (refit), landscape
-   layers (splat maps) and holes.
-2. **Custom materials**: surface functions (see `ARCHITECTURE.md`), which needs
-   a run time GLSL → SPIR-V compiler linked into HRL (glslang) and a pipeline cache.
-3. **Temporal foundation**: thin G-buffer (normal, roughness, motion vectors),
-   depth pre-pass, TAA, then the custom post-process material chain (bloom is done).
-   MSAA is not planned on Vulkan.
-4. **Lighting scale**: clustered light lists (forward+), point light shadow
-   maps for GPUs without ray tracing, SSAO, SSR.
-5. **Ray tracing**: reflections, then diffuse GI with probes (DDGI) traced with
-   hardware rays, with a screen space fallback; denoising relies on step 3.
-   BLAS compaction and refit for skinned meshes.
-6. **Frontend** (done): `hrl.cpp` split by domain, flat id storage, scene data
-   cache with change tracking, Vulkan backend isolated from the frontend state.
-   Remaining: objects are still owned through raw pointers created and
+1. **3D**: acceleration structures of skinned meshes (refit), landscape layers
+   (splat maps) and holes; voxel worlds in the shadow maps.
+2. **Temporal foundation**: motion vectors (moving objects in the TAA), thin
+   G-buffer written by the forward pass (normals instead of the ones rebuilt
+   from the depth for the effects).
+3. **Lighting scale**: clustered light lists (forward+).
+4. **Ray tracing**: reflections, then diffuse GI with probes traced with
+   hardware rays (the DDGI probes are CPU traced today); SSGI / VCT / LPV are
+   not planned on Vulkan. BLAS compaction and refit for skinned meshes.
+5. **Frontend**: objects are still owned through raw pointers created and
    deleted by the frontend; the OpenGL backends still read the frontend context.
-7. **GPU driven** (culling, LOD selection, Hi-Z occlusion, draw-indirect-count:
+6. **GPU driven** (culling, LOD selection, Hi-Z occlusion, draw-indirect-count:
    done). Remaining: packed vertex format; texture streaming driven by
    `HRL_Vulkan_GetMemoryUsage`; dedicated transfer queue for uploads; foliage
    in the ray traced scene beyond 100 m (impostor proxies); foliage and grass
    in point / spot light shadow maps; grass ray traced shadows.
-8. **Frame graph** (first version done): passes, automatic barriers,
-   transient pool. To add with the passes of steps 3 to 5: pass culling and
-   reordering, transient aliasing inside a frame, compute passes as first
-   class citizens.
-9. **2D and tools**: sprites, text, widgets, gizmos, VFX, voxel worlds on Vulkan.
+7. **Frame graph**: pass culling and reordering, transient aliasing inside a
+   frame, compute passes as first class citizens; the screen space effects
+   ping-pong through copies today.
 
 Rust: no component currently justifies a second language and an FFI boundary.
 The asset pipeline (texture compression, mesh processing) would be the first candidate.

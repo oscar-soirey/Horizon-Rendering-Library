@@ -1,5 +1,26 @@
 # Changelog
 
+## Vulkan: feature parity with OpenGL (API 0.9)
+
+### Added (Vulkan)
+
+- **2D and UI**: sprites (UV regions, draw order, picking as `HRL_SPRITE`, nearest texels), widgets (buttons, labels, images, sliders, checkboxes, progress bars, mouse input and callbacks), SDF texts, on-screen messages, mesh information texts (`HRL_DEBUG_VIEW_MESH_INFO`) and gizmos. The frontend runs the widget logic and gives the backend textured quads per viewport (`HRL_SceneFrame::overlays`).
+- **Anti-aliasing**: FXAA (default) and temporal anti-aliasing (`HRL_Vulkan_SetAntiAliasing`); `HRL_SetAntialiasingMode` with more than one sample selects TAA.
+- **VSync**: `HRL_Vulkan_SetVSync` (MAILBOX, else IMMEDIATE, when off).
+- **Point light shadow maps** without ray tracing (4 lights, 6 faces each, at most 1024 px).
+- **Custom shaders** (`HRL_CreateShader`), compiled at run time with glslang: surface / vertex functions for meshes (lighting, shadows, ray tracing and picking kept), OpenGL 3.30 post-process shaders as they are. Material parameters come from the `uniform` declarations. New CMake option `HRL_VULKAN_RUNTIME_SHADERS` (ON; needs the glslang component of the Vulkan SDK).
+- **Built-in post-process controls**: brightness, contrast, saturation, hue shift, tint, invert, vignette, film grain, fade, sharpen, chromatic aberration, `toneMappingEnabled` (0: colours shown as they are).
+- **Screen space effects**: decals, screen space reflections, ambient occlusion, local and global volumetric fog, god rays, volumetric clouds. They run the shaders of the OpenGL backend, compiled at run time, on depth and normals given in the OpenGL conventions, so both backends give the same image.
+- **Screen space displacement materials**.
+- **VFX particles**: billboards, stretched billboards, mesh particles, alpha / additive / multiply blending.
+- **2D voxel worlds**: the chunk geometry of the core, type textures (bindless), emissive voxels and the light they give (`HRL_SetVoxelEmissiveLighting`), edits and streaming.
+- **Global illumination**: `HRL_GI_DDGI`, the irradiance probe volume of `core/gi_probes.cpp` (CPU traced, uploaded and sampled by every lit shader). SSGI, VCT and LPV stay OpenGL only.
+- Tests `vulkan_2d`, `vulkan_custom`, `vulkan_effects` (screenshots checked pixel by pixel), anti-aliasing and point light shadows in `vulkan_smoke`.
+
+### Fixed (Vulkan)
+
+- Textures created from bitmaps (`HRL_CreateTextureAsync`, texts) were upside down compared with `HRL_CreateTexture` and the OpenGL backend.
+
 ## Native Vulkan backend, OpenGL deprecation (API 0.9)
 
 ### Changed (breaking for `HRL_VULKAN`)

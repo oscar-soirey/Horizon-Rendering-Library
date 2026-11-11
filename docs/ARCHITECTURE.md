@@ -82,7 +82,13 @@ changes a value.
 | `vk_impostor` | Baking and drawing of octahedral impostors |
 | `vk_grass` | Procedural grass tiles around the camera |
 | `vk_environment` | Image based lighting |
-| `vk_renderer` | Render targets, frame of a scene, picking, screenshots |
+| `vk_renderer` | Render targets, frame of a scene, picking, screenshots, anti-aliasing |
+| `vk_overlay` | Gizmos, widgets, texts and messages over the viewports |
+| `vk_custom` | Custom shaders: run time GLSL compiler (glslang), surface functions, OpenGL post-process shaders |
+| `vk_effects` | Screen space effects and custom post-processes |
+| `vk_vfx` | Particles |
+| `vk_voxel` | 2D voxel worlds, light of the emissive voxels |
+| `vk_gi` | Global illumination probes |
 | `vulkan_backend` | `HRL_vtable` and the `hrl_vulkan.h` functions |
 
 `vk_renderer_internal.h` is the private header shared by these files.
@@ -194,7 +200,9 @@ recorded by `FrameGraph::Execute`.
 per viewport:  cull phase 1 → shadow map × N → forward phase 1 (meshes, landscapes)
                → Hi-Z → cull phase 2 (meshes, foliage, grass) → forward phase 2
                (meshes, foliage, impostors, grass, sky, translucent)
-[bloom downsample × N → upsample × N] → tone mapping → [debug] → [screenshot] → [present copy]
+               → [screen space displacement]
+[TAA resolve] → [screen space effects, custom post-processes] → [bloom downsample × N → upsample × N]
+→ tone mapping → [FXAA] → [debug] → [overlays: gizmos, widgets, texts] → [screenshot] → [present copy]
 ```
 
 Passes run in declaration order and none is culled: no pass is optional yet.
@@ -240,9 +248,24 @@ scene data cache.
   backend, so a scene keeps its look when the backend changes.
 * Texture rows: `HRL_CreateTexture` stores the bottom row first (v = 0), as OpenGL does.
 
-### Material contract (planned for custom shaders)
+### Custom shaders (`vk_custom`)
 
-`HRL_CreateShader` is not implemented on Vulkan yet. It will accept a GLSL
-*surface function* that fills base colour, normal, roughness, metallic,
-emissive and opacity; HRL generates the rest, so custom materials work with
-shadows, ray tracing and GI. Full vertex + fragment shaders stay an OpenGL feature.
+`HRL_CreateShader` sources are compiled at run time by glslang (linked when
+HRL is built, `HRL_VULKAN_RUNTIME_SHADERS`). A fragment source that defines
+`Surface(HRL_SurfaceInput, inout HRL_Surface)` is a *surface shader*: it is
+included into the built-in mesh shaders (`mesh.frag`, `shadow.frag`, and
+`mesh.vert` / `shadow.vert` for a `Vertex(inout HRL_VertexData)` function),
+whose GLSL sources are embedded in the library, so custom materials keep the
+lighting, shadows, fog, ray traced shadows and picking. Their meshes are drawn
+from the CPU (frustum culled, one pipeline per shader and bucket). Any other
+fragment source is an OpenGL 3.30 post-process shader, compiled as it is.
+The `uniform` declarations are removed from the source and replaced by reads
+of a parameter table (`vec4` per value) filled from the material.
+
+### OpenGL effects (`vk_effects`)
+
+Decals, screen space reflections, ambient occlusion, volumetric fog, god rays
+and clouds run the shaders of the OpenGL backend (`backend/common/hrl_builtin_glsl.h`)
+through the same compiler. They read the HDR image as a vertically flipped
+copy (OpenGL row order), the depth in the OpenGL convention and world normals
+rebuilt from the depth (`glcompat.frag`), and write their viewport back.
