@@ -21,7 +21,7 @@ endif()
 option(HRL_ENABLE_VULKAN "Compile the native Vulkan 1.3 backend (HRL_VULKAN)" ON)
 option(HRL_ENABLE_GLES3 "Compile the OpenGL ES 3.0 backend (HRL_OPENGL_ES_30)" OFF)
 option(HRL_BUILD_STATIC "Also build the static library target `hrl`" OFF)
-option(HRL_BUILD_EXAMPLES "Build the examples (needs GLFW, fetched when not installed)" OFF)
+option(HRL_BUILD_EXAMPLES "Build the examples (GLFW and Raven are fetched when not available)" OFF)
 option(HRL_BUILD_TESTS "Build the tests (run them with ctest)" OFF)
 set(HRL_VULKAN_SDK "" CACHE PATH "Vulkan SDK root, when the VULKAN_SDK environment variable is not set")
 
@@ -176,9 +176,13 @@ if(HRL_ENABLE_VULKAN)
     hrl_vk_shader(mesh_rq_frag     mesh.frag HRL_RAY_QUERY)
     hrl_vk_shader(mesh_at_rq_frag  mesh.frag HRL_ALPHA_TEST HRL_RAY_QUERY)
     hrl_vk_shader(shadow_vert      shadow.vert)
+    hrl_vk_shader(shadow_at_vert   shadow.vert HRL_ALPHA_TEST)
+    hrl_vk_shader(shadow_frag      shadow.frag)
     hrl_vk_shader(fullscreen_vert  fullscreen.vert)
     hrl_vk_shader(sky_frag         sky.frag)
     hrl_vk_shader(tonemap_frag     tonemap.frag)
+    hrl_vk_shader(bloom_frag       bloom.frag)
+    hrl_vk_shader(skin_comp        skin.comp)
     hrl_vk_shader(debug_vert       debug.vert)
     hrl_vk_shader(debug_frag       debug.frag)
     hrl_vk_shader(env_cube_comp    env_cube.comp)
@@ -199,6 +203,7 @@ if(HRL_ENABLE_VULKAN)
         src/backend/vulkan/vk_mem_alloc.cpp
         src/backend/vulkan/vk_device.cpp
         src/backend/vulkan/vk_frame_graph.cpp
+        src/backend/vulkan/vk_jobs.cpp
         src/backend/vulkan/vk_pipelines.cpp
         src/backend/vulkan/vk_resources.cpp
         src/backend/vulkan/vk_environment.cpp

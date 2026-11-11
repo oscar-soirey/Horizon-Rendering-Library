@@ -18,8 +18,20 @@
 - Vulkan: cascaded shadow maps (4 cascades), spot light shadow maps, hardware ray traced shadows for every light type (`HRL_Vulkan_SetRayTracedShadows`, `HRL_Vulkan_IsRayTracingSupported`), image based lighting from the sky texture or gradient, emissive materials, off-screen rendering without a window, GPU name (`HRL_Vulkan_GetDeviceName`), `HRL_Vulkan_SetShadowDistance`.
 - `HRL_MaterialSetEmissiveColor` is implemented (it was an empty function).
 - `examples/vulkan_pbr`, `tests/vulkan_smoke.cpp` (run with `ctest`), `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`.
+- New example `hrl_editor`: scene editor with a Raven interface, HRL rendering with Vulkan in a native viewport of Raven. No change to the library.
 - The examples are part of the main CMake project (`-DHRL_BUILD_EXAMPLES=ON`): they link the `hrldll` target and include `src/` directly. The library and the executables are written to `build/bin`. The former `example/` folder (copied headers, copied `libhrldll`, prebuilt GLFW, copy of GLM) is replaced by `examples/opengl/` (targets `hrl_gl_showcase`, `hrl_gl_minimal`, `hrl_gl_vfx`, `hrl_gl_voxel`, `hrl_gl_widgets`); GLFW is downloaded by CMake when it is not installed. Their resources live in `examples/assets` (not versioned).
 - Third party: Vulkan Memory Allocator 3.1.0 (`third_party/vma`).
+
+### Added (Vulkan rendering)
+
+- Translucent materials: `HRL_MATERIAL_PARAM_TRANSLUCENT`, alpha blended, drawn back to front after the opaque scene and the sky.
+- Alpha tested shadow casters (the holes of a masked material no longer cast a shadow).
+- Bloom: enabled by a post-process material on a viewport (`bloomStrength`, default 1), computed on a chain of pooled half resolution images.
+- Skeletal meshes: skinned by a compute pass into the shared vertex buffer, only when their pose changes; lighting and shadow maps then treat them as any mesh. They are not part of the ray traced scene yet (they cast no ray traced shadow).
+- Pipeline cache on disk (`HRL_Vulkan_SetPipelineCachePath` or `HRL_VULKAN_PIPELINE_CACHE`).
+- Frame preparation (LOD selection, culling for the camera and each shadow view) on worker threads (`HRL_VULKAN_THREADS`).
+- `HRL_Vulkan_GetMemoryUsage` (GPU memory used / budget, `VK_EXT_memory_budget` when available).
+- The device now requires the `independentBlend` feature.
 
 ### Architecture
 
