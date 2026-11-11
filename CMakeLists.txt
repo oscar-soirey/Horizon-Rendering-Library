@@ -103,6 +103,7 @@ set(HRL_SOURCES
     src/frontend/gizmo.cpp
     src/frontend/widget.cpp
     src/frontend/debug.cpp
+    src/frontend/overlay.cpp
 
     # Core: CPU systems shared by the frontend and the backends
     src/core/utils_functions.cpp
@@ -110,6 +111,7 @@ set(HRL_SOURCES
     src/core/render_common.cpp
     src/core/voxel_render.cpp
     src/core/gi_scene.cpp
+    src/core/gi_probes.cpp
 
     # OpenGL 3.3 backend (deprecated)
     src/backend/opengl33/gl33_backend.cpp
@@ -217,6 +219,23 @@ if(HRL_ENABLE_VULKAN)
     hrl_vk_shader(grass_shadow_vert grass.vert HRL_SHADOW)
     hrl_vk_shader(grass_frag       grass.frag)
     hrl_vk_shader(grass_rq_frag    grass.frag HRL_RAY_QUERY)
+    hrl_vk_shader(mesh_sprite_frag mesh.frag HRL_SPRITE)
+    hrl_vk_shader(mesh_sprite_rq_frag mesh.frag HRL_SPRITE HRL_RAY_QUERY)
+    hrl_vk_shader(overlay_vert     overlay.vert)
+    hrl_vk_shader(overlay_frag     overlay.frag)
+    hrl_vk_shader(fxaa_frag        fxaa.frag)
+    hrl_vk_shader(taa_frag         taa.frag)
+    hrl_vk_shader(post_gl_vert     post_gl.vert)
+    hrl_vk_shader(glcompat_frag    glcompat.frag)
+    hrl_vk_shader(vfx_vert         vfx.vert)
+    hrl_vk_shader(vfx_frag         vfx.frag)
+    hrl_vk_shader(voxel_vert       voxel.vert)
+    hrl_vk_shader(voxel_frag       voxel.frag)
+    hrl_vk_shader(voxel_rq_frag    voxel.frag HRL_RAY_QUERY)
+    hrl_vk_shader(voxel_emit_vert  voxel_emit.vert)
+    hrl_vk_shader(voxel_emit_frag  voxel_emit.frag)
+    hrl_vk_shader(voxel_light_frag voxel_light.frag)
+    hrl_vk_shader(ssdisplacement_frag ssdisplacement.frag)
 
     add_custom_command(
         OUTPUT ${HRL_GENERATED_DIR}/hrl_vk_shaders.cpp ${HRL_GENERATED_DIR}/hrl_vk_shaders.h
@@ -227,8 +246,86 @@ if(HRL_ENABLE_VULKAN)
         VERBATIM
     )
 
+    # Run time GLSL compiler (custom shaders): glslang, from the Vulkan SDK or
+    # the system. Without it HRL_CreateShader reports an error on Vulkan.
+    option(HRL_VULKAN_RUNTIME_SHADERS "Link glslang to compile custom shaders (HRL_CreateShader) at run time" ON)
+    set(HRL_VK_GLSLANG_TARGETS "")
+    if(HRL_VULKAN_RUNTIME_SHADERS)
+        find_package(glslang CONFIG QUIET
+            HINTS "$ENV{VULKAN_SDK}/Lib/cmake" "$ENV{VULKAN_SDK}/lib/cmake" "${HRL_VULKAN_SDK}/Lib/cmake" "${HRL_VULKAN_SDK}/lib/cmake")
+        if(TARGET glslang::glslang AND TARGET glslang::SPIRV)
+            set(HRL_VK_GLSLANG_TARGETS glslang::glslang glslang::SPIRV)
+            if(TARGET glslang::glslang-default-resource-limits)
+                list(APPEND HRL_VK_GLSLANG_TARGETS glslang::glslang-default-resource-limits)
+            endif()
+        elseif(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+            find_package(Vulkan QUIET COMPONENTS glslang)
+            if(TARGET Vulkan::glslang)
+                set(HRL_VK_GLSLANG_TARGETS Vulkan::glslang)
+            endif()
+        endif()
+        # glslang of the Vulkan SDK is built with the SPIR-V optimizer: it needs
+        # SPIRV-Tools-opt and SPIRV-Tools (after it, in this order).
+        if(HRL_VK_GLSLANG_TARGETS)
+            if(TARGET SPIRV-Tools-opt)
+                list(APPEND HRL_VK_GLSLANG_TARGETS SPIRV-Tools-opt)
+            else()
+                find_library(HRL_SPIRV_TOOLS_OPT NAMES SPIRV-Tools-opt
+                    HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" "${HRL_VULKAN_SDK}/Lib" "${HRL_VULKAN_SDK}/lib")
+                find_library(HRL_SPIRV_TOOLS_OPT_DEBUG NAMES SPIRV-Tools-optd
+                    HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" "${HRL_VULKAN_SDK}/Lib" "${HRL_VULKAN_SDK}/lib")
+                if(HRL_SPIRV_TOOLS_OPT)
+                    if(HRL_SPIRV_TOOLS_OPT_DEBUG)
+                        list(APPEND HRL_VK_GLSLANG_TARGETS optimized ${HRL_SPIRV_TOOLS_OPT} debug ${HRL_SPIRV_TOOLS_OPT_DEBUG})
+                    else()
+                        list(APPEND HRL_VK_GLSLANG_TARGETS ${HRL_SPIRV_TOOLS_OPT})
+                    endif()
+                endif()
+            endif()
+            if(TARGET SPIRV-Tools-static)
+                list(APPEND HRL_VK_GLSLANG_TARGETS SPIRV-Tools-static)
+            elseif(TARGET SPIRV-Tools)
+                list(APPEND HRL_VK_GLSLANG_TARGETS SPIRV-Tools)
+            else()
+                find_library(HRL_SPIRV_TOOLS NAMES SPIRV-Tools
+                    HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" "${HRL_VULKAN_SDK}/Lib" "${HRL_VULKAN_SDK}/lib")
+                find_library(HRL_SPIRV_TOOLS_DEBUG NAMES SPIRV-Toolsd
+                    HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" "${HRL_VULKAN_SDK}/Lib" "${HRL_VULKAN_SDK}/lib")
+                if(HRL_SPIRV_TOOLS)
+                    if(HRL_SPIRV_TOOLS_DEBUG)
+                        list(APPEND HRL_VK_GLSLANG_TARGETS optimized ${HRL_SPIRV_TOOLS} debug ${HRL_SPIRV_TOOLS_DEBUG})
+                    else()
+                        list(APPEND HRL_VK_GLSLANG_TARGETS ${HRL_SPIRV_TOOLS})
+                    endif()
+                endif()
+            endif()
+        endif()
+        if(HRL_VK_GLSLANG_TARGETS)
+            message(STATUS "HRL: custom shaders on Vulkan enabled (glslang: ${HRL_VK_GLSLANG_TARGETS})")
+        else()
+            message(WARNING "HRL: glslang was not found (Vulkan SDK component). Custom shaders "
+                "(HRL_CreateShader) will not be available with Vulkan.")
+        endif()
+    endif()
+    # GLSL sources the run time compiler builds the custom shaders from.
+    set(HRL_VK_GLSL_EMBED "")
+    foreach(F common.glsl brdf.glsl lighting.glsl material_alpha.glsl custom.glsl mesh.vert mesh.frag shadow.vert shadow.frag)
+        list(APPEND HRL_VK_GLSL_EMBED ${F}=${HRL_VK_SHADER_DIR}/${F})
+        list(APPEND HRL_VK_GLSL_DEPS ${HRL_VK_SHADER_DIR}/${F})
+    endforeach()
+    add_custom_command(
+        OUTPUT ${HRL_GENERATED_DIR}/hrl_vk_glsl_sources.cpp ${HRL_GENERATED_DIR}/hrl_vk_glsl_sources.h
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/embed_text.py
+                ${HRL_GENERATED_DIR}/hrl_vk_glsl_sources.cpp ${HRL_GENERATED_DIR}/hrl_vk_glsl_sources.h ${HRL_VK_GLSL_EMBED}
+        DEPENDS ${HRL_VK_GLSL_DEPS} ${CMAKE_SOURCE_DIR}/tools/embed_text.py
+        COMMENT "Embedding Vulkan GLSL sources"
+        VERBATIM
+    )
+
     list(APPEND HRL_SOURCES
         ${HRL_GENERATED_DIR}/hrl_vk_shaders.cpp
+        ${HRL_GENERATED_DIR}/hrl_vk_glsl_sources.cpp
+        src/backend/vulkan/vk_custom.cpp
         src/backend/vulkan/vk_mem_alloc.cpp
         src/backend/vulkan/vk_device.cpp
         src/backend/vulkan/vk_frame_graph.cpp
@@ -243,6 +340,11 @@ if(HRL_ENABLE_VULKAN)
         src/backend/vulkan/vk_impostor.cpp
         src/backend/vulkan/vk_grass.cpp
         src/backend/vulkan/vk_renderer.cpp
+        src/backend/vulkan/vk_overlay.cpp
+        src/backend/vulkan/vk_effects.cpp
+        src/backend/vulkan/vk_vfx.cpp
+        src/backend/vulkan/vk_voxel.cpp
+        src/backend/vulkan/vk_gi.cpp
         src/backend/vulkan/vulkan_backend.cpp
     )
 endif()
@@ -272,6 +374,10 @@ function(hrl_configure_target TARGET)
     if(HRL_ENABLE_VULKAN)
         target_compile_definitions(${TARGET} PRIVATE HRL_ENABLE_VULKAN)
         target_link_libraries(${TARGET} PRIVATE Vulkan::Vulkan)
+        if(HRL_VK_GLSLANG_TARGETS)
+            target_compile_definitions(${TARGET} PRIVATE HRL_VK_RUNTIME_SHADERS)
+            target_link_libraries(${TARGET} PRIVATE ${HRL_VK_GLSLANG_TARGETS})
+        endif()
     endif()
 endfunction()
 

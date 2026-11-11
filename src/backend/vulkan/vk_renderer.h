@@ -8,6 +8,8 @@
 #include "../../core/backend_api.h"
 #include "../../hrl_vulkan.h"
 
+#include <string>
+
 namespace hrlvk
 {
 bool RendererInit(uint32_t width, uint32_t height);
@@ -43,6 +45,11 @@ void GetProjectionMatrix(float* out);
 
 bool GetSceneStats(HRL_id scene, HRL_VulkanSceneStats& stats);
 
+// Custom shaders (vk_custom.cpp): compiled at creation, errors reported then.
+bool CreateCustomShader(HRL_id id, const std::string& vert, const std::string& frag);
+void DeleteCustomShader(HRL_id id);
+bool IsCustomShader(HRL_id id);
+
 // File the pipeline cache is loaded from / saved to (null or empty: none).
 void SetPipelineCachePath(const char* path);
 
@@ -53,6 +60,9 @@ void SetShadowDistance(float distance);
 void SetOcclusionCulling(bool enabled);
 bool GetFoliageStats(HRL_id foliage, HRL_VulkanFoliageStats& stats);
 bool OcclusionCulling();
+// 0 : none, 1 : FXAA, 2 : TAA (HRL_EVulkanAntiAliasing).
+void SetAntiAliasing(uint32_t mode);
+uint32_t GetAntiAliasing();
 } // namespace hrlvk
 
 #endif

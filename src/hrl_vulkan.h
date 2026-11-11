@@ -113,6 +113,33 @@ HRL_API int HRL_Vulkan_GetFoliageStats(HRL_id foliage, HRL_VulkanFoliageStats* s
 HRL_API void HRL_Vulkan_SetOcclusionCulling(int enabled);
 HRL_API int HRL_Vulkan_GetOcclusionCulling(void);
 
+/**
+ * Anti-aliasing of the scenes (MSAA is not available with Vulkan):
+ * - HRL_VULKAN_AA_NONE : none.
+ * - HRL_VULKAN_AA_FXAA : fast post-process filter on the final image (default).
+ * - HRL_VULKAN_AA_TAA  : temporal anti-aliasing: the camera is jittered by a
+ *   sub-pixel offset every frame and the frames are accumulated, reprojected
+ *   with the depth. Best quality on still and slowly moving views; fast moving
+ *   objects may leave a short trail.
+ * May be called at any time, before initialization included. HRL_SetAntialiasingMode
+ * maps to it: 0 or 1 sample gives NONE, more gives TAA.
+ */
+typedef enum HRL_EVulkanAntiAliasing {
+    HRL_VULKAN_AA_NONE = 0,
+    HRL_VULKAN_AA_FXAA = 1,
+    HRL_VULKAN_AA_TAA = 2
+} HRL_EVulkanAntiAliasing;
+HRL_API void HRL_Vulkan_SetAntiAliasing(HRL_EVulkanAntiAliasing mode);
+HRL_API HRL_EVulkanAntiAliasing HRL_Vulkan_GetAntiAliasing(void);
+
+/**
+ * Vertical synchronisation of the presentation (default on). Off, HRL presents
+ * as soon as a frame is ready: MAILBOX when the surface offers it (no tearing),
+ * else IMMEDIATE. Takes effect at the next frame; no effect off-screen.
+ */
+HRL_API void HRL_Vulkan_SetVSync(int enabled);
+HRL_API int HRL_Vulkan_GetVSync(void);
+
 /** Name of the GPU selected by HRL, or an empty string before initialization. */
 HRL_API const char* HRL_Vulkan_GetDeviceName(void);
 

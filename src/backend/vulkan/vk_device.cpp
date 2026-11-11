@@ -528,7 +528,18 @@ bool Device::CreateSwapchain(uint32_t width, uint32_t height)
 	ci.preTransform = sc.currentTransform;
 	ci.compositeAlpha = (sc.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
 		? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+	// FIFO is always available. Without vertical synchronisation, MAILBOX
+	// (no tearing) is preferred to IMMEDIATE.
 	ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+	if (!vsync_)
+	{
+		uint32_t modeCount = 0;
+		vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &modeCount, nullptr);
+		std::vector<VkPresentModeKHR> modes(modeCount);
+		vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &modeCount, modes.data());
+		for (VkPresentModeKHR wanted : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR})
+			if (std::find(modes.begin(), modes.end(), wanted) != modes.end()) { ci.presentMode = wanted; break; }
+	}
 	ci.clipped = VK_TRUE;
 	ci.oldSwapchain = swapchain;
 	VkSwapchainKHR created = VK_NULL_HANDLE;
@@ -571,6 +582,13 @@ void Device::DestroySwapchain()
 	if (swapchain) vkDestroySwapchainKHR(device, swapchain, nullptr);
 	swapchain = VK_NULL_HANDLE;
 	backbufferValid_ = false;
+}
+
+void Device::SetVSync(bool enabled)
+{
+	if (vsync_ == enabled) return;
+	vsync_ = enabled;
+	swapchainDirty_ = true;
 }
 
 void Device::Resize(uint32_t width, uint32_t height)

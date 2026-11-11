@@ -64,10 +64,8 @@ void VK_RenderSceneFrame(const HRL_SceneFrame& frame)
 {
 	if (const hrl_scene_t* scene = frame.scene)
 	{
-		if (scene->voxel_world) Unsupported("voxel worlds");
-		if (!scene->vfx_systems.empty()) Unsupported("VFX systems");
-		if (!scene->decals.empty()) Unsupported("decals");
-		if (scene->global_illumination_enabled) Unsupported("global illumination");
+		if (scene->global_illumination_enabled && scene->global_illumination_method != HRL_GI_DDGI)
+			Unsupported("this global illumination method (HRL_GI_DDGI is the one available)");
 	}
 	hrlvk::RendererRenderScene(frame);
 }
@@ -89,11 +87,6 @@ int VK_CreateSkeletalMesh(HRL_id id, const HRL_SkeletalVertex* v, size_t vc, con
 {
 	return hrlvk::CreateSkeletalMesh(id, v, vc, i, ic);
 }
-int VK_CreateSpriteMesh(HRL_id)
-{
-	Unsupported("sprites");
-	return HRL_FALSE;
-}
 
 HRL_id VK_CreateTextureFromBitmapWithId(HRL_id id, BitmapResult bmp)
 {
@@ -102,7 +95,13 @@ HRL_id VK_CreateTextureFromBitmapWithId(HRL_id id, BitmapResult bmp)
 		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "Vulkan: invalid bitmap");
 		return HRL_INVALID_ID;
 	}
-	return hrlvk::CreateTexture(id, bmp.pixels.data(), bmp.width, bmp.height);
+	// Same row order as HRL_CreateTexture and the OpenGL backend: bitmaps are
+	// given top row first and stored bottom row first (v = 0).
+	const size_t row = size_t(bmp.width) * 4u;
+	std::vector<unsigned char> flipped(row * size_t(bmp.height));
+	for (int y = 0; y < bmp.height; ++y)
+		std::memcpy(flipped.data() + size_t(y) * row, bmp.pixels.data() + size_t(bmp.height - 1 - y) * row, row);
+	return hrlvk::CreateTexture(id, flipped.data(), bmp.width, bmp.height);
 }
 HRL_id VK_CreateTextureFromBitmap(BitmapResult bmp)
 {
@@ -134,22 +133,29 @@ int VK_IsValidTexture(HRL_id id) { return hrlvk::IsValidTexture(id) ? HRL_TRUE :
 
 void VK_CreateScene(HRL_id id, int onScreen) { hrlvk::CreateScene(id, onScreen != 0); }
 
-HRL_id VK_CreateShader(const char*, size_t, const char*, size_t)
+// Custom shaders: surface functions or OpenGL post-process shaders (vk_custom.cpp).
+HRL_id VK_CreateShaderWithId(HRL_id id, const char* vert, size_t vertSize, const char* frag, size_t fragSize)
 {
-	Unsupported("custom shaders (surface functions)");
-	return HRL_INVALID_ID;
+	if (!frag || !fragSize)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateShader: empty fragment source");
+		return HRL_INVALID_ID;
+	}
+	// Sizes may count a final null character.
+	auto text = [](const char* s, size_t n) { std::string t(s ? s : "", s ? n : 0); while (!t.empty() && t.back() == '\0') t.pop_back(); return t; };
+	if (id == HRL_INVALID_ID) id = GenerateHRL_ID();
+	return hrlvk::CreateCustomShader(id, text(vert, vertSize), text(frag, fragSize)) ? id : HRL_INVALID_ID;
 }
-HRL_id VK_CreateShaderWithId(HRL_id, const char*, size_t, const char*, size_t)
+HRL_id VK_CreateShader(const char* vert, size_t vertSize, const char* frag, size_t fragSize)
 {
-	Unsupported("custom shaders (surface functions)");
-	return HRL_INVALID_ID;
+	return VK_CreateShaderWithId(HRL_INVALID_ID, vert, vertSize, frag, fragSize);
 }
-// The built-in shaders that have a Vulkan implementation.
 int VK_IsValidShader(HRL_id shader)
 {
-	return (shader == HRL_MESH_3D_SHADER || shader == HRL_SKINNED_3D_MESH_SHADER || shader == HRL_DEFAULT_POST_PROCESS_SHADER)
-		? HRL_TRUE : HRL_FALSE;
+	return (shader == HRL_MESH_3D_SHADER || shader == HRL_SKINNED_3D_MESH_SHADER || shader == HRL_DEFAULT_POST_PROCESS_SHADER ||
+		shader == HRL_SPRITE_SHADER || hrlvk::IsCustomShader(shader)) ? HRL_TRUE : HRL_FALSE;
 }
+void VK_DeleteShader(HRL_id id) { hrlvk::DeleteCustomShader(id); }
 
 void VK_GetModelMatrix(HRL_Mesh* mesh, float* out)
 {
@@ -167,9 +173,11 @@ void VK_BindViewport(HRL_Viewport*) {}
 void VK_BindMaterial(HRL_Material*) {}
 void VK_DrawMesh(HRL_Mesh*) {}
 void VK_EnablePicking(HRL_id, int) {} // the object id buffer is always rendered
-void VK_SetAntialiasing(int samples) { if (samples > 1) Unsupported("MSAA"); }
-int VK_GISupported(int) { return HRL_FALSE; }
-uint32_t VK_GIMethods() { return 0; }
+// No MSAA with Vulkan: more than one sample selects the temporal anti-aliasing.
+void VK_SetAntialiasing(int samples) { hrlvk::SetAntiAliasing(samples > 1 ? HRL_VULKAN_AA_TAA : HRL_VULKAN_AA_NONE); }
+// Global illumination: the probe volume (vk_gi.cpp).
+int VK_GISupported(int method) { return method == HRL_GI_DDGI ? HRL_TRUE : HRL_FALSE; }
+uint32_t VK_GIMethods() { return 1u << (unsigned)HRL_GI_DDGI; }
 } // namespace
 
 HRL_vtable GetVulkanBackend()
@@ -191,7 +199,8 @@ HRL_vtable GetVulkanBackend()
 	t.RHI_CreateSkeletalMesh = VK_CreateSkeletalMesh;
 	t.RHI_CreateMeshLOD = VK_CreateMeshLOD;
 	t.RHI_DeleteMeshLODs = hrlvk::DeleteMeshLODs;
-	t.RHI_CreateSpriteMesh = VK_CreateSpriteMesh;
+	// Sprites are quads of the geometry pool (the frontend creates them with RHI_CreateMesh).
+	t.RHI_CreateSpriteMesh = nullptr;
 	t.RHI_DeleteMesh = hrlvk::DeleteMesh;
 	t.RHI_UpdateLights = VK_UpdateLights;
 	t.RHI_DeleteLight = VK_NoopId;
@@ -211,7 +220,7 @@ HRL_vtable GetVulkanBackend()
 	t.RHI_SetAntialiasingMode = VK_SetAntialiasing;
 	t.RHI_CreateShader = VK_CreateShader;
 	t.RHI_CreateShaderWithId = VK_CreateShaderWithId;
-	t.RHI_DeleteShader = VK_NoopId;
+	t.RHI_DeleteShader = VK_DeleteShader;
 	t.RHI_GetProjectionMatrix = hrlvk::GetProjectionMatrix;
 	t.RHI_GetViewMatrix = hrlvk::GetViewMatrix;
 	t.RHI_GetModelMatrix = VK_GetModelMatrix;
@@ -262,6 +271,18 @@ int HRL_Vulkan_GetFoliageStats(HRL_id foliage, HRL_VulkanFoliageStats* stats)
 	return hrlvk::GetFoliageStats(foliage, *stats) ? HRL_TRUE : HRL_FALSE;
 }
 int HRL_Vulkan_GetOcclusionCulling(void) { return hrlvk::OcclusionCulling() ? HRL_TRUE : HRL_FALSE; }
+void HRL_Vulkan_SetAntiAliasing(HRL_EVulkanAntiAliasing mode)
+{
+	if (mode < HRL_VULKAN_AA_NONE || mode > HRL_VULKAN_AA_TAA)
+	{
+		SetErrorCode(HRL_INVALID_ENUM, HRL_SEVERITY_ERROR, "HRL_Vulkan_SetAntiAliasing: invalid mode");
+		return;
+	}
+	hrlvk::SetAntiAliasing((uint32_t)mode);
+}
+HRL_EVulkanAntiAliasing HRL_Vulkan_GetAntiAliasing(void) { return (HRL_EVulkanAntiAliasing)hrlvk::GetAntiAliasing(); }
+void HRL_Vulkan_SetVSync(int enabled) { hrlvk::GetDevice().SetVSync(enabled != 0); }
+int HRL_Vulkan_GetVSync(void) { return hrlvk::GetDevice().VSync() ? HRL_TRUE : HRL_FALSE; }
 const char* HRL_Vulkan_GetDeviceName(void) { return hrlvk::GetDevice().caps.deviceName.c_str(); }
 
 void HRL_Vulkan_SetPipelineCachePath(const char* path) { hrlvk::SetPipelineCachePath(path); }

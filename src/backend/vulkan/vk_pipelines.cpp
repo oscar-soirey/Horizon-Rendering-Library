@@ -111,7 +111,7 @@ VkShaderModule MakeShader(const HRL_VkShaderBlob& blob)
 	return m;
 }
 
-enum class VertexInput { None, Mesh, PositionOnly, PositionUV, Debug, Landscape };
+enum class VertexInput { None, Mesh, PositionOnly, PositionUV, Debug, Landscape, Voxel, VoxelNoLayer };
 
 struct PipelineDesc
 {
@@ -129,6 +129,9 @@ struct PipelineDesc
 	bool depthClamp = false;
 	bool blend = false; // alpha blending of the first colour attachment
 	bool additive = false; // with blend: destination + source
+	bool additiveAlpha = false; // with blend: destination + source * alpha (particles)
+	bool multiply = false; // with blend: destination * source (particles)
+	bool writeSecond = true; // false: the second attachment (object ids) is not written
 };
 
 VkPipeline MakeGraphicsPipeline(const PipelineDesc& d)
@@ -171,6 +174,13 @@ VkPipeline MakeGraphicsPipeline(const PipelineDesc& d)
 		binding.stride = sizeof(glm::vec2);
 		bindings.push_back({1, sizeof(glm::vec4), VK_VERTEX_INPUT_RATE_INSTANCE});
 		attrs = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0}, {1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0}};
+	}
+	else if (d.input == VertexInput::Voxel || d.input == VertexInput::VoxelNoLayer)
+	{
+		// HRL_VoxelMeshVertex: 2D position, RGBA colour, texture layer.
+		binding.stride = sizeof(float) * 7;
+		attrs = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 8}};
+		if (d.input == VertexInput::Voxel) attrs.push_back({2, 0, VK_FORMAT_R32_SFLOAT, 24});
 	}
 	else if (d.input == VertexInput::Debug)
 	{
@@ -220,7 +230,18 @@ VkPipeline MakeGraphicsPipeline(const PipelineDesc& d)
 			blends[0].srcColorBlendFactor = blends[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
 			blends[0].srcAlphaBlendFactor = blends[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
 		}
+		if (d.additiveAlpha)
+		{
+			blends[0].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+			blends[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+		}
+		if (d.multiply)
+		{
+			blends[0].srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+			blends[0].dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+		}
 	}
+	if (!d.writeSecond && blends.size() > 1) blends[1].colorWriteMask = 0;
 	VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
 	cb.attachmentCount = (uint32_t)blends.size();
 	cb.pAttachments = blends.data();
@@ -318,6 +339,47 @@ VkDescriptorSet AllocFrameSet(VkDescriptorSetLayout layout)
 	return set;
 }
 
+VkPipeline MakeMeshPipeline(const HRL_VkShaderBlob* vs, const HRL_VkShaderBlob* fs, uint32_t b)
+{
+	PipelineDesc d;
+	d.vs = vs ? vs : &hrl_vk_mesh_vert;
+	d.fs = fs;
+	d.layout = R.sceneLayout;
+	d.input = VertexInput::Mesh;
+	d.colorFormats = {kHdrFormat, kIdFormat};
+	d.depthFormat = kDepthFormat;
+	d.depthTest = true;
+	d.depthWrite = !IsTranslucent(b);
+	d.blend = IsTranslucent(b);
+	d.depthCompare = VK_COMPARE_OP_GREATER; // reversed-Z
+	d.cull = IsTwoSided(b) ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
+	return MakeGraphicsPipeline(d);
+}
+
+VkPipeline MakeCustomShadowPipeline(const HRL_VkShaderBlob* vs, const HRL_VkShaderBlob* fs)
+{
+	PipelineDesc d;
+	d.vs = vs;
+	d.fs = fs;
+	d.layout = R.sceneLayout;
+	d.input = VertexInput::Mesh;
+	d.depthFormat = kDepthFormat;
+	d.depthTest = d.depthWrite = true;
+	d.depthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;
+	d.depthBias = true;
+	return MakeGraphicsPipeline(d);
+}
+
+VkPipeline MakePostPipeline(const HRL_VkShaderBlob* fs)
+{
+	PipelineDesc d;
+	d.vs = &hrl_vk_post_gl_vert;
+	d.fs = fs;
+	d.layout = R.postLayout;
+	d.colorFormats = {kHdrFormat};
+	return MakeGraphicsPipeline(d);
+}
+
 bool CreatePipelines()
 {
 	Device& dev = Dev();
@@ -326,12 +388,16 @@ bool CreatePipelines()
 	std::vector<VkDescriptorSetLayoutBinding> view = {
 		{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VF, nullptr},
 		{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VF, nullptr},
-		{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+		{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VF, nullptr}, // materials (custom vertex functions read them)
 		{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
 		{4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
 		{5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
 		{6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-		{7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
+		{7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+		{12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // point light shadows
+		{13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VF, nullptr}, // parameters of the custom materials
+		{14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // global illumination probes
+		{15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}}; // voxel light field
 	if (dev.caps.rayQuery)
 	{
 		view.push_back({8, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
@@ -353,12 +419,13 @@ bool CreatePipelines()
 	R.samplerLayout = MakeSetLayout({{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}});
 	R.tonemapSetLayout = MakeSetLayout({
 		{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
-		{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}});
+		{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+		{2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}}); // grading
 	if (!R.viewLayout || !R.bindlessLayout || !R.imageLayout || !R.samplerLayout || !R.tonemapSetLayout) return false;
 
 	R.sceneLayout = MakePipelineLayout({R.viewLayout, R.bindlessLayout}, VF, sizeof(SkyPush));
 	R.computeLayout = MakePipelineLayout({R.imageLayout}, VK_SHADER_STAGE_COMPUTE_BIT, sizeof(SkyPush));
-	R.tonemapLayout = MakePipelineLayout({R.tonemapSetLayout}, VK_SHADER_STAGE_FRAGMENT_BIT, 12);
+	R.tonemapLayout = MakePipelineLayout({R.tonemapSetLayout}, VK_SHADER_STAGE_FRAGMENT_BIT, 16);
 	R.bloomLayout = MakePipelineLayout({R.samplerLayout}, VK_SHADER_STAGE_FRAGMENT_BIT, 12);
 	R.debugLayout = MakePipelineLayout({}, VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4));
 
@@ -383,6 +450,7 @@ bool CreatePipelines()
 		PipelineDesc d;
 		d.vs = &hrl_vk_mesh_vert;
 		d.fs = IsMasked(b) ? maskedFs : opaqueFs;
+		if (b == BucketSprite) d.fs = rq ? &hrl_vk_mesh_sprite_rq_frag : &hrl_vk_mesh_sprite_frag;
 		d.layout = R.sceneLayout;
 		d.input = VertexInput::Mesh;
 		d.colorFormats = {kHdrFormat, kIdFormat};
@@ -580,6 +648,45 @@ bool CreatePipelines()
 		R.bloomDownPipeline = MakeGraphicsPipeline(d);
 		d.blend = d.additive = true;
 		R.bloomUpPipeline = MakeGraphicsPipeline(d);
+		// FXAA: tone mapped image -> scene image (same layout as the bloom).
+		d.blend = d.additive = false;
+		d.fs = &hrl_vk_fxaa_frag;
+		d.colorFormats = {R.ldrFormat};
+		R.fxaaPipeline = MakeGraphicsPipeline(d);
+		// TAA: current HDR image, history, depth -> new history.
+		R.taaSetLayout = MakeSetLayout({
+			{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+			{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+			{2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}});
+		if (!R.taaSetLayout) return false;
+		R.taaLayout = MakePipelineLayout({R.taaSetLayout}, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(glm::mat4) + 2 * sizeof(glm::vec4));
+		d.fs = &hrl_vk_taa_frag;
+		d.layout = R.taaLayout;
+		d.colorFormats = {kHdrFormat};
+		R.taaPipeline = MakeGraphicsPipeline(d);
+		if (!R.fxaaPipeline || !R.taaPipeline) return false;
+		// Custom post-processes (pipelines made per shader by vk_custom.cpp).
+		R.postSetLayout = MakeSetLayout({
+			{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+			{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+			{2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+			{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+			{4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}}); // normals
+		if (!R.postSetLayout) return false;
+		R.postLayout = MakePipelineLayout({R.postSetLayout, R.bindlessLayout}, VK_SHADER_STAGE_FRAGMENT_BIT, 0);
+		// Depth and normals in the OpenGL conventions for the effect shaders (vk_effects.cpp).
+		R.glCompatSetLayout = MakeSetLayout({
+			{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+			{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}});
+		if (!R.glCompatSetLayout) return false;
+		R.glCompatLayout = MakePipelineLayout({R.glCompatSetLayout}, VK_SHADER_STAGE_FRAGMENT_BIT, 0);
+		PipelineDesc g;
+		g.vs = &hrl_vk_fullscreen_vert;
+		g.fs = &hrl_vk_glcompat_frag;
+		g.layout = R.glCompatLayout;
+		g.colorFormats = {VK_FORMAT_R32_SFLOAT, kHdrFormat};
+		R.glCompatPipeline = MakeGraphicsPipeline(g);
+		if (!R.glCompatPipeline) return false;
 	}
 	{
 		PipelineDesc d;
@@ -595,6 +702,123 @@ bool CreatePipelines()
 		R.debugLinePipeline = MakeGraphicsPipeline(d);
 		d.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 		R.debugTrianglePipeline = MakeGraphicsPipeline(d);
+	}
+	{
+		// 2D overlays (vk_overlay.cpp): quads from a storage buffer, bindless textures.
+		R.overlaySetLayout = MakeSetLayout({{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VF, nullptr}});
+		if (!R.overlaySetLayout) return false;
+		R.overlayLayout = MakePipelineLayout({R.overlaySetLayout, R.bindlessLayout}, VF, sizeof(uint32_t));
+		PipelineDesc d;
+		d.vs = &hrl_vk_overlay_vert;
+		d.fs = &hrl_vk_overlay_frag;
+		d.layout = R.overlayLayout;
+		d.colorFormats = {R.ldrFormat};
+		d.blend = true;
+		R.overlayPipeline = MakeGraphicsPipeline(d);
+		// Gizmos: always in front, like the OpenGL backend.
+		PipelineDesc g;
+		g.vs = &hrl_vk_debug_vert;
+		g.fs = &hrl_vk_debug_frag;
+		g.layout = R.debugLayout;
+		g.input = VertexInput::Debug;
+		g.colorFormats = {R.ldrFormat};
+		g.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+		R.gizmoLinePipeline = MakeGraphicsPipeline(g);
+		if (!R.overlayPipeline || !R.gizmoLinePipeline) return false;
+	}
+	{
+		// Particles (vk_vfx.cpp): depth tested, no depth write, blended.
+		R.vfxSetLayout = MakeSetLayout({{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}});
+		if (!R.vfxSetLayout) return false;
+		R.vfxLayout = MakePipelineLayout({R.viewLayout, R.bindlessLayout, R.vfxSetLayout}, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(uint32_t));
+		for (uint32_t blend = 0; blend < 3; ++blend)
+		{
+			PipelineDesc d;
+			d.vs = &hrl_vk_vfx_vert;
+			d.fs = &hrl_vk_vfx_frag;
+			d.layout = R.vfxLayout;
+			d.colorFormats = {kHdrFormat, kIdFormat};
+			d.depthFormat = kDepthFormat;
+			d.depthTest = true;
+			d.depthCompare = VK_COMPARE_OP_GREATER;
+			d.blend = true;
+			d.additiveAlpha = blend == 1;
+			d.multiply = blend == 2;
+			d.writeSecond = false;
+			R.vfxPipelines[blend] = MakeGraphicsPipeline(d);
+			PipelineDesc m;
+			m.vs = &hrl_vk_mesh_vert;
+			m.fs = rq ? &hrl_vk_mesh_rq_frag : &hrl_vk_mesh_frag;
+			m.layout = R.sceneLayout;
+			m.input = VertexInput::Mesh;
+			m.colorFormats = {kHdrFormat, kIdFormat};
+			m.depthFormat = kDepthFormat;
+			m.depthTest = true;
+			m.depthCompare = VK_COMPARE_OP_GREATER;
+			m.blend = true;
+			m.additiveAlpha = blend == 1;
+			m.multiply = blend == 2;
+			R.vfxMeshPipelines[blend] = MakeGraphicsPipeline(m);
+			if (!R.vfxPipelines[blend] || !R.vfxMeshPipelines[blend]) return false;
+		}
+	}
+	{
+		// 2D voxel worlds: alpha blended with depth write (as OpenGL), then the emissive voxels added.
+		R.voxelSetLayout = MakeSetLayout({{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}});
+		if (!R.voxelSetLayout) return false;
+		R.voxelLayout = MakePipelineLayout({R.viewLayout, R.bindlessLayout, R.voxelSetLayout}, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(uint32_t));
+		PipelineDesc d;
+		d.vs = &hrl_vk_voxel_vert;
+		d.fs = rq ? &hrl_vk_voxel_rq_frag : &hrl_vk_voxel_frag;
+		d.layout = R.voxelLayout;
+		d.input = VertexInput::Voxel;
+		d.colorFormats = {kHdrFormat, kIdFormat};
+		d.depthFormat = kDepthFormat;
+		d.depthTest = d.depthWrite = true;
+		d.depthCompare = VK_COMPARE_OP_GREATER;
+		d.blend = true;
+		d.writeSecond = false;
+		R.voxelPipeline = MakeGraphicsPipeline(d);
+		d.depthWrite = false;
+		d.depthCompare = VK_COMPARE_OP_EQUAL;
+		d.additiveAlpha = true;
+		R.voxelEmissivePipeline = MakeGraphicsPipeline(d);
+		// Light field of the emissive voxels.
+		R.voxelEmitLayout = MakePipelineLayout({}, VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::vec4));
+		PipelineDesc e;
+		e.vs = &hrl_vk_voxel_emit_vert;
+		e.fs = &hrl_vk_voxel_emit_frag;
+		e.layout = R.voxelEmitLayout;
+		e.input = VertexInput::VoxelNoLayer;
+		e.colorFormats = {kHdrFormat};
+		R.voxelEmitPipeline = MakeGraphicsPipeline(e);
+		R.voxelLightSetLayout = MakeSetLayout({
+			{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+			{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}});
+		if (!R.voxelLightSetLayout) return false;
+		R.voxelLightLayout = MakePipelineLayout({R.voxelLightSetLayout}, VK_SHADER_STAGE_FRAGMENT_BIT, 16);
+		PipelineDesc l;
+		l.vs = &hrl_vk_fullscreen_vert;
+		l.fs = &hrl_vk_voxel_light_frag;
+		l.layout = R.voxelLightLayout;
+		l.colorFormats = {kHdrFormat};
+		R.voxelLightPipeline = MakeGraphicsPipeline(l);
+		if (!R.voxelPipeline || !R.voxelEmissivePipeline || !R.voxelEmitPipeline || !R.voxelLightPipeline) return false;
+	}
+	{
+		// Screen space displacement: the scene copy is read, the mesh writes colour and id.
+		R.displacementLayout = MakePipelineLayout({R.viewLayout, R.bindlessLayout, R.samplerLayout}, VK_SHADER_STAGE_FRAGMENT_BIT, 28);
+		PipelineDesc d;
+		d.vs = &hrl_vk_mesh_vert;
+		d.fs = &hrl_vk_ssdisplacement_frag;
+		d.layout = R.displacementLayout;
+		d.input = VertexInput::Mesh;
+		d.colorFormats = {kHdrFormat, kIdFormat};
+		d.depthFormat = kDepthFormat;
+		d.depthTest = true;
+		d.depthCompare = VK_COMPARE_OP_GREATER_OR_EQUAL;
+		R.displacementPipeline = MakeGraphicsPipeline(d);
+		if (!R.displacementPipeline) return false;
 	}
 	const VkDescriptorSetLayoutBinding skinBindings[3] = {
 		{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},

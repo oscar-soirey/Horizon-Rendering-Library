@@ -13,6 +13,7 @@
 #include "object_types.h"
 
 #include <string>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -26,6 +27,28 @@ HRL_id GenerateHRL_ID();
 glm::vec3 GetForwardVector(glm::vec3 _rotation);
 glm::vec3 GetRightVector(glm::vec3 _rotation);
 glm::vec3 GetUpVector(glm::vec3 _rotation);
+
+// A textured, tinted rectangle drawn over the finished image of a viewport
+// (widgets, texts, on-screen messages). Coordinates are normalized to the
+// viewport, origin at its top-left corner. Texture coordinates follow the
+// texture convention of HRL (v = 0 is the first row stored, the bottom of an
+// image loaded with HRL_CreateTexture).
+struct HRL_OverlayQuad
+{
+	float x = 0.f, y = 0.f, w = 0.f, h = 0.f;
+	float u0 = 0.f, v0 = 1.f;   // at the top-left corner
+	float u1 = 1.f, v1 = 0.f;   // at the bottom-right corner
+	glm::vec4 color{1.f};
+	HRL_id texture = HRL_INVALID_ID; // HRL_INVALID_ID: plain colour
+	bool sdf = false;                // the red channel is a signed distance (text)
+};
+
+// Overlay of one viewport, drawn in order after its gizmos.
+struct HRL_ViewportOverlay
+{
+	HRL_id viewport = HRL_INVALID_ID;
+	std::vector<HRL_OverlayQuad> quads;
+};
 
 // One scene to render this frame, as handed by the frontend to
 // HRL_vtable::RHI_RenderSceneFrame. The pointers are valid during the call only.
@@ -41,6 +64,11 @@ struct HRL_SceneFrame
 	float debugLineThickness = 1.f;
 	// When not null, the finished image of the scene is written to this PNG file.
 	const char* screenshotPath = nullptr;
+	// 2D overlays of the viewports (may be null). Gizmos are built by the backend
+	// from the scene (BuildGizmoOverlay), with its own camera matrices.
+	const std::vector<HRL_ViewportOverlay>* overlays = nullptr;
+	// Window size in pixels, for the overlays sized in pixels.
+	uint32_t windowWidth = 0, windowHeight = 0;
 };
 
 #endif

@@ -5,6 +5,7 @@
 
 #define HRL_MAX_CASCADES 4
 #define HRL_MAX_SPOT_SHADOWS 4
+#define HRL_MAX_POINT_SHADOWS 4
 
 #define LIGHT_POINT 0
 #define LIGHT_DIRECTIONAL 1
@@ -33,21 +34,31 @@ layout(set = 0, binding = 0, std140) uniform ViewData
 	mat4 cascadeViewProj[HRL_MAX_CASCADES];
 	vec4 cascadeSplits;   // view-space distance where each cascade ends
 	mat4 spotViewProj[HRL_MAX_SPOT_SHADOWS];
-	vec4 shadowInfo;      // x : shadow map texel size, y : cascade blend range
+	vec4 shadowInfo;      // x : shadow map texel size, y : cascade blend range, z : point shadow texel size
 	vec4 fogColor;
 	vec4 fogParams;       // x : start, y : end, z : density
 	vec4 envParams;       // x : specular mip count - 1, y : intensity
 	uvec4 counts;         // x : light count, y : VIEW_FLAG_*, z : debug view, w : interactor count
 	vec4 wind;            // xy : direction (x, z), z : strength, w : gustiness
 	vec4 interactors[16]; // xyz : centre, w : radius (foliage / grass bending)
+	mat4 pointViewProj[HRL_MAX_POINT_SHADOWS * 6]; // cube faces of the point light shadow maps
+	vec4 giOrigin;        // probe volume (HRL_GI_DDGI): xyz origin, w strength
+	vec4 giSpacing;       // xyz : distance between probes
+	vec4 giResolution;    // xyz : probes per axis, w : 1 when the volume is active
+	vec4 voxelLightRegion; // light of the emissive voxels: xy world min, zw 1 / world size
+	vec4 voxelLight;       // x : falloff (world), y : 1 when the light field is active
 } uView;
 
 struct Instance
 {
 	mat4 model;
 	mat4 normalMatrix;
-	uvec4 ids;            // x : material index, y : object id
+	uvec4 ids;            // x : material index, y : object id, z : INSTANCE_*
 };
+// Sprite: the UV region (min u, min v, max u, max v) is in normalMatrix[3].
+#define INSTANCE_SPRITE 1u
+// Tint of the instance in ids.w (RGBA8): mesh particles.
+#define INSTANCE_TINT 2u
 layout(set = 0, binding = 1, std430) readonly buffer Instances { Instance instances[]; };
 
 struct Material
@@ -65,7 +76,7 @@ struct Light
 {
 	vec4 position;        // xyz, w : type
 	vec4 direction;       // xyz : direction the light travels, w : attenuation
-	vec4 color;           // rgb : color * intensity, a : shadow slot (-1 none, 0 cascades, 1.. spot)
+	vec4 color;           // rgb : color * intensity, a : shadow slot (-1 none, 0 cascades, 1.. spot, 9 ray traced, 10.. point)
 	vec4 spot;            // cos inner, cos outer, shadow strength, shadow bias
 };
 layout(set = 0, binding = 3, std430) readonly buffer Lights { Light lights[]; };

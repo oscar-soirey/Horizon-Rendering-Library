@@ -102,6 +102,10 @@ public:
 	// Image acquired for the current frame, null when none (minimized window...).
 	Image* Backbuffer() { return backbufferValid_ ? &swapchainImages_[imageIndex_] : nullptr; }
 	void Resize(uint32_t width, uint32_t height);
+	// Vertical synchronisation: FIFO when on, else MAILBOX (or IMMEDIATE) when
+	// the surface offers it. Takes effect at the next frame.
+	void SetVSync(bool enabled);
+	bool VSync() const { return vsync_; }
 
 	// Frames
 	bool BeginFrame();
@@ -184,6 +188,7 @@ private:
 	bool backbufferValid_ = false;
 	uint32_t wantedWidth_ = 0, wantedHeight_ = 0;
 	bool swapchainDirty_ = false;
+	bool vsync_ = true;
 
 	VkCommandPool uploadPool_ = VK_NULL_HANDLE;
 	VkCommandBuffer uploadCmd_ = VK_NULL_HANDLE;

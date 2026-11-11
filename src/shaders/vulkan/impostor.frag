@@ -77,7 +77,7 @@ void main()
 	float alpha = albedo.a / weightSum;
 	if (alpha < 0.4) discard;
 #ifndef HRL_SHADOW
-	Surface s;
+	ShadedSurface s;
 	s.position = vWorldPos;
 	s.shadowPosition = vWorldPos;
 	s.baseColor = albedo.rgb / max(albedo.a, 1e-4);

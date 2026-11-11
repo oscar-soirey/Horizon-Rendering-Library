@@ -52,6 +52,36 @@ void DestroySceneTargets(SceneGPU& s)
 	dev.DestroyImage(s.ids);
 	dev.DestroyImage(s.depth);
 	dev.DestroyImage(s.ldr);
+	dev.DestroyImage(s.history[0]);
+	dev.DestroyImage(s.history[1]);
+	s.historyValid = false;
+}
+
+// History images of the temporal anti-aliasing, at the size of the scene.
+bool EnsureHistory(SceneGPU& s)
+{
+	if (s.history[0] && s.history[1]) return true;
+	ImageDesc d;
+	d.width = s.width;
+	d.height = s.height;
+	d.format = kHdrFormat;
+	d.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	s.historyValid = false;
+	if (Dev().CreateImage(d, s.history[0], "taa history") && Dev().CreateImage(d, s.history[1], "taa history")) return true;
+	Dev().DestroyImage(s.history[0]);
+	Dev().DestroyImage(s.history[1]);
+	return false;
+}
+
+float Halton(uint32_t index, uint32_t base)
+{
+	float f = 1.f, r = 0.f;
+	for (uint32_t i = index; i > 0; i /= base)
+	{
+		f /= (float)base;
+		r += f * (float)(i % base);
+	}
+	return r;
 }
 
 bool CreateSceneTargets(SceneGPU& s, uint32_t width, uint32_t height)
@@ -74,6 +104,49 @@ bool CreateSceneTargets(SceneGPU& s, uint32_t width, uint32_t height)
 	ok = ok && dev.CreateImage(d, s.ldr, "scene ldr");
 	if (!ok) DestroySceneTargets(s);
 	return ok;
+}
+
+// Depth array of the point light shadow maps: 6 faces per light.
+bool EnsurePointShadowMaps(uint32_t resolution)
+{
+	Device& dev = Dev();
+	if (R.pointShadowMaps && R.pointShadowResolution == resolution) return true;
+	VkDevice d = dev.device;
+	std::vector<VkImageView> old = R.pointShadowLayers;
+	dev.Defer([d, old]() { for (VkImageView v : old) vkDestroyImageView(d, v, nullptr); });
+	R.pointShadowLayers.clear();
+	dev.DestroyImage(R.pointShadowMaps);
+	ImageDesc desc;
+	desc.format = kDepthFormat;
+	desc.width = desc.height = resolution;
+	desc.layers = kMaxPointShadows * 6;
+	desc.arrayView = true;
+	desc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	if (!dev.CreateImage(desc, R.pointShadowMaps, "point light shadow maps")) return false;
+	for (uint32_t i = 0; i < desc.layers; ++i)
+		R.pointShadowLayers.push_back(dev.CreateView(R.pointShadowMaps, kDepthFormat, VK_IMAGE_VIEW_TYPE_2D, 0, 1, i, 1));
+	R.pointShadowResolution = resolution;
+	return true;
+}
+
+// The 6 faces of a point light, with a margin of 2 texels so the PCF taps of
+// a face stay inside it.
+void PointShadowViews(const HRL_Light* light, uint32_t index, float resolution, std::vector<ShadowView>& out)
+{
+	static const glm::vec3 dirs[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+	static const glm::vec3 ups[6] = {{0, -1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}, {0, -1, 0}, {0, -1, 0}};
+	const float fov = 2.f * std::atan(1.f + 2.f / resolution);
+	for (uint32_t f = 0; f < 6; ++f)
+	{
+		const glm::mat4 lv = glm::lookAt(light->position_, light->position_ + dirs[f], ups[f]);
+		ShadowView sv;
+		sv.lightDir = dirs[f];
+		sv.viewProj = glm::perspectiveRH_ZO(fov, 1.f, HRL_POINT_SHADOW_NEAR, HRL_POINT_SHADOW_FAR) * lv;
+		sv.cullClip = glm::perspective(fov, 1.f, HRL_POINT_SHADOW_NEAR, HRL_POINT_SHADOW_FAR) * lv;
+		sv.layer = index * 6 + f;
+		sv.point = true;
+		out.push_back(sv);
+	}
 }
 
 bool EnsureShadowMaps(uint32_t resolution, uint32_t layers)
@@ -138,12 +211,16 @@ IndirectList BuildTranslucent(SceneData& data, const Camera& cam, const FrustumP
 		while (lod > 0 && !item.gpu->lods[(size_t)lod].valid) --lod;
 		item.lod = (uint32_t)lod;
 		const_cast<HRL_Mesh*>(item.mesh)->last_lod_level_ = lod;
-		selected[data.materialBuckets[item.material]].push_back(&item);
+		selected[ItemBucket(data, item)].push_back(&item);
 	}
 	for (uint32_t b = 0; b < BucketCount; ++b)
 	{
-		std::sort(selected[b].begin(), selected[b].end(),
-			[](const DrawItem* x, const DrawItem* y) { return x->distance2 > y->distance2; });
+		// Back to front; sprites at the same distance follow their draw order (HRL_SetSpriteDrawOrder).
+		std::stable_sort(selected[b].begin(), selected[b].end(), [](const DrawItem* x, const DrawItem* y)
+		{
+			if (std::abs(x->distance2 - y->distance2) > 1e-6f) return x->distance2 > y->distance2;
+			return x->mesh->draw_order_ < y->mesh->draw_order_;
+		});
 		list.first[b] = list.total;
 		list.count[b] = (uint32_t)selected[b].size();
 		list.total += list.count[b];
@@ -164,6 +241,61 @@ IndirectList BuildTranslucent(SceneData& data, const Camera& cam, const FrustumP
 			cmds[i++] = {lod.indexCount, 1, lod.firstIndex, (int32_t)lod.vertexOffset, item->instance};
 		}
 	return list;
+}
+
+// Meshes with a custom surface shader: few, drawn from the CPU with their pipelines.
+struct CustomDraw
+{
+	VkPipeline pipeline = VK_NULL_HANDLE;
+	uint32_t indexCount = 0, firstIndex = 0;
+	int32_t vertexOffset = 0;
+	uint32_t instance = 0;
+	float distance2 = 0.f;
+};
+struct CustomDraws { std::vector<CustomDraw> opaque, translucent; };
+
+enum class CustomPass { Forward, Shadow };
+CustomDraws CollectCustomDraws(SceneData& data, CustomPass pass, const FrustumPlaneSet& frustum, const Camera& cam,
+	const HRL_Viewport* viewport, float viewportHeight)
+{
+	CustomDraws out;
+	for (uint32_t index : data.customItems)
+	{
+		DrawItem& item = data.items[index];
+		const uint32_t bucket = ItemBucket(data, item);
+		if (pass == CustomPass::Shadow && IsTranslucent(bucket)) continue; // no shadow, as the built-in material
+		if (!item.noCull && !IsMeshVisible(item.mesh, item.model, frustum)) continue;
+		int lod = SelectMeshLOD(item.mesh, item.model, cam.view, cam.projGL, viewportHeight, viewport);
+		lod = glm::clamp(lod, 0, (int)item.gpu->lods.size() - 1);
+		while (lod > 0 && !item.gpu->lods[(size_t)lod].valid) --lod;
+		const MeshLOD& range = item.gpu->lods[(size_t)lod];
+		CustomDraw d;
+		d.pipeline = pass == CustomPass::Shadow ? CustomShadowPipeline(item.custom, IsMasked(bucket))
+			: CustomForwardPipeline(item.custom, bucket);
+		if (!d.pipeline) continue;
+		d.indexCount = range.indexCount;
+		d.firstIndex = range.firstIndex;
+		d.vertexOffset = (int32_t)range.vertexOffset;
+		d.instance = item.instance;
+		const glm::vec3 center = glm::vec3(item.model * glm::vec4(item.mesh->bounds_center_, 1.f));
+		d.distance2 = glm::dot(center - cam.position, center - cam.position);
+		(IsTranslucent(bucket) ? out.translucent : out.opaque).push_back(d);
+	}
+	// Opaque: by pipeline (fewer binds); translucent: back to front.
+	std::sort(out.opaque.begin(), out.opaque.end(), [](const CustomDraw& a, const CustomDraw& b) { return a.pipeline < b.pipeline; });
+	std::sort(out.translucent.begin(), out.translucent.end(), [](const CustomDraw& a, const CustomDraw& b) { return a.distance2 > b.distance2; });
+	return out;
+}
+
+// Needs the scene layout bound (view, bindless sets, geometry).
+void DrawCustom(VkCommandBuffer cmd, const std::vector<CustomDraw>& draws)
+{
+	VkPipeline bound = VK_NULL_HANDLE;
+	for (const CustomDraw& d : draws)
+	{
+		if (d.pipeline != bound) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = d.pipeline);
+		vkCmdDrawIndexed(cmd, d.indexCount, 1, d.firstIndex, d.vertexOffset, d.instance);
+	}
 }
 
 void DrawIndirect(VkCommandBuffer cmd, const IndirectList& list, uint32_t bucket)
@@ -214,6 +346,11 @@ struct PostSettings
 {
 	float exposure = 0.f;
 	float bloom = 0.f; // share of the blurred image mixed into the scene, 0 : off
+	bool toneMap = true; // ACES, unless the material sets toneMappingEnabled to 0
+	// Controls of the built-in post-process material (see tonemap.frag).
+	struct Grading { glm::vec4 color, tint, vignette, vignetteColor, grain, fadeColor, screen; } grading{
+		glm::vec4(1.f, 1.f, 1.f, 0.f), glm::vec4(1.f, 1.f, 1.f, 0.f), glm::vec4(0.f, 0.75f, 0.25f, 0.f),
+		glm::vec4(0.f), glm::vec4(0.f, 1.f, 0.f, 0.f), glm::vec4(0.f), glm::vec4(1.f)};
 };
 
 PostSettings ScenePostSettings(const HRL_SceneFrame& frame)
@@ -226,24 +363,52 @@ PostSettings ScenePostSettings(const HRL_SceneFrame& frame)
 				if (!pp) continue;
 				auto m = frame.materials->find(pp->material_);
 				if (m == frame.materials->end() || !m->second) continue;
+				if (m->second->shader_ != HRL_DEFAULT_POST_PROCESS_SHADER) continue; // custom: their own pass
 				post.exposure = MaterialFloat(m->second, "exposure", 0.f);
 				// Energy conserving bloom: 4 % of the image is replaced by its blur
 				// at strength 1 (the default of the post-process material).
 				post.bloom = glm::clamp(0.04f * MaterialFloat(m->second, "bloomStrength", 1.f), 0.f, 1.f);
+				auto toneMapping = m->second->intParams_.find("toneMappingEnabled");
+				if (toneMapping != m->second->intParams_.end()) post.toneMap = toneMapping->second != 0;
+				const HRL_Material* mat = m->second;
+				auto vec3Param = [mat](const char* name, glm::vec3 fallback)
+				{
+					auto it = mat->vec3Params_.find(name);
+					return it == mat->vec3Params_.end() ? fallback : it->second;
+				};
+				auto intParam = [mat](const char* name)
+				{
+					auto it = mat->intParams_.find(name);
+					return it != mat->intParams_.end() && it->second != 0;
+				};
+				PostSettings::Grading& g = post.grading;
+				g.color = glm::vec4(MaterialFloat(mat, "brightness", 1.f), MaterialFloat(mat, "contrast", 1.f),
+					MaterialFloat(mat, "saturation", 1.f), MaterialFloat(mat, "hueShift", 0.f));
+				g.tint = glm::vec4(vec3Param("tintColor", glm::vec3(1.f)), intParam("invertColor") ? 1.f : 0.f);
+				g.vignette = glm::vec4(MaterialFloat(mat, "vignetteStrength", 0.f), MaterialFloat(mat, "vignetteRadius", 0.75f),
+					MaterialFloat(mat, "vignetteSoftness", 0.25f), MaterialFloat(mat, "chromaticAberration", 0.f));
+				g.vignetteColor = glm::vec4(vec3Param("vignetteColor", glm::vec3(0.f)), MaterialFloat(mat, "sharpenStrength", 0.f));
+				g.grain = glm::vec4(MaterialFloat(mat, "filmGrainStrength", 0.f), MaterialFloat(mat, "filmGrainScale", 1.f),
+					HRL_InternalRenderTimeSeconds(), MaterialFloat(mat, "fadeAmount", 0.f));
+				const bool display = g.color.y != 1.f || g.color.z != 1.f || g.color.w != 0.f || g.tint != glm::vec4(1.f, 1.f, 1.f, 0.f) ||
+					g.vignette.x > 0.f || g.grain.x > 0.f || g.grain.w > 0.f;
+				g.fadeColor = glm::vec4(vec3Param("fadeColor", glm::vec3(0.f)), display ? 1.f : 0.f);
 				return post;
 			}
 	return post;
 }
 
-VkDescriptorSet MakeSamplerSet(VkDescriptorSetLayout layout, const VkImageView* views, uint32_t count)
+// One combined image sampler per binding (4 at most), linear unless `samplers` is given.
+VkDescriptorSet MakeSamplerSet(VkDescriptorSetLayout layout, const VkImageView* views, uint32_t count,
+	const VkSampler* samplers = nullptr)
 {
 	const VkDescriptorSet set = AllocFrameSet(layout);
 	if (!set) return set;
-	VkDescriptorImageInfo infos[2];
-	VkWriteDescriptorSet writes[2]{};
+	VkDescriptorImageInfo infos[4];
+	VkWriteDescriptorSet writes[4]{};
 	for (uint32_t i = 0; i < count; ++i)
 	{
-		infos[i] = {R.linearClamp, views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+		infos[i] = {samplers ? samplers[i] : R.linearClamp, views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 		writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
 		writes[i].dstSet = set;
 		writes[i].dstBinding = i;
@@ -332,8 +497,8 @@ RayScene CollectRayScene(const hrl_scene_t* scene, SceneData& data, const HRL_Sc
 	CollectLandscapeRayInstances(scene, out.instances);
 	for (const DrawItem& item : data.items)
 	{
-		const Bucket bucket = data.materialBuckets[item.material];
-		// Translucent surfaces cast no shadow (as with shadow maps).
+		const uint32_t bucket = ItemBucket(data, item);
+		// Translucent surfaces and sprites cast no shadow (as with shadow maps).
 		if (!item.gpu->blas.handle || IsTranslucent(bucket)) continue;
 		AddRayInstance(out, item.model, *item.gpu, item.material, IsMasked(bucket));
 	}
@@ -415,7 +580,10 @@ void RecordTlasBuild(VkCommandBuffer cmd, const Tlas& tlas)
 bool RendererInit(uint32_t width, uint32_t height)
 {
 	Device& dev = Dev();
+	// Settings that may be chosen before the initialization.
+	const AntiAliasing antiAliasing = R.antiAliasing;
 	R = State{};
+	R.antiAliasing = antiAliasing;
 	R.width = width;
 	R.height = height;
 	// The LDR scene image has the same transfer function as the swapchain so
@@ -446,6 +614,10 @@ bool RendererInit(uint32_t width, uint32_t height)
 	sc.addressModeU = sc.addressModeV = sc.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	sc.maxLod = VK_LOD_CLAMP_NONE;
 	if (vkCreateSampler(dev.device, &sc, nullptr, &R.linearClamp) != VK_SUCCESS) return false;
+	sc.magFilter = sc.minFilter = VK_FILTER_NEAREST;
+	sc.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	if (vkCreateSampler(dev.device, &sc, nullptr, &R.pointClamp) != VK_SUCCESS) return false;
+	sc.magFilter = sc.minFilter = VK_FILTER_LINEAR;
 	sc.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 	sc.maxLod = 0.f;
 	sc.compareEnable = VK_TRUE;
@@ -472,7 +644,7 @@ bool RendererInit(uint32_t width, uint32_t height)
 	cube.cube = true;
 	cube.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	if (!dev.CreateImage(lut, R.brdfLut, "brdf lut") || !dev.CreateImage(cube, R.dummyCube, "dummy cube")) return false;
-	if (!EnsureShadowMaps(16, kCascades)) return false;
+	if (!EnsureShadowMaps(16, kCascades) || !EnsurePointShadowMaps(16)) return false;
 
 	R.initialized = true;
 	return true;
@@ -491,6 +663,8 @@ void RendererShutdown()
 	DestroyAllLandscapes();
 	DestroyAllFoliage();
 	DestroyAllGrass();
+	DestroyAllVoxels();
+	ShutdownGI();
 	for (auto& [id, m] : R.meshes)
 	{
 		DestroyBlas(m.blas);
@@ -507,6 +681,9 @@ void RendererShutdown()
 	for (VkImageView v : R.shadowLayers) vkDestroyImageView(dev.device, v, nullptr);
 	R.shadowLayers.clear();
 	dev.DestroyImage(R.shadowMaps);
+	for (VkImageView v : R.pointShadowLayers) vkDestroyImageView(dev.device, v, nullptr);
+	R.pointShadowLayers.clear();
+	dev.DestroyImage(R.pointShadowMaps);
 	dev.DestroyBuffer(R.vertexBuffer);
 	dev.DestroyBuffer(R.indexBuffer);
 	R.transients.Clear();
@@ -520,6 +697,7 @@ void RendererShutdown()
 	VkDevice d = dev.device;
 	for (auto& [key, s] : R.samplers) vkDestroySampler(d, s, nullptr);
 	if (R.linearClamp) vkDestroySampler(d, R.linearClamp, nullptr);
+	if (R.pointClamp) vkDestroySampler(d, R.pointClamp, nullptr);
 	if (R.shadowSampler) vkDestroySampler(d, R.shadowSampler, nullptr);
 	// Every pipeline / layout made by vk_pipelines.cpp is registered for destruction.
 	for (VkPipeline p : R.ownedPipelines) vkDestroyPipeline(d, p, nullptr);
@@ -553,6 +731,7 @@ void CreateScene(HRL_id id, bool onScreen)
 
 void DeleteScene(HRL_id id)
 {
+	ReleaseGIScene(id);
 	auto it = R.scenes.find(id);
 	if (it == R.scenes.end()) return;
 	DestroySceneResources(it->second);
@@ -615,11 +794,37 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 	const LightSetup lighting = PackLights(scene, rayTracedShadows);
 	if (lighting.shadowResolution)
 		EnsureShadowMaps(lighting.shadowResolution, kCascades + (uint32_t)lighting.spotShadowLights.size());
+	if (lighting.pointShadowResolution) EnsurePointShadowMaps(lighting.pointShadowResolution);
 
 	// Materials of the landscapes (and other non-mesh geometry) join the table.
 	for (const auto& [landscapeId, landscape] : scene->landscapes)
 		if (landscape) MaterialIndex(data, frame, landscape->material_);
 	ResolveFoliageMaterials(scene, data, frame);
+	ResolveVFXMaterials(scene, data, frame);
+	// Parameters of the materials with a custom shader: a vec4 table, the
+	// first entry of each material in MaterialData::flags.y.
+	std::vector<glm::vec4> customParams(1, glm::vec4(0.f));
+	for (size_t i = 0; i < data.materials.size(); ++i)
+	{
+		const HRL_Material* m = data.materialKeys[i].material;
+		const CustomShader* custom = m ? FindCustomShader(m->shader_) : nullptr;
+		data.materials[i].flags.y = 0;
+		if (!custom || !custom->surface || !custom->paramSlots) continue;
+		data.materials[i].flags.y = (uint32_t)customParams.size();
+		customParams.resize(customParams.size() + std::max(custom->paramSlots, 1u));
+		WriteCustomParams(*custom, m, &customParams[data.materials[i].flags.y]);
+	}
+	const FrameSlice customSlice = dev.AllocFrame(customParams.size() * sizeof(glm::vec4), 256);
+	if (!customSlice.ptr) return;
+	std::memcpy(customSlice.ptr, customParams.data(), customParams.size() * sizeof(glm::vec4));
+	// Global illumination probes (a dummy entry when the scene has none).
+	GIFrame gi = PrepareGI(frame.sceneId, scene);
+	if (!gi.probes.ptr)
+	{
+		gi.probes = dev.AllocFrame(sizeof(glm::vec4) * 6, 256);
+		if (!gi.probes.ptr) return;
+		std::memset(gi.probes.ptr, 0, sizeof(glm::vec4) * 6);
+	}
 	const FrameSlice materialSlice = dev.AllocFrame(std::max<size_t>(data.materials.size(), 1) * sizeof(MaterialData), 256);
 	const FrameSlice lightSlice = dev.AllocFrame(std::max<size_t>(lighting.lights.size(), 1) * sizeof(LightData), 256);
 	if (!materialSlice.ptr || !lightSlice.ptr) return;
@@ -633,13 +838,14 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 	hdrDesc.format = kHdrFormat;
 	hdrDesc.width = gpu.width;
 	hdrDesc.height = gpu.height;
-	hdrDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	hdrDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	const FrameGraph::Handle hdr = graph.CreateTransient(hdrDesc, "scene hdr");
 	if (!graph.GetImage(hdr).handle) return;
 	const FrameGraph::Handle ids = graph.Import(gpu.ids);
 	const FrameGraph::Handle depth = graph.Import(gpu.depth);
 	const FrameGraph::Handle ldr = graph.Import(gpu.ldr);
 	const FrameGraph::Handle shadows = graph.Import(R.shadowMaps);
+	const FrameGraph::Handle pointShadows = graph.Import(R.pointShadowMaps);
 
 	if (!R.brdfLutReady)
 		graph.AddPass("brdf lut", [](VkCommandBuffer c) { RecordBrdfLut(c); });
@@ -713,6 +919,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		});
 
 	PrepareLandscapes(scene, graph);
+	PrepareVoxels(frame.sceneId, scene);
 	const std::vector<FoliageDraw> foliage = PrepareFoliage(scene, data, frame, graph);
 
 	RayScene rayScene;
@@ -747,7 +954,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 	if (!rayTableSlice.ptr) return;
 	std::memcpy(rayTableSlice.ptr, rayScene.table.data(), rayScene.table.size() * sizeof(RtGeometry));
 
-	struct ViewportRect { const HRL_Viewport* viewport; float x, y, w, h; };
+	struct ViewportRect { HRL_id id; const HRL_Viewport* viewport; float x, y, w, h; };
 	std::vector<ViewportRect> viewports;
 	for (const auto& [viewportId, viewport] : scene->viewports)
 	{
@@ -758,16 +965,28 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		// HRL viewport rectangles have their origin at the bottom left.
 		const float vy = (float)gpu.height - std::round(viewport->y_ * (float)gpu.height) - vh;
 		if (vw < 1.f || vh < 1.f || vx < 0.f || vy < 0.f || vx + vw > (float)gpu.width || vy + vh > (float)gpu.height) continue;
-		viewports.push_back({viewport, vx, vy, vw, vh});
+		viewports.push_back({viewportId, viewport, vx, vy, vw, vh});
 	}
 	// Culling views of the frame: two per viewport (occlusion phases), then
 	// one per shadow map of each viewport.
 	const uint32_t shadowViewCount = (lighting.cascadeLight ? kCascades : 0u) + (uint32_t)lighting.spotShadowLights.size();
 	const uint32_t mainViewSlots = 2u * (uint32_t)viewports.size();
-	if (!PrepareCulling(gpu, mainViewSlots + shadowViewCount * (uint32_t)viewports.size(), graph)) return;
+	// Point light faces do not depend on the camera: rendered once, with the first viewport.
+	std::vector<ShadowView> pointViews;
+	for (size_t i = 0; i < lighting.pointShadowLights.size(); ++i)
+		PointShadowViews(lighting.pointShadowLights[i], (uint32_t)i, (float)R.pointShadowResolution, pointViews);
+	if (!PrepareCulling(gpu, mainViewSlots + shadowViewCount * (uint32_t)viewports.size() + (uint32_t)pointViews.size(), graph)) return;
 	if (gpu.hzb.size() < viewports.size()) gpu.hzb.resize(viewports.size());
 	uint32_t nextShadowSlot = mainViewSlots;
 	uint32_t translucentDraws = 0;
+	std::vector<OverlayView> overlayViews;
+	std::vector<EffectView> effectViews;
+	// Temporal anti-aliasing: sub-pixel jitter of every camera, then a resolve per viewport.
+	const bool taa = R.antiAliasing == AntiAliasing::Taa;
+	struct TaaView { float x, y, w, h; glm::mat4 reproject; bool history; };
+	std::vector<TaaView> taaViews;
+	const uint32_t taaSample = (uint32_t)(dev.FrameNumber() % kTaaSamples) + 1u;
+	const glm::vec2 jitter = taa ? glm::vec2(Halton(taaSample, 2), Halton(taaSample, 3)) - 0.5f : glm::vec2(0.f);
 
 	for (size_t vi = 0; vi < viewports.size(); ++vi)
 	{
@@ -777,10 +996,29 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		ViewData view{};
 		view.view = cam.view;
 		view.viewProj = cam.proj * cam.view;
+		if (taa)
+		{
+			// Sub-pixel offset of the whole image (in NDC), different every frame.
+			const glm::mat4 offset = glm::translate(glm::mat4(1.f), glm::vec3(jitter.x * 2.f / vw, jitter.y * 2.f / vh, 0.f));
+			const glm::mat4 unjittered = view.viewProj;
+			view.viewProj = offset * view.viewProj;
+			auto previous = gpu.previousViewProj.find(viewports[vi].id);
+			const bool history = previous != gpu.previousViewProj.end();
+			taaViews.push_back({vx, vy, vw, vh, history ? previous->second * glm::inverse(view.viewProj) : glm::mat4(1.f), history});
+			gpu.previousViewProj[viewports[vi].id] = unjittered;
+		}
 		view.invViewProj = glm::inverse(view.viewProj);
 		view.camPos = glm::vec4(cam.position, HRL_InternalRenderTimeSeconds());
 		view.viewportSize = glm::vec4(vw, vh, 1.f / vw, 1.f / vh);
-		view.shadowInfo = glm::vec4(1.f / (float)std::max(R.shadowResolution, 1u), 0.1f, 0.f, 0.f);
+		view.shadowInfo = glm::vec4(1.f / (float)std::max(R.shadowResolution, 1u), 0.1f, 1.f / (float)std::max(R.pointShadowResolution, 1u), 0.f);
+		for (const ShadowView& pv : pointViews) view.pointViewProj[pv.layer] = pv.viewProj;
+		// Light of the emissive voxels around this viewport.
+		const VoxelLightField voxelLight = scene->voxel_world ? AddVoxelLightField(graph, frame.sceneId, scene, viewport) : VoxelLightField();
+		view.voxelLightRegion = voxelLight.region;
+		view.voxelLight = glm::vec4(voxelLight.falloff, voxelLight.active ? 1.f : 0.f, 0.f, 0.f);
+		view.giOrigin = gi.origin;
+		view.giSpacing = gi.spacing;
+		view.giResolution = gi.resolution;
 		view.fogColor = glm::vec4(scene->fog.r, scene->fog.g, scene->fog.b, 1.f);
 		view.fogParams = glm::vec4(scene->fog.range_start, scene->fog.range_end, scene->fog.density, 0.f);
 		view.envParams = glm::vec4((float)(kPrefilterMips - 1), 1.f, 0.f, 0.f);
@@ -815,15 +1053,19 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			view.spotViewProj[i] = sv.viewProj;
 			shadowViews.push_back(sv);
 		}
+		if (vi == 0) shadowViews.insert(shadowViews.end(), pointViews.begin(), pointViews.end());
 
-		// View descriptor set.
+		// View descriptor set (makeViewSet: also with another instance table, for the mesh particles).
 		const FrameSlice viewSlice = dev.AllocFrame(sizeof(ViewData), 256);
-		const VkDescriptorSet viewSet = AllocFrameSet(R.viewLayout);
-		if (!viewSlice.ptr || !viewSet) continue;
+		if (!viewSlice.ptr) continue;
 		std::memcpy(viewSlice.ptr, &view, sizeof(view));
+		auto makeViewSet = [&](const VkDescriptorBufferInfo& instanceTable) -> VkDescriptorSet
+		{
+		const VkDescriptorSet viewSet = AllocFrameSet(R.viewLayout);
+		if (!viewSet) return VK_NULL_HANDLE;
 		const VkDescriptorBufferInfo buffers[4] = {
 			{viewSlice.buffer, viewSlice.offset, sizeof(ViewData)},
-			{gpu.instances.handle, 0, VK_WHOLE_SIZE},
+			instanceTable,
 			{materialSlice.buffer, materialSlice.offset, materialSlice.size},
 			{lightSlice.buffer, lightSlice.offset, lightSlice.size}};
 		const Environment& env = gpu.env;
@@ -832,7 +1074,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			{R.linearClamp, hasEnvironment ? env.irradiance.view : R.dummyCube.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 			{R.linearClamp, hasEnvironment ? env.prefiltered.view : R.dummyCube.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 			{R.linearClamp, R.brdfLut.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-		VkWriteDescriptorSet writes[12]{};
+		VkWriteDescriptorSet writes[16]{};
 		for (uint32_t i = 0; i < 8; ++i)
 		{
 			writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -877,7 +1119,40 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			}
 			writeCount = 12;
 		}
+		const VkDescriptorImageInfo pointShadowInfo{R.shadowSampler, R.pointShadowMaps.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+		writes[writeCount] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+		writes[writeCount].dstSet = viewSet;
+		writes[writeCount].dstBinding = 12;
+		writes[writeCount].descriptorCount = 1;
+		writes[writeCount].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		writes[writeCount].pImageInfo = &pointShadowInfo;
+		++writeCount;
+		const VkDescriptorImageInfo voxelLightInfo{R.linearClamp, voxelLight.active ? voxelLight.view : R.black.image.view,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+		writes[writeCount] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+		writes[writeCount].dstSet = viewSet;
+		writes[writeCount].dstBinding = 15;
+		writes[writeCount].descriptorCount = 1;
+		writes[writeCount].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		writes[writeCount].pImageInfo = &voxelLightInfo;
+		++writeCount;
+		const VkDescriptorBufferInfo extraBuffers[2] = {{customSlice.buffer, customSlice.offset, customSlice.size},
+			{gi.probes.buffer, gi.probes.offset, gi.probes.size}};
+		for (uint32_t e = 0; e < 2; ++e)
+		{
+			writes[writeCount] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+			writes[writeCount].dstSet = viewSet;
+			writes[writeCount].dstBinding = 13 + e; // custom material parameters, GI probes
+			writes[writeCount].descriptorCount = 1;
+			writes[writeCount].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			writes[writeCount].pBufferInfo = &extraBuffers[e];
+			++writeCount;
+		}
 		vkUpdateDescriptorSets(dev.device, writeCount, writes, 0, nullptr);
+		return viewSet;
+		};
+		const VkDescriptorSet viewSet = makeViewSet({gpu.instances.handle, 0, VK_WHOLE_SIZE});
+		if (!viewSet) continue;
 		if (vi == 0) PrepareImpostors(scene, data, frame, graph, viewSet);
 
 		// ---- Landscapes: LOD follows this camera in every view of the viewport ----
@@ -920,9 +1195,9 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		const std::vector<GrassDraw> grass = PrepareGrass(scene, cam.position);
 
 		// ---- Shadow maps: one pass per cascade / spot light, culled for the light ----
-		const float shadowSize = (float)R.shadowResolution;
 		for (const ShadowView& sv : shadowViews)
 		{
+			const float shadowSize = (float)(sv.point ? R.pointShadowResolution : R.shadowResolution);
 			CullRequest shadowRequest;
 			shadowRequest.viewProj = sv.viewProj;
 			shadowRequest.frustum = BuildFrustum(sv.cullClip);
@@ -939,7 +1214,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				}
 			// Grass shadows (when enabled) only in the two nearest cascades: further away they are below a texel.
 			std::vector<GrassDraw> grassCasters;
-			if (sv.layer < 2)
+			if (sv.layer < 2 && !sv.point)
 				for (const GrassDraw& gd : grass)
 					if (gd.grass->cast_shadows)
 					{
@@ -948,9 +1223,11 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 					}
 			const glm::mat4 lightViewProj = sv.viewProj;
 			const glm::vec3 lightDir = sv.lightDir;
+			const std::vector<CustomDraw> customCasters = data.customItems.empty() ? std::vector<CustomDraw>() :
+				CollectCustomDraws(data, CustomPass::Shadow, shadowRequest.frustum, cam, viewport, vh).opaque;
 			graph.AddPass("shadow map", [=, &gpu](VkCommandBuffer c)
 			{
-				if (casters.empty && landscapeCasters.empty() && foliageCasters.empty() && grassCasters.empty()) return;
+				if (casters.empty && landscapeCasters.empty() && foliageCasters.empty() && grassCasters.empty() && customCasters.empty()) return;
 				SetViewport(c, 0, 0, shadowSize, shadowSize, false);
 				vkCmdSetDepthBias(c, 1.5f, 0.f, 2.f);
 				if (!landscapeCasters.empty())
@@ -968,7 +1245,14 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				DrawCulled(c, gpu, casters, BucketMaskedTwoSided);
 				for (const FoliageDraw& fd : foliageCasters) DrawFoliage(c, fd, true, lightViewProj, lightDir);
 				for (const GrassDraw& gd : grassCasters) DrawGrass(c, gd, true, lightViewProj);
-			}).Depth(shadows, VK_ATTACHMENT_LOAD_OP_CLEAR, 1.f, R.shadowLayers[sv.layer]);
+				if (!customCasters.empty())
+				{
+					SetGeometryState(c, viewSet);
+					vkCmdPushConstants(c, R.sceneLayout, VF, 0, sizeof(glm::mat4), &lightViewProj);
+					DrawCustom(c, customCasters);
+				}
+			}).Depth(sv.point ? pointShadows : shadows, VK_ATTACHMENT_LOAD_OP_CLEAR, 1.f,
+				sv.point ? R.pointShadowLayers[sv.layer] : R.shadowLayers[sv.layer]);
 		}
 
 		// ---- Translucent meshes: few, sorted back to front on the CPU ----
@@ -995,6 +1279,11 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				DrawCulled(c, gpu, list, b);
 			}
 		};
+		const CustomDraws custom = data.customItems.empty() ? CustomDraws() :
+			CollectCustomDraws(data, CustomPass::Forward, request.frustum, cam, viewport, vh);
+		VFXFrame vfx = PrepareVFX(scene, data, frame, cam);
+		if (!vfx.meshes.empty())
+			vfx.meshViewSet = makeViewSet({vfx.meshInstances.buffer, vfx.meshInstances.offset, vfx.meshInstances.size});
 		auto drawEnd = [=](VkCommandBuffer c)
 		{
 			if (drawSky)
@@ -1010,9 +1299,12 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.meshPipelines[b]);
 				DrawIndirect(c, translucent, b);
 			}
+			DrawCustom(c, custom.translucent);
+			DrawVFX(c, vfx, viewSet);
 		};
 
 		const std::vector<LandscapeView> visibleLandscapes = selectLandscapes(request.frustum);
+		const VoxelDraws voxels = scene->voxel_world ? PrepareVoxelDraws(frame.sceneId, scene, request.frustum) : VoxelDraws();
 		auto drawFoliage = [foliage](VkCommandBuffer c)
 		{
 			for (const FoliageDraw& fd : foliage) DrawFoliage(c, fd, false, glm::mat4(1.f), glm::vec3(0.f));
@@ -1032,7 +1324,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		// own rectangle (they may overlap an earlier viewport).
 		const bool clearRectangle = cleared;
 		const VkAttachmentLoadOp load = cleared ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
-		graph.AddPass("forward", [=](VkCommandBuffer c)
+		auto& forwardPass = graph.AddPass("forward", [=](VkCommandBuffer c)
 		{
 			SetViewport(c, vx, vy, vw, vh, true);
 			if (clearRectangle)
@@ -1046,10 +1338,12 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				const VkClearRect rect{{{(int32_t)vx, (int32_t)vy}, {(uint32_t)vw, (uint32_t)vh}}, 0, 1};
 				vkCmdClearAttachments(c, 2, clears, 1, &rect);
 			}
-			// Landscapes first: the largest occluders, drawn every frame.
+			// Voxel worlds and landscapes first: the largest occluders, drawn every frame.
+			DrawVoxels(c, voxels, viewSet);
 			drawLandscapes(c, visibleLandscapes, false);
 			SetGeometryState(c, viewSet);
 			drawOpaque(c, phase1);
+			DrawCustom(c, custom.opaque);
 			if (!occlusion)
 			{
 				drawFoliage(c);
@@ -1057,10 +1351,12 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				SetGeometryState(c, viewSet);
 				drawEnd(c);
 			}
-		}).Use(shadows, Access::Sampled)
+		});
+		forwardPass.Use(shadows, Access::Sampled).Use(pointShadows, Access::Sampled)
 		  .Color(hdr, load)
 		  .Color(ids, load, noObject)
 		  .Depth(depth, load, 0.f); // reversed-Z: 0 is the far plane
+		if (voxelLight.active) forwardPass.Use(voxelLight.image, Access::Sampled);
 		cleared = true;
 
 		// ---- Occlusion: HZB of phase 1, phase 2 culling and drawing ----
@@ -1079,7 +1375,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			// Foliage is tested against the depth of phase 1 (landscapes, large meshes).
 			for (const FoliageDraw& fd : foliage) AddFoliageCull(graph, fd, request, cam.position, hzb.image, vi == 0);
 			for (const GrassDraw& gd : grass) AddGrassCull(graph, gd, request, cam.position, hzb.image);
-			graph.AddPass("forward (phase 2)", [=](VkCommandBuffer c)
+			auto& phase2Pass = graph.AddPass("forward (phase 2)", [=](VkCommandBuffer c)
 			{
 				SetViewport(c, vx, vy, vw, vh, true);
 				SetGeometryState(c, viewSet);
@@ -1088,14 +1384,89 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				drawGrass(c);
 				SetGeometryState(c, viewSet);
 				drawEnd(c);
-			}).Use(shadows, Access::Sampled)
+			});
+			phase2Pass.Use(shadows, Access::Sampled).Use(pointShadows, Access::Sampled)
 			  .Color(hdr, VK_ATTACHMENT_LOAD_OP_LOAD)
 			  .Color(ids, VK_ATTACHMENT_LOAD_OP_LOAD)
 			  .Depth(depth, VK_ATTACHMENT_LOAD_OP_LOAD);
+			if (voxelLight.active) phase2Pass.Use(voxelLight.image, Access::Sampled);
+		}
+
+		// ---- Screen space displacement: over a copy of the scene of this viewport ----
+		if (!data.displacementItems.empty() && scene->debug_view == HRL_DEBUG_VIEW_NONE)
+		{
+			struct DisplacementDraw { uint32_t indexCount, firstIndex; int32_t vertexOffset; uint32_t instance; float push[6]; uint32_t texture; float distance2; };
+			std::vector<DisplacementDraw> draws;
+			for (uint32_t index : data.displacementItems)
+			{
+				DrawItem& item = data.items[index];
+				if (!item.noCull && !IsMeshVisible(item.mesh, item.model, request.frustum)) continue;
+				const HRL_Material* m = data.materialKeys[item.material].material;
+				if (!m) continue;
+				int lod = SelectMeshLOD(item.mesh, item.model, cam.view, cam.projGL, vh, viewport);
+				lod = glm::clamp(lod, 0, (int)item.gpu->lods.size() - 1);
+				while (lod > 0 && !item.gpu->lods[(size_t)lod].valid) --lod;
+				const MeshLOD& range = item.gpu->lods[(size_t)lod];
+				DisplacementDraw d{range.indexCount, range.firstIndex, (int32_t)range.vertexOffset, item.instance, {}, 0, 0.f};
+				d.texture = TextureSlot(m, HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING, R.flatNormal.slot);
+				d.push[0] = 1.f / (float)gpu.width;
+				d.push[1] = 1.f / (float)gpu.height;
+				d.push[2] = MaterialFloat(m, HRL_MATERIAL_PARAM_SS_DISPLACEMENT_STRENGTH, 12.f);
+				d.push[3] = MaterialFloat(m, HRL_MATERIAL_PARAM_SS_DISPLACEMENT_SCALE, 1.f);
+				d.push[4] = MaterialFloat(m, HRL_MATERIAL_PARAM_SS_DISPLACEMENT_OPACITY, 1.f);
+				const glm::vec3 center = glm::vec3(item.model * glm::vec4(item.mesh->bounds_center_, 1.f));
+				d.distance2 = glm::dot(center - cam.position, center - cam.position);
+				draws.push_back(d);
+			}
+			std::stable_sort(draws.begin(), draws.end(), [](const DisplacementDraw& a, const DisplacementDraw& b) { return a.distance2 > b.distance2; });
+			ImageDesc copyDesc = hdrDesc;
+			copyDesc.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+			const FrameGraph::Handle copy = draws.empty() ? 0 : graph.CreateTransient(copyDesc, "scene copy (displacement)");
+			if (copy && graph.GetImage(copy).handle)
+			{
+				Image* src = &graph.GetImage(hdr);
+				Image* dst = &graph.GetImage(copy);
+				const uint32_t w = gpu.width, h = gpu.height;
+				graph.AddPass("displacement copy", [=](VkCommandBuffer c)
+				{
+					VkImageCopy region{};
+					region.srcSubresource = region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+					region.extent = {w, h, 1};
+					vkCmdCopyImage(c, src->handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+				}).Use(hdr, Access::CopySource).Use(copy, Access::CopyDestination);
+				const VkImageView copyView = dst->view;
+				if (const VkDescriptorSet copySet = MakeSamplerSet(R.samplerLayout, &copyView, 1))
+					graph.AddPass("screen space displacement", [=](VkCommandBuffer c)
+					{
+						SetViewport(c, vx, vy, vw, vh, true);
+						vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.displacementPipeline);
+						const VkDescriptorSet sets[3] = {viewSet, R.bindlessSet, copySet};
+						vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.displacementLayout, 0, 3, sets, 0, nullptr);
+						BindGeometry(c);
+						for (const DisplacementDraw& d : draws)
+						{
+							struct { float v[5]; uint32_t texture; } push{{d.push[0], d.push[1], d.push[2], d.push[3], d.push[4]}, d.texture};
+							vkCmdPushConstants(c, R.displacementLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 24, &push);
+							vkCmdDrawIndexed(c, d.indexCount, 1, d.firstIndex, d.vertexOffset, d.instance);
+						}
+					}).Use(copy, Access::Sampled).Color(hdr, VK_ATTACHMENT_LOAD_OP_LOAD).Color(ids, VK_ATTACHMENT_LOAD_OP_LOAD)
+					  .Depth(depth, VK_ATTACHMENT_LOAD_OP_LOAD);
+			}
 		}
 
 		lastViewProj = view.viewProj;
 		lastRect[0] = vx; lastRect[1] = vy; lastRect[2] = vw; lastRect[3] = vh;
+		overlayViews.push_back({viewports[vi].id, viewport, vx, vy, vw, vh, view.viewProj, cam.view});
+		{
+			EffectView ev;
+			ev.viewport = viewport;
+			ev.x = vx; ev.y = vy; ev.w = vw; ev.h = vh;
+			ev.viewProj = view.viewProj;
+			ev.viewGL = cam.view;
+			ev.projGL = cam.projGL;
+			ev.camera = cam.position;
+			effectViews.push_back(ev);
+		}
 		R.lastView = cam.view;
 		R.lastProjGL = cam.projGL;
 	}
@@ -1108,15 +1479,85 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			.Color(ids, VK_ATTACHMENT_LOAD_OP_CLEAR, noObject)
 			.Depth(depth, VK_ATTACHMENT_LOAD_OP_CLEAR, 0.f);
 
-	// Tone mapping into the LDR scene image.
 	const float fullWidth = (float)gpu.width, fullHeight = (float)gpu.height;
-	const PostSettings post = ScenePostSettings(frame);
-	const FrameGraph::Handle bloom = post.bloom > 0.f ? AddBloomPasses(graph, hdr, gpu.width, gpu.height) : hdr;
-	const VkImageView toneViews[2] = {graph.GetImage(hdr).view, graph.GetImage(bloom).view};
-	if (const VkDescriptorSet toneSet = MakeSamplerSet(R.tonemapSetLayout, toneViews, 2))
+	// Temporal anti-aliasing: this frame blended with the reprojected history.
+	FrameGraph::Handle resolved = hdr;
+	if (!taa)
 	{
-		struct TonePush { float exposure; uint32_t encode; float bloom; };
-		const TonePush push{post.exposure, R.ldrFormat == VK_FORMAT_R8G8B8A8_UNORM ? 1u : 0u, bloom != hdr ? post.bloom : 0.f};
+		gpu.previousViewProj.clear();
+		gpu.historyValid = false;
+	}
+	else if (cleared && !taaViews.empty() && EnsureHistory(gpu))
+	{
+		const uint32_t current = gpu.historyIndex ^ 1u;
+		const FrameGraph::Handle target = graph.Import(gpu.history[current]);
+		const FrameGraph::Handle previous = graph.Import(gpu.history[gpu.historyIndex]);
+		const bool reset = !gpu.historyValid;
+		// The previous history is undefined before its first frame.
+		if (reset)
+			graph.AddPass("taa history clear", nullptr).Color(previous, VK_ATTACHMENT_LOAD_OP_CLEAR);
+		const VkImageView views[3] = {graph.GetImage(hdr).view, gpu.history[gpu.historyIndex].view, gpu.depth.view};
+		const VkSampler samplers[3] = {R.pointClamp, R.linearClamp, R.pointClamp};
+		if (const VkDescriptorSet set = MakeSamplerSet(R.taaSetLayout, views, 3, samplers))
+		{
+			const glm::vec2 rcp(1.f / fullWidth, 1.f / fullHeight);
+			graph.AddPass("taa resolve", [=](VkCommandBuffer c)
+			{
+				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.taaPipeline);
+				vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.taaLayout, 0, 1, &set, 0, nullptr);
+				for (const TaaView& v : taaViews)
+				{
+					SetViewport(c, v.x, v.y, v.w, v.h, false);
+					struct { glm::mat4 reproject; glm::vec4 rect, params; } push{v.reproject, glm::vec4(v.x, v.y, v.w, v.h),
+						glm::vec4(rcp, (reset || !v.history) ? 1.f : 0.f, 0.1f)};
+					vkCmdPushConstants(c, R.taaLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+					vkCmdDraw(c, 3, 1, 0, 0);
+				}
+			}).Use(hdr, Access::Sampled).Use(previous, Access::Sampled).Use(depth, Access::Sampled)
+			  .Color(target, VK_ATTACHMENT_LOAD_OP_CLEAR);
+			resolved = target;
+			gpu.historyIndex = current;
+			gpu.historyValid = true;
+		}
+	}
+
+	// Screen space effects and custom post-processes, in HDR, before the tone mapping.
+	if (cleared) resolved = AddScreenEffects(graph, gpu, frame, effectViews, resolved, depth);
+
+	// Tone mapping into the LDR scene image (FXAA: into a temporary image first).
+	const PostSettings post = ScenePostSettings(frame);
+	const FrameGraph::Handle bloom = post.bloom > 0.f ? AddBloomPasses(graph, resolved, gpu.width, gpu.height) : resolved;
+	const bool fxaa = R.antiAliasing == AntiAliasing::Fxaa;
+	FrameGraph::Handle toneTarget = ldr;
+	if (fxaa)
+	{
+		ImageDesc desc;
+		desc.format = R.ldrFormat;
+		desc.width = gpu.width;
+		desc.height = gpu.height;
+		desc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		toneTarget = graph.CreateTransient(desc, "tone mapped");
+		if (!graph.GetImage(toneTarget).handle) toneTarget = ldr;
+	}
+	const VkImageView toneViews[2] = {graph.GetImage(resolved).view, graph.GetImage(bloom).view};
+	PostSettings::Grading grading = post.grading;
+	grading.screen = glm::vec4(fullWidth, fullHeight, 1.f / fullWidth, 1.f / fullHeight);
+	const FrameSlice gradingSlice = dev.AllocFrame(sizeof(grading), 256);
+	const VkDescriptorSet toneSet = gradingSlice.ptr ? MakeSamplerSet(R.tonemapSetLayout, toneViews, 2) : VK_NULL_HANDLE;
+	if (toneSet)
+	{
+		std::memcpy(gradingSlice.ptr, &grading, sizeof(grading));
+		const VkDescriptorBufferInfo gradingInfo{gradingSlice.buffer, gradingSlice.offset, sizeof(grading)};
+		VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+		write.dstSet = toneSet;
+		write.dstBinding = 2;
+		write.descriptorCount = 1;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		write.pBufferInfo = &gradingInfo;
+		vkUpdateDescriptorSets(dev.device, 1, &write, 0, nullptr);
+		struct TonePush { float exposure; uint32_t encode; float bloom; uint32_t toneMap; };
+		const TonePush push{post.exposure, R.ldrFormat == VK_FORMAT_R8G8B8A8_UNORM ? 1u : 0u, bloom != resolved ? post.bloom : 0.f,
+			post.toneMap ? 1u : 0u};
 		auto& pass = graph.AddPass("tone mapping", [=](VkCommandBuffer c)
 		{
 			SetViewport(c, 0, 0, fullWidth, fullHeight, false);
@@ -1125,8 +1566,24 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			vkCmdPushConstants(c, R.tonemapLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
 			vkCmdDraw(c, 3, 1, 0, 0);
 		});
-		pass.Use(hdr, Access::Sampled).Color(ldr, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
-		if (bloom != hdr) pass.Use(bloom, Access::Sampled);
+		pass.Use(resolved, Access::Sampled).Color(toneTarget, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+		if (bloom != resolved) pass.Use(bloom, Access::Sampled);
+	}
+	if (toneTarget != ldr)
+	{
+		const VkImageView source = graph.GetImage(toneTarget).view;
+		if (const VkDescriptorSet set = MakeSamplerSet(R.samplerLayout, &source, 1))
+		{
+			const glm::vec2 rcp(1.f / fullWidth, 1.f / fullHeight);
+			graph.AddPass("fxaa", [=](VkCommandBuffer c)
+			{
+				SetViewport(c, 0, 0, fullWidth, fullHeight, false);
+				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.fxaaPipeline);
+				vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.bloomLayout, 0, 1, &set, 0, nullptr);
+				vkCmdPushConstants(c, R.bloomLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(rcp), &rcp);
+				vkCmdDraw(c, 3, 1, 0, 0);
+			}).Use(toneTarget, Access::Sampled).Color(ldr, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+		}
 	}
 
 	// Debug primitives of the frame, over the tone mapped image, depth tested.
@@ -1158,6 +1615,9 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			draw(lines, lineCount, R.debugLinePipeline);
 		}).Color(ldr, VK_ATTACHMENT_LOAD_OP_LOAD).Depth(depth, VK_ATTACHMENT_LOAD_OP_LOAD);
 	}
+
+	// Gizmos, widgets, texts: over the finished image of each viewport.
+	if (cleared) AddOverlayPasses(graph, frame, overlayViews, ldr);
 
 	// Screenshot: copied to a buffer now, written to disk once the GPU is done.
 	if (frame.screenshotPath)
@@ -1212,6 +1672,7 @@ void RendererEndFrame()
 	ReleaseUnusedLandscapes();
 	ReleaseUnusedFoliage();
 	ReleaseUnusedGrass();
+	ReleaseUnusedVoxels();
 	dev.EndFrame();
 }
 
@@ -1241,7 +1702,12 @@ HRL_id GetHoveredObject(HRL_id scene, int mouseX, int mouseY, HRL_EMeshType* typ
 	std::memcpy(&id, readback.mapped, sizeof(id));
 	dev.DestroyBuffer(readback, false);
 	if (id == kNoObject) return HRL_INVALID_ID;
-	if (type) *type = R.landscapes.count(id) ? HRL_LANDSCAPE : (R.foliage.count(id) ? HRL_FOLIAGE : HRL_3D_MESH);
+	if (type)
+	{
+		*type = R.landscapes.count(id) ? HRL_LANDSCAPE : (R.foliage.count(id) ? HRL_FOLIAGE : HRL_3D_MESH);
+		auto item = gpu.data.itemOfMesh.find(id);
+		if (item != gpu.data.itemOfMesh.end() && gpu.data.items[item->second].sprite) *type = HRL_SPRITE;
+	}
 	return id;
 }
 
@@ -1270,5 +1736,7 @@ void SetRayTracedShadows(bool enabled) { R.rtShadows = enabled; }
 bool RayTracedShadowsEnabled() { return R.rtShadows && RayTracingSupported(); }
 void SetShadowDistance(float distance) { if (distance > 0.f) R.shadowDistance = distance; }
 void SetOcclusionCulling(bool enabled) { R.occlusionCulling = enabled; }
+void SetAntiAliasing(uint32_t mode) { R.antiAliasing = (AntiAliasing)std::min(mode, 2u); }
+uint32_t GetAntiAliasing() { return (uint32_t)R.antiAliasing; }
 bool OcclusionCulling() { return R.occlusionCulling; }
 } // namespace hrlvk

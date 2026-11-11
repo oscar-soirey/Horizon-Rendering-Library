@@ -11,6 +11,10 @@ layout(set = 1, binding = 0) uniform sampler2D uTextures[];
 #ifdef HRL_LANDSCAPE
 #include "landscape.glsl"
 #endif
+#ifdef HRL_CUSTOM_SURFACE
+#include "custom.glsl"
+#include "hrl_user.glsl"
+#endif
 
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec3 vNormal;
@@ -18,6 +22,9 @@ layout(location = 2) in vec2 vUV;
 layout(location = 3) in vec3 vTangent;   // landscape: xy = height texture coordinate
 layout(location = 4) in vec3 vBitangent;
 layout(location = 5) flat in uvec2 vIds; // material, object id
+#if !defined(HRL_FOLIAGE) && !defined(HRL_LANDSCAPE)
+layout(location = 8) flat in uint vTint;  // mesh particles (mesh.vert)
+#endif
 #ifdef HRL_FOLIAGE
 layout(location = 6) flat in uint vDither; // bits 0-6 coverage, bit 7 complementary pattern
 layout(location = 7) in vec3 vRestPos;     // position without the wind
@@ -26,8 +33,20 @@ layout(location = 7) in vec3 vRestPos;     // position without the wind
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out uint outObjectId;
 
+#ifdef HRL_SPRITE
+// Sprites are pixel art: nearest texel, whatever the filter of the texture.
+vec4 SampleNearest(uint slot, vec2 uv)
+{
+	ivec2 size = textureSize(uTextures[nonuniformEXT(slot)], 0);
+	ivec2 texel = clamp(ivec2(floor(fract(uv) * vec2(size))), ivec2(0), size - 1);
+	return texelFetch(uTextures[nonuniformEXT(slot)], texel, 0);
+}
+vec4 SampleLinear(uint tex, vec2 uv) { return SampleNearest(tex * 2u, uv); }
+vec4 SampleSRGB(uint tex, vec2 uv) { return SampleNearest(tex * 2u + 1u, uv); }
+#else
 vec4 SampleLinear(uint tex, vec2 uv) { return texture(uTextures[nonuniformEXT(tex * 2u)], uv); }
 vec4 SampleSRGB(uint tex, vec2 uv) { return texture(uTextures[nonuniformEXT(tex * 2u + 1u)], uv); }
+#endif
 
 void main()
 {
@@ -46,14 +65,24 @@ void main()
 	uint flags = mat.flags.x;
 
 	vec4 albedoSample = SampleSRGB(mat.tex0.x, vUV);
+#ifdef HRL_SPRITE
+	// Opacity of the sprite texels (alpha of the albedo and alpha map), as the
+	// OpenGL sprite shader. Transparent texels are not drawn and not pickable.
+	float alpha = albedoSample.a * SampleLinear(mat.tex1.y, vUV).r * mat.baseColor.a;
+	if (alpha < 0.004) discard;
+#else
 	float alpha = MaterialAlpha(mat, vUV, albedoSample.a);
+#endif
 #ifdef HRL_ALPHA_TEST
 	if (alpha < 0.5) discard;
 #endif
 
-	Surface s;
+	ShadedSurface s;
 	s.position = vWorldPos;
 	s.baseColor = albedoSample.rgb * mat.baseColor.rgb;
+#if !defined(HRL_FOLIAGE) && !defined(HRL_LANDSCAPE)
+	s.baseColor *= unpackUnorm4x8(vTint).rgb;
+#endif
 	float roughness = SampleLinear(mat.tex0.z, vUV).r;
 	if ((flags & MAT_ROUGHNESS_INVERT) != 0u) roughness = 1.0 - roughness;
 	if ((flags & MAT_ROUGHNESS_VALUE) != 0u) roughness = mat.params.x;
@@ -110,6 +139,40 @@ void main()
 		N = normalize(T * nt.x + B * nt.y + N * nt.z);
 	}
 	s.normal = N;
+
+#ifdef HRL_CUSTOM_SURFACE
+	// ShadedSurface function of the application, given the built-in surface.
+	hrlParamBase = mat.flags.y;
+	HRL_SurfaceInput si;
+	si.worldPosition = vWorldPos;
+	si.normal = normalize(gl_FrontFacing ? vNormal : -vNormal);
+	si.uv = vUV;
+	si.viewDirection = normalize(uView.camPos.xyz - vWorldPos);
+	si.screenUV = fract(gl_FragCoord.xy * uView.viewportSize.zw);
+	si.time = uView.camPos.w;
+	si.objectId = vIds.y;
+	HRL_Surface so;
+	so.baseColor = s.baseColor;
+	so.normal = s.normal;
+	so.roughness = s.roughness;
+	so.metallic = s.metallic;
+	so.specular = s.specular;
+	so.ao = s.ao;
+	so.emissive = s.emissive;
+	so.opacity = alpha;
+	Surface(si, so);
+	s.baseColor = so.baseColor;
+	s.normal = normalize(so.normal);
+	s.roughness = so.roughness;
+	s.metallic = clamp(so.metallic, 0.0, 1.0);
+	s.specular = so.specular;
+	s.ao = so.ao;
+	s.emissive = so.emissive;
+	alpha = so.opacity;
+#ifdef HRL_ALPHA_TEST
+	if (alpha < 0.5) discard;
+#endif
+#endif
 
 	outColor = vec4(ShadeSurface(s), alpha);
 	outObjectId = vIds.y;

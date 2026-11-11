@@ -263,6 +263,7 @@ void HRL_InitContext(HRL_uint _width, HRL_uint _height, void* _loader)
 void HRL_Shutdown()
 {
 	HRL_WaitForAllAsyncResources();
+	ReleaseOverlays();
 	g_AsyncResourceLoader.Stop();
 	// Destroy flat resources that are referenced by scene viewports first.
 	{
@@ -479,6 +480,11 @@ void HRL_EndFrame()
 			if (debugIt != ctx_.debug_renderers.end())
 				frame.debug = &debugIt->second;
 			frame.debugLineThickness = ctx_.debug_line_thickness;
+			static std::vector<HRL_ViewportOverlay> overlays;
+			BuildSceneOverlays(scene, overlays);
+			frame.overlays = &overlays;
+			frame.windowWidth = ctx_.window_width;
+			frame.windowHeight = ctx_.window_height;
 			auto screenshotIt = ctx_.pending_screenshots.find(scene_id);
 			if (screenshotIt != ctx_.pending_screenshots.end())
 				frame.screenshotPath = screenshotIt->second.c_str();
@@ -523,6 +529,9 @@ void HRL_EndFrame()
 		// while rendering the complete scene (all viewports) above.
 		ctx_.debug_renderers.erase(scene_id);
 	}
+
+	if (g_Backend.RHI_RenderSceneFrame)
+		EndOverlayFrame();
 
 	// Mouse transitions are frame-scoped. Keep the held state until the next input event.
 	ctx_.mouseLeftPressed = false;

@@ -16,7 +16,13 @@ structure: `docs/ARCHITECTURE.md`. Planned work: `docs/ROADMAP.md`.
 | `vk_impostor.cpp` | Octahedral impostors: baking and drawing |
 | `vk_grass.cpp` | Procedural grass |
 | `vk_environment.cpp` | Image based lighting |
-| `vk_renderer.*` | Render targets, frame of a scene, picking, screenshots |
+| `vk_renderer.*` | Render targets, frame of a scene, picking, screenshots, anti-aliasing |
+| `vk_overlay.cpp` | Gizmos, widgets, texts, on-screen messages over each viewport |
+| `vk_custom.cpp` | Custom shaders: run time GLSL compiler (glslang), surface functions, OpenGL post-process shaders |
+| `vk_effects.cpp` | Screen space effects (OpenGL effect shaders) and custom post-processes |
+| `vk_vfx.cpp` | Particles |
+| `vk_voxel.cpp` | 2D voxel worlds and the light of their emissive voxels |
+| `vk_gi.cpp` | Global illumination probes (`HRL_GI_DDGI`) |
 | `vk_renderer_internal.h` | Types shared by the renderer files |
 | `vulkan_backend.*` | `HRL_vtable` of the backend and the `hrl_vulkan.h` functions |
 | `vk_mem_alloc.cpp` | Implementation unit of Vulkan Memory Allocator (`third_party/vma`) |
@@ -24,6 +30,8 @@ structure: `docs/ARCHITECTURE.md`. Planned work: `docs/ROADMAP.md`.
 
 From the HRL core this backend only includes `backend_api.h`,
 `render_common.h` and `object_types.h` (enforced by the `backend_isolation` test).
+
+Custom shaders need glslang at build time (`HRL_VULKAN_RUNTIME_SHADERS`, found in the Vulkan SDK).
 
 Requirements: Vulkan 1.3 with dynamic rendering, synchronization2, descriptor
 indexing (update-after-bind sampled images), multi-draw-indirect, draw indirect count. Optional:

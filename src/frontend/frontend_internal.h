@@ -287,5 +287,9 @@ void ProcessGizmoInput();
 void SimulateVFXSystem(HRL_VFXSystem* system, float dt);
 void UpdateMaterialIntFlags(HRL_Material* material, const char* name, int value);
 void UpdateSceneLights(HRL_id _scene);
+// 2D overlays of a scene for the backends that implement RHI_RenderSceneFrame (overlay.cpp).
+void BuildSceneOverlays(const hrl_scene_t* scene, std::vector<HRL_ViewportOverlay>& out);
+void EndOverlayFrame();
+void ReleaseOverlays();
 
 #endif

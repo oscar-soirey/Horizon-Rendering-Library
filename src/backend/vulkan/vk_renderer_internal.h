@@ -24,6 +24,8 @@ namespace hrlvk
 {
 constexpr uint32_t kCascades = 4;
 constexpr uint32_t kMaxSpotShadows = 4;
+constexpr uint32_t kMaxPointShadows = 4;        // point lights with shadow maps (6 faces each)
+constexpr uint32_t kMaxPointShadowResolution = 1024;
 constexpr VkFormat kHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat kIdFormat = VK_FORMAT_R32_UINT;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
@@ -48,6 +50,9 @@ struct ViewData
 	glm::uvec4 counts;
 	glm::vec4 wind;
 	glm::vec4 interactors[16];
+	glm::mat4 pointViewProj[kMaxPointShadows * 6];
+	glm::vec4 giOrigin, giSpacing, giResolution; // probe volume (vk_gi.cpp), giResolution.w : 1 when active
+	glm::vec4 voxelLightRegion, voxelLight;       // light field of the emissive voxels (vk_voxel.cpp)
 };
 struct InstanceData { glm::mat4 model, normalMatrix; glm::uvec4 ids; };
 struct MaterialData { glm::vec4 baseColor, emissive, params; glm::uvec4 tex0, tex1, flags; };
@@ -89,11 +94,12 @@ enum Bucket : uint32_t
 	BucketOpaque, BucketOpaqueTwoSided,
 	BucketMasked, BucketMaskedTwoSided,           // alpha test
 	BucketTranslucent, BucketTranslucentTwoSided, // alpha blended, drawn back to front after the sky
+	BucketSprite,                                 // sprites: translucent, two sided, nearest texels
 	BucketCount
 };
 inline bool IsMasked(uint32_t bucket) { return bucket == BucketMasked || bucket == BucketMaskedTwoSided; }
 inline bool IsTranslucent(uint32_t bucket) { return bucket >= BucketTranslucent; }
-inline bool IsTwoSided(uint32_t bucket) { return (bucket & 1u) != 0; }
+inline bool IsTwoSided(uint32_t bucket) { return bucket == BucketSprite || (bucket & 1u) != 0; }
 
 // ---- Resources -------------------------------------------------------------
 struct Texture
@@ -162,6 +168,9 @@ struct DrawItem
 	uint32_t instance = 0;   // index in SceneData::instances
 	uint32_t material = 0;   // index in SceneData::materials
 	bool noCull = false;     // skinned meshes: their bounds follow the animation
+	bool sprite = false;     // HRL_SPRITE: drawn in BucketSprite whatever its material
+	HRL_id custom = HRL_INVALID_ID; // surface shader of the material (drawn from the CPU, not GPU culled)
+	bool displacement = false; // screen space displacement material: drawn after the scene, over a copy of it
 	float distance2 = 0.f;   // per viewport
 	uint32_t lod = 0;        // per viewport
 };
@@ -178,6 +187,9 @@ struct SceneData
 	};
 	std::unordered_map<HRL_id, uint32_t> itemOfMesh; // mesh id -> item
 	std::vector<uint32_t> skinnedItems;
+	std::vector<uint32_t> spriteItems;
+	std::vector<uint32_t> customItems;
+	std::vector<uint32_t> displacementItems;
 	std::vector<DrawItem> items;
 	std::vector<InstanceData> instances;     // parallel to items
 	std::vector<MaterialData> materials;
@@ -207,6 +219,12 @@ struct SceneData
 	// Work done by the last update (diagnostics, tests).
 	uint32_t rebuilds = 0, transformUpdates = 0, materialUpdates = 0;
 };
+
+// Draw bucket of an item: its material's, except for sprites.
+inline uint32_t ItemBucket(const SceneData& data, const DrawItem& item)
+{
+	return item.sprite ? (uint32_t)BucketSprite : (uint32_t)data.materialBuckets[item.material];
+}
 
 // Landscapes (see vk_landscape.cpp).
 constexpr uint32_t kLandscapeMaxLods = 16;
@@ -338,11 +356,45 @@ struct GrassDraw
 	uint32_t tiles = 0;
 };
 
+// Custom shaders (vk_custom.cpp).
+struct CustomParam
+{
+	enum Kind { Float, Int, Uint, Bool, Sampler, Mat3, Mat4 };
+	std::string name;
+	Kind kind = Float;
+	uint32_t components = 1;
+	uint32_t arraySize = 0;  // 0 : not an array
+	uint32_t first = 0;      // first vec4 of the parameter in the table
+	uint32_t slots = 1;      // vec4s used (matrices: 3 or 4 per element)
+	glm::vec4 value{0.f};    // initializer of the declaration
+};
+// Values of the parameters of an OpenGL effect shader, by uniform name
+// (floats, column-major for matrices, element after element for arrays).
+using EffectParams = std::unordered_map<std::string, std::vector<float>>;
+struct CustomShader
+{
+	bool surface = false;   // surface function (meshes); otherwise post-process
+	bool hasVertex = false; // vertex function
+	std::vector<CustomParam> params;
+	uint32_t paramSlots = 0;              // vec4s of the parameter table
+	std::string fragmentUser, vertexUser; // generated hrl_user.glsl of each stage
+	std::vector<uint32_t> fragment, vertex; // SPIR-V (forward opaque / post-process, vertex function)
+	VkPipeline forward[BucketCount]{};
+	bool forwardTried[BucketCount]{};
+	VkPipeline shadow = VK_NULL_HANDLE, shadowMasked = VK_NULL_HANDLE;
+	bool shadowTried = false, shadowMaskedTried = false;
+	VkPipeline post = VK_NULL_HANDLE;
+};
+
 struct HzbImage
 {
 	Image image;
 	std::vector<VkImageView> mips; // one storage view per mip
 };
+
+// Temporal anti-aliasing: jitter of the projection (Halton 2, 3) and history.
+constexpr uint32_t kTaaSamples = 8;
+enum class AntiAliasing : uint32_t { None = 0, Fxaa = 1, Taa = 2 };
 
 struct SceneGPU
 {
@@ -352,6 +404,12 @@ struct SceneGPU
 	// Persistent targets: object ids (picking), depth, final LDR image. The HDR
 	// colour target is a frame graph transient.
 	Image ids, depth, ldr;
+	// Temporal anti-aliasing: resolved image of the last frame and of this one,
+	// and the (unjittered) camera of each viewport in the last frame.
+	Image history[2];
+	uint32_t historyIndex = 0;
+	bool historyValid = false;
+	std::unordered_map<HRL_id, glm::mat4> previousViewProj;
 	Environment env;
 	Tlas tlas[kFramesInFlight];
 	SceneData data;
@@ -391,6 +449,7 @@ struct State
 	bool rtShadows = false;
 	bool occlusionCulling = true;
 	float shadowDistance = 150.f;
+	AntiAliasing antiAliasing = AntiAliasing::Fxaa;
 
 	// Layouts / pipelines
 	VkDescriptorSetLayout viewLayout = VK_NULL_HANDLE;
@@ -448,6 +507,38 @@ struct State
 	VkPipeline bloomDownPipeline = VK_NULL_HANDLE;
 	VkPipeline bloomUpPipeline = VK_NULL_HANDLE; // additive
 	VkPipeline debugLinePipeline = VK_NULL_HANDLE;
+	// 2D overlays (vk_overlay.cpp): gizmo lines and textured quads.
+	VkDescriptorSetLayout overlaySetLayout = VK_NULL_HANDLE;
+	VkPipelineLayout overlayLayout = VK_NULL_HANDLE;
+	VkPipeline overlayPipeline = VK_NULL_HANDLE;
+	VkPipeline gizmoLinePipeline = VK_NULL_HANDLE;
+	// Anti-aliasing: FXAA (sampler layout) and TAA.
+	VkPipeline fxaaPipeline = VK_NULL_HANDLE;
+	VkDescriptorSetLayout taaSetLayout = VK_NULL_HANDLE;
+	VkPipelineLayout taaLayout = VK_NULL_HANDLE;
+	VkPipeline taaPipeline = VK_NULL_HANDLE;
+	// Custom shaders and custom post-processes.
+	std::unordered_map<HRL_id, CustomShader> customShaders;
+	VkDescriptorSetLayout postSetLayout = VK_NULL_HANDLE; // scene, bright scene, depth, parameters, normals
+	VkPipelineLayout postLayout = VK_NULL_HANDLE;
+	VkDescriptorSetLayout glCompatSetLayout = VK_NULL_HANDLE;
+	VkPipelineLayout glCompatLayout = VK_NULL_HANDLE;
+	VkPipeline glCompatPipeline = VK_NULL_HANDLE;
+	// Particles (vk_vfx.cpp): billboards and mesh particles, per blend mode (alpha, additive, multiply).
+	VkDescriptorSetLayout vfxSetLayout = VK_NULL_HANDLE;
+	VkPipelineLayout vfxLayout = VK_NULL_HANDLE;
+	VkPipeline vfxPipelines[3]{};
+	VkPipeline vfxMeshPipelines[3]{};
+	// 2D voxel worlds (vk_voxel.cpp).
+	VkDescriptorSetLayout voxelSetLayout = VK_NULL_HANDLE;
+	VkPipelineLayout voxelLayout = VK_NULL_HANDLE;
+	VkPipeline voxelPipeline = VK_NULL_HANDLE, voxelEmissivePipeline = VK_NULL_HANDLE;
+	VkPipelineLayout voxelEmitLayout = VK_NULL_HANDLE, voxelLightLayout = VK_NULL_HANDLE;
+	VkDescriptorSetLayout voxelLightSetLayout = VK_NULL_HANDLE;
+	VkPipeline voxelEmitPipeline = VK_NULL_HANDLE, voxelLightPipeline = VK_NULL_HANDLE;
+	// Screen space displacement materials.
+	VkPipelineLayout displacementLayout = VK_NULL_HANDLE;
+	VkPipeline displacementPipeline = VK_NULL_HANDLE;
 	VkPipeline debugTrianglePipeline = VK_NULL_HANDLE;
 	VkPipeline envCubePipeline = VK_NULL_HANDLE;
 	VkPipeline envFilterPipeline = VK_NULL_HANDLE;
@@ -468,6 +559,7 @@ struct State
 	Texture white, flatNormal, black;
 	std::unordered_map<uint64_t, VkSampler> samplers;
 	VkSampler linearClamp = VK_NULL_HANDLE;
+	VkSampler pointClamp = VK_NULL_HANDLE; // depth and exact texel reads
 	VkSampler shadowSampler = VK_NULL_HANDLE;
 
 	// Geometry pool: every mesh lives in one vertex and one index buffer so a
@@ -483,6 +575,9 @@ struct State
 	Image shadowMaps;
 	std::vector<VkImageView> shadowLayers;
 	uint32_t shadowResolution = 0;
+	Image pointShadowMaps;     // kMaxPointShadows * 6 layers
+	std::vector<VkImageView> pointShadowLayers;
+	uint32_t pointShadowResolution = 0;
 
 	std::unordered_map<HRL_id, SceneGPU> scenes;
 	std::vector<PendingScreenshot> screenshots;
@@ -630,6 +725,108 @@ void RecordEnvironment(VkCommandBuffer cmd, SceneGPU& gpu, const hrl_scene_t* sc
 // One-off: BRDF lookup table and the placeholder cube map.
 void RecordBrdfLut(VkCommandBuffer cmd);
 
+// ---- vk_custom.cpp -----------------------------------------------------------
+bool RuntimeShadersAvailable();
+bool CreateCustomShader(HRL_id id, const std::string& vert, const std::string& frag);
+void DeleteCustomShader(HRL_id id);
+const CustomShader* FindCustomShader(HRL_id id);
+// Pipelines of a surface shader for a draw bucket / shadows, of a post-process shader.
+VkPipeline CustomForwardPipeline(HRL_id id, uint32_t bucket);
+VkPipeline CustomShadowPipeline(HRL_id id, bool masked);
+VkPipeline CustomPostPipeline(HRL_id id);
+// paramSlots vec4s, from the material (or the defaults of the shader).
+void WriteCustomParams(const CustomShader& shader, const HRL_Material* m, glm::vec4* out);
+void WriteEffectParams(const CustomShader& shader, const EffectParams& values, glm::vec4* out);
+// Built-in OpenGL effect shaders (backend/common/hrl_builtin_glsl.h) compiled
+// for Vulkan with the post-process rules; null when it does not compile.
+const CustomShader* EffectShader(const char* name, const char* source);
+// vk_pipelines.cpp: variants built from run time SPIR-V. vs null: the built-in mesh vertex shader.
+VkPipeline MakeMeshPipeline(const HRL_VkShaderBlob* vs, const HRL_VkShaderBlob* fs, uint32_t bucket);
+VkPipeline MakeCustomShadowPipeline(const HRL_VkShaderBlob* vs, const HRL_VkShaderBlob* fs);
+VkPipeline MakePostPipeline(const HRL_VkShaderBlob* fs);
+
+// ---- vk_vfx.cpp --------------------------------------------------------------
+struct Camera;
+struct VFXFrame
+{
+	struct Batch { uint32_t first = 0, count = 0, blend = 0, texture = 0xFFFFFFFFu; };
+	struct MeshBatch { uint32_t first = 0, count = 0, blend = 0, indexCount = 0, firstIndex = 0; int32_t vertexOffset = 0; };
+	std::vector<Batch> billboards;
+	VkDescriptorSet particleSet = VK_NULL_HANDLE;
+	std::vector<MeshBatch> meshes;
+	FrameSlice meshInstances;                 // InstanceData of the mesh particles
+	VkDescriptorSet meshViewSet = VK_NULL_HANDLE; // view set whose instance table is meshInstances
+};
+// Adds the materials of the mesh particles to the table (before it is uploaded).
+void ResolveVFXMaterials(const hrl_scene_t* scene, SceneData& data, const HRL_SceneFrame& frame);
+VFXFrame PrepareVFX(const hrl_scene_t* scene, SceneData& data, const HRL_SceneFrame& frame, const Camera& cam);
+// In the forward pass, after the translucent surfaces.
+void DrawVFX(VkCommandBuffer cmd, const VFXFrame& f, VkDescriptorSet viewSet);
+
+// ---- vk_voxel.cpp ------------------------------------------------------------
+struct VoxelDraws
+{
+	struct Chunk { VkBuffer vertices, indices; uint32_t indexCount; };
+	std::vector<Chunk> regular, emissive;
+	VkDescriptorSet set = VK_NULL_HANDLE; // textures of the voxel types
+};
+// Builds / uploads the chunks the viewports of the scene see.
+void PrepareVoxels(HRL_id sceneId, const hrl_scene_t* scene);
+VoxelDraws PrepareVoxelDraws(HRL_id sceneId, const hrl_scene_t* scene, const FrustumPlaneSet& frustum);
+void DrawVoxels(VkCommandBuffer cmd, const VoxelDraws& draws, VkDescriptorSet viewSet);
+void ReleaseUnusedVoxels();
+void DestroyAllVoxels();
+// Light of the emissive voxels around a viewport (HRL_SetVoxelEmissiveLighting).
+struct VoxelLightField
+{
+	FrameGraph::Handle image = 0;
+	VkImageView view = VK_NULL_HANDLE;
+	glm::vec4 region{0.f};
+	float falloff = 1.f;
+	bool active = false;
+};
+VoxelLightField AddVoxelLightField(FrameGraph& graph, HRL_id sceneId, const hrl_scene_t* scene, const HRL_Viewport* viewport);
+
+// ---- vk_gi.cpp ---------------------------------------------------------------
+struct GIFrame
+{
+	FrameSlice probes;                 // 6 vec4 lobes per probe
+	glm::vec4 origin{0.f};             // w : strength
+	glm::vec4 spacing{1.f}, resolution{0.f};
+};
+// Updates the probe volume of a scene (a few probes per frame) and uploads it.
+GIFrame PrepareGI(HRL_id sceneId, const hrl_scene_t* scene);
+void ReleaseGIScene(HRL_id sceneId);
+void ShutdownGI();
+
+// ---- vk_effects.cpp ----------------------------------------------------------
+struct EffectView
+{
+	const HRL_Viewport* viewport = nullptr;
+	float x = 0.f, y = 0.f, w = 1.f, h = 1.f; // rectangle in the scene image, origin top-left
+	glm::mat4 viewProj{1.f};                  // Vulkan clip space, as rendered (jitter included)
+	glm::mat4 viewGL{1.f}, projGL{1.f};       // OpenGL conventions (effect shaders)
+	glm::vec3 camera{0.f};
+};
+// Screen space effects of the scene (decals, SSR, ambient occlusion, volumetric
+// fog, god rays, clouds), then the custom post-processes of each viewport, on
+// the HDR image. Returns the image that holds the result.
+FrameGraph::Handle AddScreenEffects(FrameGraph& graph, SceneGPU& gpu, const HRL_SceneFrame& frame,
+	const std::vector<EffectView>& views, FrameGraph::Handle color, FrameGraph::Handle depth);
+
+// ---- vk_overlay.cpp ----------------------------------------------------------
+struct OverlayView
+{
+	HRL_id viewportId = HRL_INVALID_ID;
+	const HRL_Viewport* viewport = nullptr;
+	float x = 0.f, y = 0.f, w = 1.f, h = 1.f; // rectangle in the scene image, origin top-left
+	glm::mat4 viewProj{1.f};                  // Vulkan clip space
+	glm::mat4 view{1.f};
+};
+// Gizmos and 2D overlays of the viewports, drawn over the tone mapped image.
+void AddOverlayPasses(FrameGraph& graph, const HRL_SceneFrame& frame, const std::vector<OverlayView>& views,
+	FrameGraph::Handle target);
+
 // ---- vk_scene_data.cpp ------------------------------------------------------
 float MaterialFloat(const HRL_Material* m, const char* name, float fallback);
 // Brings the cached scene data in line with the frontend scene.
@@ -643,7 +840,9 @@ struct LightSetup
 	std::vector<LightData> lights;
 	const HRL_Light* cascadeLight = nullptr;            // directional light using the cascades
 	std::vector<const HRL_Light*> spotShadowLights;     // spot lights with a shadow map
+	std::vector<const HRL_Light*> pointShadowLights;    // point lights with 6 shadow maps
 	uint32_t shadowResolution = 0;                      // 0 : no shadow map this frame
+	uint32_t pointShadowResolution = 0;                 // 0 : no point light shadow map
 };
 LightSetup PackLights(const hrl_scene_t* scene, bool rayTracedShadows);
 
@@ -666,6 +865,7 @@ struct ShadowView
 	glm::mat4 viewProj{1.f};   // Vulkan clip space, depth 0..1
 	glm::mat4 cullClip{1.f};   // OpenGL clip space, for the CPU frustum test
 	uint32_t layer = 0;
+	bool point = false;        // layer of the point light shadow maps
 };
 // Fills the cascade matrices and splits of `view` and appends one shadow view per cascade.
 void ComputeCascades(const Camera& cam, const glm::vec3& lightDir, float resolution,

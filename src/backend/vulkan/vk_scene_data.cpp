@@ -73,6 +73,8 @@ void WriteInstance(SceneData& data, uint32_t index)
 	const float det = glm::determinant(m3);
 	inst.normalMatrix = (std::isfinite(det) && std::abs(det) > 1e-12f)
 		? glm::mat4(glm::transpose(glm::inverse(m3))) : glm::mat4(1.f);
+	if (item.sprite)
+		inst.normalMatrix[3] = glm::vec4(item.mesh->region_[0], item.mesh->region_[1], item.mesh->region_[2], item.mesh->region_[3]);
 }
 
 // GPU culling records: one per item, the LOD ranges of each item, and the
@@ -82,14 +84,18 @@ void BuildRecords(SceneData& data)
 	data.records.assign(data.items.size(), DrawRecord{});
 	data.lodRanges.clear();
 	data.translucentItems.clear();
+	data.customItems.clear();
+	data.displacementItems.clear();
 	data.autoLodItems.clear();
 	uint32_t perBucket[kCulledBuckets]{};
 	for (size_t i = 0; i < data.items.size(); ++i)
 	{
 		const DrawItem& item = data.items[i];
 		const HRL_Mesh* mesh = item.mesh;
-		const uint32_t bucket = data.materialBuckets[item.material];
+		const uint32_t bucket = ItemBucket(data, item);
 		DrawRecord& r = data.records[i];
+		// Custom surface shaders are drawn from the CPU: the GPU culling skips them (bucket >= 4).
+		const uint32_t gpuBucket = (item.custom != HRL_INVALID_ID || item.displacement) ? 0xFFu : bucket;
 		r.sphere = glm::vec4(mesh->bounds_center_, item.noCull ? 0.f : std::max(mesh->bounds_radius_, 1e-4f));
 		// LODs usable on the GPU: the valid ones, up to the first missing level.
 		const uint32_t first = (uint32_t)data.lodRanges.size();
@@ -102,7 +108,7 @@ void BuildRecords(SceneData& data)
 		}
 		const bool automatic = mesh->lod_automatic_ && count > 1 && mesh->lods_.size() > 1;
 		const uint32_t levels = std::min<uint32_t>(count, (uint32_t)std::max<size_t>(mesh->lods_.size(), 1));
-		r.info = glm::uvec4(item.instance, bucket, first, std::max(levels, 1u));
+		r.info = glm::uvec4(item.instance, gpuBucket, first, std::max(levels, 1u));
 		const bool distance = mesh->lod_mode_ == HRL_LOD_DISTANCE;
 		r.lod = distance
 			? glm::vec4(mesh->lod_base_distance_, mesh->lod_distance_scale_, mesh->lod_min_distance_, mesh->lod_max_distance_)
@@ -112,7 +118,9 @@ void BuildRecords(SceneData& data)
 		r.lodMode = glm::uvec4((automatic ? RecordAutoLod : 0u) | (distance ? RecordDistanceLod : 0u),
 			mesh->lod_override_ >= 0 ? (uint32_t)mesh->lod_override_ : 0xFFFFFFFFu, hysteresis, 0u);
 		if (automatic) data.autoLodItems.push_back((uint32_t)i);
-		if (IsTranslucent(bucket)) data.translucentItems.push_back((uint32_t)i);
+		if (item.displacement) data.displacementItems.push_back((uint32_t)i);
+		else if (item.custom != HRL_INVALID_ID) data.customItems.push_back((uint32_t)i);
+		else if (IsTranslucent(bucket)) data.translucentItems.push_back((uint32_t)i);
 		else ++perBucket[bucket];
 	}
 	uint32_t base = 0;
@@ -136,6 +144,7 @@ void RebuildSceneData(SceneData& data, const HRL_SceneFrame& frame)
 {
 	data.itemOfMesh.clear();
 	data.skinnedItems.clear();
+	data.spriteItems.clear();
 	data.items.clear();
 	data.instances.clear();
 	data.materials.clear();
@@ -150,9 +159,10 @@ void RebuildSceneData(SceneData& data, const HRL_SceneFrame& frame)
 
 	for (const auto& [id, mesh] : frame.scene->meshes)
 	{
-		if (!mesh || (mesh->type_ != HRL_3D_MESH && mesh->type_ != HRL_3D_SKELETAL_MESH)) continue;
+		if (!mesh || (mesh->type_ != HRL_3D_MESH && mesh->type_ != HRL_3D_SKELETAL_MESH && mesh->type_ != HRL_SPRITE)) continue;
 		auto gpuMesh = R.meshes.find(id);
 		const bool skinned = mesh->type_ == HRL_3D_SKELETAL_MESH;
+		const bool sprite = mesh->type_ == HRL_SPRITE;
 		const bool drawable = (skinned || IsFiniteBounds(mesh)) && gpuMesh != R.meshes.end() &&
 			!gpuMesh->second.lods.empty() && gpuMesh->second.lods[0].valid;
 		const int material = drawable ? resolveMaterial(mesh->material_) : -1;
@@ -163,11 +173,26 @@ void RebuildSceneData(SceneData& data, const HRL_SceneFrame& frame)
 		item.instance = (uint32_t)data.items.size();
 		item.material = (uint32_t)material;
 		item.noCull = skinned;
+		item.sprite = sprite;
+		// Material with a surface shader (HRL_CreateShader): drawn with its own pipelines.
+		if (!sprite)
+			if (auto m = frame.materials->find(mesh->material_); m != frame.materials->end() && m->second)
+			{
+				if (const CustomShader* custom = FindCustomShader(m->second->shader_); custom && custom->surface)
+					item.custom = m->second->shader_;
+				// Screen space displacement: opt-in, with its texture (same rule as OpenGL).
+				const HRL_Material* mat = m->second;
+				auto texture = mat->textureParams_.find(HRL_MATERIAL_TEXTURE_SS_DISPLACEMENT_MAPPING);
+				item.displacement = mat->ss_displacement_enabled_ && texture != mat->textureParams_.end() &&
+					texture->second != HRL_INVALID_ID &&
+					(mat->shader_ == HRL_MESH_3D_SHADER || mat->shader_ == HRL_SKINNED_3D_MESH_SHADER);
+			}
 		data.itemOfMesh.emplace(id, item.instance);
 		if (skinned) data.skinnedItems.push_back(item.instance);
+		if (sprite) data.spriteItems.push_back(item.instance);
 		data.items.push_back(item);
 		InstanceData inst{};
-		inst.ids = glm::uvec4((uint32_t)material, id, 0, 0);
+		inst.ids = glm::uvec4((uint32_t)material, id, sprite ? 1u : 0u, 0);
 		data.instances.push_back(inst);
 		WriteInstance(data, item.instance);
 	}
@@ -236,6 +261,17 @@ void UpdateSceneData(SceneData& data, const HRL_SceneFrame& frame)
 		++data.transformUpdates;
 	}
 
+	// Sprite regions (HRL_SetSpriteRegion) are compared by value: sprites are few.
+	for (uint32_t index : data.spriteItems)
+	{
+		const HRL_Mesh* mesh = data.items[index].mesh;
+		const glm::vec4 region(mesh->region_[0], mesh->region_[1], mesh->region_[2], mesh->region_[3]);
+		glm::vec4& stored = data.instances[index].normalMatrix[3];
+		if (stored == region) continue;
+		stored = region;
+		data.dirtyInstances.push_back(index);
+	}
+
 	const bool texturesChanged = data.textureRevision != R.textureRevision;
 	bool bucketsChanged = false;
 	for (size_t i = 0; i < data.materialKeys.size(); ++i)
@@ -283,6 +319,13 @@ LightSetup PackLights(const hrl_scene_t* scene, bool rayTracedShadows)
 			{
 				out.spotShadowLights.push_back(light);
 				slot = (float)out.spotShadowLights.size();
+			}
+			else if (type == 0 && out.pointShadowLights.size() < kMaxPointShadows)
+			{
+				slot = 10.f + (float)out.pointShadowLights.size();
+				out.pointShadowLights.push_back(light);
+				out.pointShadowResolution = std::max(out.pointShadowResolution,
+					(uint32_t)glm::clamp(light->shadow_resolution_, 128, (int)kMaxPointShadowResolution));
 			}
 			if (slot >= 0.f && slot < 8.f)
 				out.shadowResolution = std::max(out.shadowResolution, (uint32_t)glm::clamp(light->shadow_resolution_, 256, 8192));

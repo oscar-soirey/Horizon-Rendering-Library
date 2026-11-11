@@ -18,7 +18,7 @@ layout(location = 1) out uint outObjectId;
 
 void main()
 {
-	Surface s;
+	ShadedSurface s;
 	s.position = vWorldPos;
 	s.shadowPosition = vRestPos;
 	// The normal leans towards the ground normal: both sides of a blade are lit from above.

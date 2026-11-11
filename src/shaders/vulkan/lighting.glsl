@@ -11,6 +11,52 @@ layout(set = 0, binding = 4) uniform sampler2DArrayShadow uShadowMaps;
 layout(set = 0, binding = 5) uniform samplerCube uIrradiance;
 layout(set = 0, binding = 6) uniform samplerCube uPrefiltered;
 layout(set = 0, binding = 7) uniform sampler2D uBrdfLut;
+// Point light shadow maps without ray tracing: 6 faces per light.
+layout(set = 0, binding = 12) uniform sampler2DArrayShadow uPointShadowMaps;
+// Light of the emissive voxels of a 2D voxel world (vk_voxel.cpp).
+layout(set = 0, binding = 15) uniform sampler2D uVoxelLight;
+vec3 SampleVoxelLight(vec3 position)
+{
+	vec2 uv = (position.xy - uView.voxelLightRegion.xy) * uView.voxelLightRegion.zw;
+	if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec3(0.0);
+	float z = position.z / max(uView.voxelLight.x, 1e-4);
+	return max(textureLod(uVoxelLight, uv, 0.0).rgb, vec3(0.0)) / (1.0 + z * z);
+}
+// Global illumination probes: 6 directional lobes per probe (+X -X +Y -Y +Z -Z), w = valid.
+layout(set = 0, binding = 14, std430) readonly buffer GIProbes { vec4 giLobes[]; };
+
+// Indirect diffuse light of the probe volume at a point (same rule as the CPU
+// reference, core/gi_probes.cpp: trilinear over the valid probes, lobes
+// weighted by the normal).
+vec3 SampleProbeGI(vec3 position, vec3 normal)
+{
+	ivec3 res = ivec3(uView.giResolution.xyz);
+	vec3 grid = (position - uView.giOrigin.xyz) / max(uView.giSpacing.xyz, vec3(1e-4));
+	if (any(lessThan(grid, vec3(0.0))) || any(greaterThan(grid, vec3(res - 1)))) return vec3(0.0);
+	ivec3 base = clamp(ivec3(floor(grid)), ivec3(0), res - 1);
+	vec3 f = grid - vec3(base);
+	vec3 lobeWeights[2] = vec3[](max(normal, vec3(0.0)), max(-normal, vec3(0.0)));
+	vec3 result = vec3(0.0);
+	float total = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		ivec3 o = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+		ivec3 p = min(base + o, res - 1);
+		int index = (p.z * res.y + p.y) * res.x + p.x;
+		if (giLobes[index * 6].w < 0.5) continue;
+		vec3 w3 = mix(1.0 - f, f, vec3(o));
+		float spatial = w3.x * w3.y * w3.z;
+		if (spatial <= 0.0) continue;
+		vec3 local = giLobes[index * 6 + 0].rgb * lobeWeights[0].x + giLobes[index * 6 + 1].rgb * lobeWeights[1].x +
+			giLobes[index * 6 + 2].rgb * lobeWeights[0].y + giLobes[index * 6 + 3].rgb * lobeWeights[1].y +
+			giLobes[index * 6 + 4].rgb * lobeWeights[0].z + giLobes[index * 6 + 5].rgb * lobeWeights[1].z;
+		float directional = dot(lobeWeights[0] + lobeWeights[1], vec3(1.0));
+		if (directional <= 1e-5) continue;
+		result += local / directional * spatial;
+		total += spatial;
+	}
+	return total > 1e-5 ? result / total : vec3(0.0);
+}
 #ifdef HRL_RAY_QUERY
 layout(set = 0, binding = 8) uniform accelerationStructureEXT uTlas;
 // Alpha tested shadow casters: their triangles are read to test the texture.
@@ -31,6 +77,28 @@ float SampleShadowLayer(vec4 clip, float layer, float bias)
 	for (int y = -1; y <= 1; ++y)
 		for (int x = -1; x <= 1; ++x)
 			sum += texture(uShadowMaps, vec4(uv + vec2(x, y) * texel, layer, p.z - bias));
+	return sum / 9.0;
+}
+
+// Cube face of a point light: the one of the major axis of the direction from the light.
+float PointShadow(int index, vec3 lightPos, vec3 worldPos, vec3 N, float bias)
+{
+	vec3 d = worldPos - lightPos;
+	vec3 a = abs(d);
+	int face = a.x >= a.y && a.x >= a.z ? (d.x > 0.0 ? 0 : 1) : (a.y >= a.z ? (d.y > 0.0 ? 2 : 3) : (d.z > 0.0 ? 4 : 5));
+	// The normal offset follows the size of a texel at that distance.
+	float texelWorld = 2.0 * max(a.x, max(a.y, a.z)) * uView.shadowInfo.z;
+	vec3 offsetPos = worldPos + N * (0.01 + 1.5 * texelWorld);
+	vec4 clip = uView.pointViewProj[index * 6 + face] * vec4(offsetPos, 1.0);
+	vec3 p = clip.xyz / clip.w;
+	vec2 uv = clamp(p.xy * 0.5 + 0.5, vec2(0.0), vec2(1.0));
+	if (p.z <= 0.0 || p.z >= 1.0) return 1.0;
+	float layer = float(index * 6 + face);
+	float texel = uView.shadowInfo.z;
+	float sum = 0.0;
+	for (int y = -1; y <= 1; ++y)
+		for (int x = -1; x <= 1; ++x)
+			sum += texture(uPointShadowMaps, vec4(uv + vec2(x, y) * texel, layer, p.z - bias * 0.01));
 	return sum / 9.0;
 }
 
@@ -113,10 +181,12 @@ float LightShadow(Light light, vec3 worldPos, vec3 N, vec3 L, float lightDistanc
 		vec3 offsetPos = worldPos + N * 0.02;
 		shadow = SampleShadowLayer(uView.spotViewProj[s] * vec4(offsetPos, 1.0), float(HRL_MAX_CASCADES + s), light.spot.w);
 	}
+	else if (slot > 9.5)
+		shadow = PointShadow(int(slot + 0.5) - 10, light.position.xyz, worldPos, N, light.spot.w);
 	return mix(1.0, shadow, clamp(light.spot.z, 0.0, 1.0));
 }
 
-struct Surface
+struct ShadedSurface
 {
 	vec3 position;      // shaded point
 	vec3 shadowPosition; // origin of the shadow lookups / rays
@@ -128,7 +198,7 @@ struct Surface
 };
 
 // Direct lights, image based lighting, emission, debug views and fog.
-vec3 ShadeSurface(Surface s)
+vec3 ShadeSurface(ShadedSurface s)
 {
 	vec3 N = s.normal;
 	vec3 V = normalize(uView.camPos.xyz - s.position);
@@ -188,6 +258,10 @@ vec3 ShadeSurface(Surface s)
 		vec3 kD = diffuseColor * (1.0 - FssEss - FmsEms);
 		ambient += (FssEss * prefiltered + (FmsEms + kD) * irradiance) * uView.envParams.y;
 	}
+	if (uView.giResolution.w > 0.5)
+		ambient += diffuseColor * SampleProbeGI(s.position, N) * uView.giOrigin.w;
+	if (uView.voxelLight.y > 0.5)
+		ambient += diffuseColor * SampleVoxelLight(s.position);
 	color += ambient * s.ao + s.emissive;
 
 	uint debugView = uView.counts.z;
