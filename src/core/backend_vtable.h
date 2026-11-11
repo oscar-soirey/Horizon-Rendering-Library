@@ -90,6 +90,8 @@ typedef struct {
 
 	//Requests//
 	int(*RHI_IsValidTexture)(HRL_id tex);
+	// RGBA8 pixels of mip 0 (landscape heightmaps). Returns HRL_FALSE when unavailable.
+	int(*RHI_ReadTexturePixels)(HRL_id tex, std::vector<unsigned char>* rgba, int* width, int* height);
 	int(*RHI_IsValidShader)(HRL_id shader);
 
 	//Color picking readback (pixel coordinates use the scene framebuffer convention: origin bottom-left)

@@ -1,5 +1,6 @@
 // HRL frontend - textures, text textures, fonts.
 #include "frontend_internal.h"
+#include "../core/render_common.h"
 
 //Textures//
 HRL_id HRL_CreateTexture(const char* _fileContent, size_t _bufferSize)
@@ -8,6 +9,23 @@ HRL_id HRL_CreateTexture(const char* _fileContent, size_t _bufferSize)
 	return g_Backend.RHI_CreateTexture(_fileContent, _bufferSize);
 }
 
+
+HRL_id HRL_CreateTextureFromPixels(const unsigned char* _rgba, int _width, int _height)
+{
+	if (!_rgba || _width <= 0 || _height <= 0 || _width > 16384 || _height > 16384)
+	{
+		SetErrorCode(HRL_INVALID_VALUE, HRL_SEVERITY_ERROR, "HRL_CreateTextureFromPixels: invalid pixels or size");
+		return HRL_INVALID_ID;
+	}
+	// Same path as an image file: every backend decodes it.
+	std::vector<unsigned char> png;
+	if (!EncodePNG_RGBA8(_width, _height, std::vector<unsigned char>(_rgba, _rgba + size_t(_width) * size_t(_height) * 4u), png))
+	{
+		SetErrorCode(HRL_OUT_OF_MEMORY, HRL_SEVERITY_ERROR, "HRL_CreateTextureFromPixels: encoding failed");
+		return HRL_INVALID_ID;
+	}
+	return g_Backend.RHI_CreateTexture(reinterpret_cast<const char*>(png.data()), png.size());
+}
 
 HRL_id HRL_CreateTextureAsync(const char* data, size_t size)
 {

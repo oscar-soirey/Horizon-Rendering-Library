@@ -27,7 +27,12 @@ int HRL_Vulkan_IsRayTracingSupported(void) { return HRL_FALSE; }
 void HRL_Vulkan_SetRayTracedShadows(int) {}
 int HRL_Vulkan_GetRayTracedShadows(void) { return HRL_FALSE; }
 void HRL_Vulkan_SetShadowDistance(float) {}
+void HRL_Vulkan_SetOcclusionCulling(int) {}
+int HRL_Vulkan_GetFoliageStats(HRL_id, HRL_VulkanFoliageStats*) { return HRL_FALSE; }
+int HRL_Vulkan_GetOcclusionCulling(void) { return HRL_FALSE; }
 const char* HRL_Vulkan_GetDeviceName(void) { return ""; }
+void HRL_Vulkan_SetPipelineCachePath(const char*) {}
+int HRL_Vulkan_GetMemoryUsage(uint64_t* used, uint64_t* budget) { if (used) *used = 0; if (budget) *budget = 0; return HRL_FALSE; }
 int HRL_Vulkan_GetSceneStats(HRL_id, HRL_VulkanSceneStats* stats) { if (stats) *stats = HRL_VulkanSceneStats{}; return HRL_FALSE; }
 #endif
 
@@ -80,6 +85,21 @@ void UpdateSceneLights(HRL_id _scene)
 		return;
 
 	g_Backend.RHI_UpdateLights(GetLightsVector(_scene));
+}
+
+void MarkMeshMoved(HRL_id id, HRL_Mesh* mesh)
+{
+	if (!mesh || mesh->moved_) return;
+	auto it = ctx_.scenes.find(mesh->scene_);
+	if (it == ctx_.scenes.end() || !it->second) return;
+	mesh->moved_ = true;
+	it->second->moved_meshes.push_back(id);
+}
+
+void MarkSceneMeshesChanged(HRL_id scene)
+{
+	auto it = ctx_.scenes.find(scene);
+	if (it != ctx_.scenes.end() && it->second) ++it->second->mesh_revision;
 }
 
 void MarkSceneGIGeometryDirty(hrl_scene_t* scene)
@@ -284,6 +304,17 @@ void HRL_Shutdown()
 		}
 		scene->landscapes.clear();
 
+		for (const auto& [id, foliage] : scene->foliage)
+		{
+			(void)id;
+			for (auto& part : foliage->parts)
+				if (part->mesh_id != HRL_INVALID_ID) g_Backend.RHI_DeleteMesh(part->mesh_id);
+			delete foliage;
+		}
+		scene->foliage.clear();
+		for (const auto& [id, grass] : scene->grass) { (void)id; delete grass; }
+		scene->grass.clear();
+
 		std::vector<HRL_id> vfx_system_ids;
 		vfx_system_ids.reserve(scene->vfx_systems.size());
 		for (const auto& [id, system] : scene->vfx_systems) { (void)system; vfx_system_ids.push_back(id); }
@@ -323,6 +354,8 @@ void HRL_Shutdown()
 	//nettoyer les caches flat
 	ctx_.meshes.clear();
 	ctx_.landscapes.clear();
+	ctx_.foliage.clear();
+	ctx_.grass.clear();
 	ctx_.lights.clear();
 	ctx_.volumetric_fogs.clear();
 	ctx_.decals.clear();
@@ -450,6 +483,9 @@ void HRL_EndFrame()
 			if (screenshotIt != ctx_.pending_screenshots.end())
 				frame.screenshotPath = screenshotIt->second.c_str();
 			g_Backend.RHI_RenderSceneFrame(frame);
+			for (HRL_id moved : scene->moved_meshes)
+				if (auto m = scene->meshes.find(moved); m != scene->meshes.end() && m->second) m->second->moved_ = false;
+			scene->moved_meshes.clear();
 			ctx_.pending_screenshots.erase(scene_id);
 			ctx_.debug_renderers.erase(scene_id);
 			continue;
@@ -460,6 +496,9 @@ void HRL_EndFrame()
 		// rendering this scene.
 		UpdateSceneLights(scene_id);
 		g_Backend.RHI_RenderScene(scene, scene_id);
+		for (HRL_id moved : scene->moved_meshes)
+			if (auto m = scene->meshes.find(moved); m != scene->meshes.end() && m->second) m->second->moved_ = false;
+		scene->moved_meshes.clear();
 
 		// Debug primitives are owned by the HRL context, while the backend
 		// renderer has its own private context. Draw them explicitly here so

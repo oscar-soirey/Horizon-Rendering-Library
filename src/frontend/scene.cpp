@@ -27,6 +27,9 @@ void HRL_DeleteScene(HRL_id _sceneid)
 
 	//on collecte les IDs d'abord pour eviter l'invalidation d'iterateur
 	std::vector<HRL_id> mesh_ids, landscape_ids, light_ids, fog_ids, gizmo_ids, vfx_system_ids, viewport_ids, camera_ids;
+	std::vector<HRL_id> foliage_ids, grass_ids;
+	for (const auto& [id, foliage] : it->second->foliage) { (void)foliage; foliage_ids.push_back(id); }
+	for (const auto& [id, grass] : it->second->grass)     { (void)grass; grass_ids.push_back(id); }
 	for (const auto& [id, mesh]     : it->second->meshes)          mesh_ids.push_back(id);
 	for (const auto& [id, landscape] : it->second->landscapes)   { (void)landscape; landscape_ids.push_back(id); }
 	for (const auto& [id, light]    : it->second->lights)         light_ids.push_back(id);
@@ -37,6 +40,8 @@ void HRL_DeleteScene(HRL_id _sceneid)
 	for (const auto& [id, camera]   : it->second->cameras)        camera_ids.push_back(id);
 
 	//delete every objects that owns the scene
+	for (auto id : grass_ids)     HRL_DeleteGrass(id);
+	for (auto id : foliage_ids)   HRL_DeleteFoliage(id);
 	for (auto id : mesh_ids)      HRL_DeleteMesh(id);
 	for (auto id : landscape_ids) HRL_DeleteLandscape(id);
 	for (auto id : light_ids)     HRL_DeleteLight(id);

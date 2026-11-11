@@ -467,9 +467,9 @@ static void PNG_AppendChunk(std::vector<unsigned char>& png, const char type[4],
 
 
 
-bool WritePNG_RGBA8(const char* path, int width, int height, const std::vector<unsigned char>& rgbaTopDown)
+bool EncodePNG_RGBA8(int width, int height, const std::vector<unsigned char>& rgbaTopDown, std::vector<unsigned char>& png)
 {
-    if (!path || width <= 0 || height <= 0 || rgbaTopDown.size() != (size_t)width * (size_t)height * 4u)
+    if (width <= 0 || height <= 0 || rgbaTopDown.size() != (size_t)width * (size_t)height * 4u)
         return false;
 
     std::vector<unsigned char> raw;
@@ -500,7 +500,7 @@ bool WritePNG_RGBA8(const char* path, int width, int height, const std::vector<u
     }
     PNG_AppendU32BE(zlib, PNG_Adler32(raw));
 
-    std::vector<unsigned char> png = {0x89, 'P','N','G',0x0D,0x0A,0x1A,0x0A};
+    png = {0x89, 'P','N','G',0x0D,0x0A,0x1A,0x0A};
     std::vector<unsigned char> ihdr;
     PNG_AppendU32BE(ihdr, (uint32_t)width);
     PNG_AppendU32BE(ihdr, (uint32_t)height);
@@ -512,7 +512,13 @@ bool WritePNG_RGBA8(const char* path, int width, int height, const std::vector<u
     PNG_AppendChunk(png, "IHDR", ihdr);
     PNG_AppendChunk(png, "IDAT", zlib);
     PNG_AppendChunk(png, "IEND", {});
+    return true;
+}
 
+bool WritePNG_RGBA8(const char* path, int width, int height, const std::vector<unsigned char>& rgbaTopDown)
+{
+    std::vector<unsigned char> png;
+    if (!path || !EncodePNG_RGBA8(width, height, rgbaTopDown, png)) return false;
     std::ofstream file(path, std::ios::binary);
     if (!file) return false;
     file.write((const char*)png.data(), (std::streamsize)png.size());

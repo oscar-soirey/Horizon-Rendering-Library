@@ -1037,6 +1037,7 @@ HRL_id HRL_CreateSkeletalMesh(HRL_id _sceneid, const HRL_SkeletalMeshData* _data
 
 	HRL_SkeletalMesh* rawMesh = mesh.release();
 	sceneIt->second->meshes.emplace(newId, rawMesh);
+	++sceneIt->second->mesh_revision;
 	sceneIt->second->shadows_dirty = true;
 	ctx_.meshes.emplace(newId, rawMesh);
 	return newId;

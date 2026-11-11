@@ -226,6 +226,15 @@ typedef struct HRL_SkeletalMeshData {
 #endif
 
 /**
+ * Integer/bool material parameter: 1 makes the material translucent (alpha
+ * blended with what is behind it, using its opacity), 0 (default) keeps it
+ * opaque or alpha tested. Translucent meshes are drawn back to front after the
+ * opaque scene and cast no shadow. Vulkan backend; ignored by OpenGL.
+ * Example: HRL_MaterialSetBool(mat, HRL_MATERIAL_PARAM_TRANSLUCENT, HRL_TRUE);
+ */
+#define HRL_MATERIAL_PARAM_TRANSLUCENT "Translucent"
+
+/**
  * Rendering backends.
  *
  * HRL_VULKAN is the primary backend: a native Vulkan 1.3 renderer where every
@@ -261,7 +270,9 @@ typedef enum HRL_EMeshType{
 	HRL_SPRITE = 0x0021,
 	HRL_2D_MESH,
 	HRL_3D_MESH,
-	HRL_3D_SKELETAL_MESH
+	HRL_3D_SKELETAL_MESH,
+	HRL_LANDSCAPE,   /* returned by HRL_GetHoveredObject (Vulkan) */
+	HRL_FOLIAGE      /* returned by HRL_GetHoveredObject (Vulkan) */
 }HRL_EMeshType;
 
 typedef enum HRL_EDebugRenderingType{
@@ -612,16 +623,54 @@ extern "C" {
 	);
 
 	/* ============================================================================
-	 *  LANDSCAPES (OpenGL 3.3)
+	 *  LANDSCAPES
+	 *
+	 * A landscape is a height field of `width` x `depth` samples spread over
+	 * HRL_SetLandscapeSize (centred on the origin of the landscape), lifted by
+	 * HRL_SetLandscapeHeight and placed by position / rotation / scale.
+	 *
+	 * Vulkan renders it with a continuous level of detail (CDLOD: quadtree of
+	 * patches morphing into each other, no cracks, no popping), every height
+	 * sample near the camera; it casts and receives shadows (shadow maps and
+	 * ray traced) and can be picked. HRL_SetLandscapeResolution is only used by
+	 * the deprecated OpenGL renderer, which needs a heightmap texture.
 	 * ============================================================================ */
 
 	/**
-	 * @brief Creates a heightmap-driven landscape in a scene.
-	 *
-	 * The heightmap is sampled from its red channel in [0..1]. Geometry is
-	 * generated lazily by the OpenGL renderer as a regular grid.
+	 * @brief Creates a landscape from a heightmap texture (red channel, 0..1,
+	 * multiplied by HRL_SetLandscapeHeight, default 20).
+	 * 8-bit textures give visible steps: prefer HRL_CreateLandscapeFromHeights.
 	 */
 	HRL_API HRL_id HRL_CreateLandscape(HRL_id _sceneid, HRL_id _heightmap);
+	/**
+	 * @brief Creates a landscape from float heights (Vulkan): `_width` x `_depth`
+	 * values, row by row (+X along a row, +Z from row to row). The heights are
+	 * local units: the height multiplier of such a landscape is 1. Copied by HRL.
+	 */
+	HRL_API HRL_id HRL_CreateLandscapeFromHeights(HRL_id _sceneid, const float* _heights, HRL_uint _width, HRL_uint _depth);
+	/** @brief Replaces every height (the sample count may change). */
+	HRL_API void HRL_SetLandscapeHeights(HRL_id _landscape, const float* _heights, HRL_uint _width, HRL_uint _depth);
+	/**
+	 * @brief Replaces the heights of an area (sculpting): `_width` x `_depth`
+	 * values starting at sample (`_x`, `_z`). Only this area is sent to the GPU.
+	 */
+	HRL_API void HRL_UpdateLandscapeHeights(HRL_id _landscape, HRL_uint _x, HRL_uint _z, HRL_uint _width, HRL_uint _depth, const float* _heights);
+	/** @brief Number of height samples along X and Z. */
+	HRL_API void HRL_GetLandscapeHeightsSize(HRL_id _landscape, HRL_uint* _width, HRL_uint* _depth);
+	/**
+	 * @brief World height of the landscape surface at a world (x, z).
+	 * Returns HRL_FALSE outside the landscape. Position, yaw and scale are
+	 * taken into account; pitch and roll are not.
+	 */
+	HRL_API int HRL_GetLandscapeHeightAt(HRL_id _landscape, float _x, float _z, float* _y);
+	/** @brief World normal of the landscape surface at a world (x, z); HRL_FALSE outside. */
+	HRL_API int HRL_GetLandscapeNormalAt(HRL_id _landscape, float _x, float _z, float* _nx, float* _ny, float* _nz);
+	/**
+	 * @brief Distance from the camera drawn with every height sample (Vulkan);
+	 * each next level of detail covers twice the distance. 0 (default) chooses
+	 * it from the size of the landscape.
+	 */
+	HRL_API void HRL_SetLandscapeLODDistance(HRL_id _landscape, float _distance);
 	HRL_API void HRL_DeleteLandscape(HRL_id _landscape);
 	HRL_API int HRL_IsValidLandscape(HRL_id _landscape);
 	HRL_API void HRL_SetLandscapeHeightmap(HRL_id _landscape, HRL_id _heightmap);
@@ -633,6 +682,120 @@ extern "C" {
 	HRL_API void HRL_SetLandscapeResolution(HRL_id _landscape, HRL_uint x, HRL_uint z);
 	HRL_API void HRL_SetLandscapeUVScale(HRL_id _landscape, float u, float v);
 	HRL_API void HRL_SetLandscapeMaterial(HRL_id _landscape, HRL_id _material);
+
+	/* ============================================================================
+	 *  FOLIAGE (Vulkan)
+	 *
+	 * A foliage is one kind of plant or rock (a tree, a bush, a stone...) drawn
+	 * at any number of places: its geometry is given once (up to 4 parts with
+	 * their own material, e.g. bark and leaves) and its instances are only a
+	 * position, a rotation and a scale.
+	 *
+	 * Everything per instance happens on the GPU: frustum and occlusion
+	 * culling, distance fade, level of detail (generated from the parts, with a
+	 * dithered cross-fade: no popping), impostors far away (octahedral
+	 * impostors baked from the parts), wind, bending around interactors, shadow
+	 * maps and ray traced shadows near the camera. The CPU only edits instances.
+	 *
+	 *     HRL_id tree = HRL_CreateFoliage(scene);
+	 *     HRL_AddFoliageMesh(tree, trunkVertices, n, trunkIndices, m, bark);
+	 *     HRL_AddFoliageMesh(tree, leafVertices, n2, leafIndices, m2, leaves);
+	 *     HRL_FoliageScatter s = HRL_DefaultFoliageScatter();
+	 *     s.density = 0.002f;                       // per square unit
+	 *     HRL_ScatterFoliage(tree, landscape, &s);  // or HRL_PaintFoliage
+	 *
+	 * Instances are stored in cells of 32 x 32 world units: painting or erasing
+	 * only sends the cells it touches to the GPU.
+	 * ============================================================================ */
+
+	typedef struct HRL_FoliageInstance {
+		float position[3];   /* world position of the origin of the parts */
+		float rotation[3];   /* pitch, yaw, roll in degrees (as meshes) */
+		float scale;         /* uniform */
+	} HRL_FoliageInstance;
+
+	/* How instances are placed by HRL_ScatterFoliage / HRL_PaintFoliage. */
+	typedef struct HRL_FoliageScatter {
+		float density;          /* instances per square unit of ground */
+		float min_scale, max_scale;
+		float min_slope, max_slope;     /* degrees from horizontal */
+		float min_height, max_height;   /* world Y */
+		float align_to_normal;  /* 0 : upright, 1 : perpendicular to the ground */
+		float min_spacing;      /* minimal distance between two instances of this foliage, 0 : none */
+		float sink;             /* moved down along their up axis (roots in the ground) */
+		float random_tilt;      /* random lean in degrees */
+		unsigned int seed;
+	} HRL_FoliageScatter;
+
+	/** @brief Default placement: 0.05 per square unit, scale 0.8..1.2, slopes up to 35 degrees, upright. */
+	HRL_API HRL_FoliageScatter HRL_DefaultFoliageScatter(void);
+
+	HRL_API HRL_id HRL_CreateFoliage(HRL_id _sceneid);
+	HRL_API void HRL_DeleteFoliage(HRL_id _foliage);
+	HRL_API int HRL_IsValidFoliage(HRL_id _foliage);
+	/**
+	 * @brief Adds a part (geometry + material) to a foliage. Its levels of detail
+	 * are generated. Returns the index of the part, or -1.
+	 */
+	HRL_API int HRL_AddFoliageMesh(HRL_id _foliage, const HRL_Vertex3D* _vertices, size_t _vertexCount,
+		const HRL_uint* _indices, size_t _indexCount, HRL_id _material);
+	HRL_API void HRL_SetFoliageMaterial(HRL_id _foliage, int _part, HRL_id _material);
+
+	/** @brief Adds instances at given places. Returns the number added. */
+	HRL_API size_t HRL_AddFoliageInstances(HRL_id _foliage, const HRL_FoliageInstance* _instances, size_t _count);
+	/**
+	 * @brief Covers a landscape or a 3D mesh (`_target`) with instances.
+	 * Returns the number added.
+	 */
+	HRL_API size_t HRL_ScatterFoliage(HRL_id _foliage, HRL_id _target, const HRL_FoliageScatter* _scatter);
+	/** @brief Adds instances on `_target` inside a circle (brush). Returns the number added. */
+	HRL_API size_t HRL_PaintFoliage(HRL_id _foliage, HRL_id _target, float _x, float _z, float _radius,
+		const HRL_FoliageScatter* _scatter);
+	/** @brief Removes the instances inside a circle (X, Z). Returns the number removed. */
+	HRL_API size_t HRL_EraseFoliage(HRL_id _foliage, float _x, float _z, float _radius);
+	HRL_API void HRL_ClearFoliage(HRL_id _foliage);
+	HRL_API size_t HRL_GetFoliageInstanceCount(HRL_id _foliage);
+	/** @brief Copies up to `_max` instances (to save them). Returns the number copied. */
+	HRL_API size_t HRL_GetFoliageInstances(HRL_id _foliage, HRL_FoliageInstance* _out, size_t _max);
+
+	/** @brief Instances are drawn up to this distance and fade out before it (default 250). */
+	HRL_API void HRL_SetFoliageDrawDistance(HRL_id _foliage, float _distance);
+	/** @brief Distance where LOD 0 ends; each next LOD lasts twice as long. 0 (default) : from the size. */
+	HRL_API void HRL_SetFoliageLODDistance(HRL_id _foliage, float _distance);
+	/** @brief Beyond this distance instances are impostors (camera facing images). 0 (default) : never. */
+	HRL_API void HRL_SetFoliageImpostorDistance(HRL_id _foliage, float _distance);
+	HRL_API void HRL_SetFoliageCastShadows(HRL_id _foliage, int _cast);
+	/** @brief How much the wind bends this foliage: 0 rigid (rocks), 1 default, more for grass-like plants. */
+	HRL_API void HRL_SetFoliageWindResponse(HRL_id _foliage, float _response);
+
+	/**
+	 * @brief Wind of a scene, for foliage and grass. `_dirX`, `_dirZ` : direction
+	 * (normalized by HRL), `_strength` : 0 calm .. 1 strong, `_gustiness` : 0..1.
+	 */
+	HRL_API void HRL_SetWind(HRL_id _sceneid, float _dirX, float _dirZ, float _strength, float _gustiness);
+	/**
+	 * @brief Sphere that bends grass and foliage away (a character, a vehicle).
+	 * 16 slots per scene; a radius of 0 frees the slot.
+	 */
+	HRL_API void HRL_SetFoliageInteractor(HRL_id _sceneid, HRL_uint _slot, float _x, float _y, float _z, float _radius);
+
+	/* ---- Grass: blades generated on the GPU around the camera, nothing stored ---- */
+
+	/** @brief Grass growing on a landscape (Vulkan). */
+	HRL_API HRL_id HRL_CreateGrass(HRL_id _landscape);
+	HRL_API void HRL_DeleteGrass(HRL_id _grass);
+	/** @brief Blades per square unit near the camera (default 40). */
+	HRL_API void HRL_SetGrassDensity(HRL_id _grass, float _density);
+	/** @brief Blade height, width and random height variation (share of the height, default 0.6, 0.05, 0.5). */
+	HRL_API void HRL_SetGrassBladeSize(HRL_id _grass, float _height, float _width, float _variation);
+	HRL_API void HRL_SetGrassColors(HRL_id _grass, float _baseR, float _baseG, float _baseB, float _tipR, float _tipG, float _tipB);
+	/** @brief Grass is drawn up to this distance (default 60), with fewer blades far away. */
+	HRL_API void HRL_SetGrassDistance(HRL_id _grass, float _distance);
+	/** @brief No grass on slopes steeper than this (degrees, default 40). */
+	HRL_API void HRL_SetGrassMaxSlope(HRL_id _grass, float _degrees);
+	/** @brief Density over the landscape (red channel of a texture covering it); HRL_INVALID_ID : everywhere. */
+	HRL_API void HRL_SetGrassMask(HRL_id _grass, HRL_id _texture);
+	HRL_API void HRL_SetGrassCastShadows(HRL_id _grass, int _cast);
 
 	/** Creates a skeletal mesh from CPU-side data returned by the FBX importer.
 	 * HRL copies the data and the caller may free the source structure afterwards. */
@@ -1016,6 +1179,8 @@ extern "C" {
 	 * @return HRL_id of the new texture, or HRL_INVALID_ID on failure.
 	 */
 	HRL_API HRL_id HRL_CreateTexture(const char* _data, size_t _bufferSize);
+	/** @brief Creates a texture from RGBA8 pixels (`_width` x `_height`, rows top to bottom). Copied by HRL. */
+	HRL_API HRL_id HRL_CreateTextureFromPixels(const unsigned char* _rgba, int _width, int _height);
 
 	/** Starts an asynchronous texture load/decoding job. GPU upload is completed automatically on the HRL context thread. */
 	HRL_API HRL_id HRL_CreateTextureAsync(const char* _data, size_t _bufferSize);

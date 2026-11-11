@@ -5,6 +5,7 @@
 
 #include "id_map.h"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -72,6 +73,10 @@ struct HRL_Mesh {
   float lod_hysteresis_ = 0.05f;
   int lod_override_ = -1;
   int last_lod_level_ = 0;
+  // Incremented by every LOD setting change (renderers cache LOD data).
+  uint64_t lod_revision_ = 0;
+  // Listed in hrl_scene_t::moved_meshes this frame.
+  bool moved_ = false;
 
   // Conservative local-space bounding sphere used by the OpenGL CPU culler.
   glm::vec3 bounds_center_{0.f};
@@ -105,6 +110,89 @@ struct HRL_Landscape final {
 
   // Incremented whenever the CPU height samples or topology have to be rebuilt.
   uint64_t revision_ = 1;
+
+  // Heights on the CPU (row-major, heights_w_ x heights_h_), in local units
+  // before height_scale_. Filled from the heightmap texture (red channel,
+  // 0..1) or given as floats. Used by the Vulkan renderer, the height queries
+  // and the foliage scattering.
+  std::vector<float> heights_;
+  HRL_uint heights_w_ = 0, heights_h_ = 0;
+  uint64_t heights_revision_ = 0;     // incremented by every change of heights_
+  // Area changed since the renderer last uploaded the heights: x0, z0, x1, z1
+  // (x1 / z1 exclusive), reset by the renderer. Empty when x0 >= x1.
+  HRL_uint dirty_[4] = {0, 0, 0, 0};
+  // Distance from the camera covered by the most detailed LOD (Vulkan), 0 : automatic.
+  float lod_distance_ = 0.f;
+};
+
+// ---------------------------------------------------------------------------
+// Foliage (see src/frontend/foliage.cpp)
+// ---------------------------------------------------------------------------
+constexpr float kFoliageCellSize = 32.f;   // world units per storage cell (X and Z)
+constexpr HRL_uint kFoliageMaxParts = 4;
+constexpr HRL_uint kFoliageMaxInteractors = 16;
+
+// One instance as stored: 32 bytes, also the GPU layout.
+struct HRL_FoliageInstanceData {
+  glm::vec4 position_scale{0.f, 0.f, 0.f, 1.f}; // xyz : world position, w : uniform scale
+  glm::vec4 rotation{0.f, 0.f, 0.f, 1.f};       // quaternion (x, y, z, w)
+};
+
+struct HRL_FoliageCell {
+  glm::ivec2 key{0};
+  std::vector<HRL_FoliageInstanceData> instances;
+  glm::vec3 bounds_min{0.f}, bounds_max{0.f};      // of the instance spheres
+  uint64_t revision = 1;                            // incremented by every change
+};
+
+struct HRL_FoliagePart {
+  HRL_id mesh_id = HRL_INVALID_ID;   // geometry in the renderer (not a scene mesh)
+  HRL_Mesh mesh;                     // CPU copy and generated LODs
+  HRL_id material = HRL_INVALID_ID;
+};
+
+struct HRL_Foliage final {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id scene_ = HRL_INVALID_ID;
+  std::vector<std::unique_ptr<HRL_FoliagePart>> parts;
+  // Local bounds of all the parts.
+  glm::vec3 bounds_min{0.f}, bounds_max{0.f};
+  glm::vec3 bounds_center{0.f};
+  float bounds_radius = 0.f;
+
+  std::vector<HRL_FoliageCell> cells;
+  std::unordered_map<uint64_t, uint32_t> cell_of_key;
+  size_t instance_count = 0;
+  uint64_t cells_revision = 1;      // a cell was added or removed
+  uint64_t instances_revision = 1;  // any instance or cell bound changed
+  uint64_t geometry_revision = 1;   // parts / materials changed (impostors are baked again)
+
+  // Rendering settings.
+  float draw_distance = 250.f;      // instances fade out over the last 10 %
+  float lod_distance = 0.f;         // end of LOD 0, 0 : from the bounds
+  float impostor_distance = 0.f;    // 0 : no impostor
+  bool cast_shadows = true;
+  float wind_response = 1.f;
+};
+
+// Procedural grass growing on a landscape (see src/frontend/foliage.cpp).
+struct HRL_Grass final {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id scene_ = HRL_INVALID_ID;
+  HRL_id landscape_ = HRL_INVALID_ID;
+  float density = 40.f;              // blades per square unit
+  float blade_height = 0.6f, blade_width = 0.05f;
+  float height_variation = 0.5f;     // share of blade_height, random per blade
+  glm::vec3 base_color{0.05f, 0.18f, 0.03f}, tip_color{0.35f, 0.55f, 0.15f};
+  float distance = 60.f;             // drawn up to this distance (fewer blades far away)
+  float max_slope = 40.f;            // degrees
+  HRL_id mask = HRL_INVALID_ID;      // density over the landscape (red channel), none : everywhere
+  bool cast_shadows = false;
+};
+
+struct HRL_FoliageInteractor {
+  glm::vec3 position{0.f};
+  float radius = 0.f;               // 0 : unused slot
 };
 
 struct HRL_SkeletalBoneInternal {
@@ -752,11 +840,21 @@ struct hrl_scene_t {
 
   //objects
   HRL_IdMap<HRL_Mesh*> meshes;
+  // Renderer caches: mesh_revision changes when a mesh is added, removed or
+  // given another material or other LOD settings; moved_meshes lists the
+  // meshes whose transform changed since the last frame (cleared by HRL_EndFrame).
+  uint64_t mesh_revision = 1;
+  std::vector<HRL_id> moved_meshes;
 
   // Optional 2D voxel world owned by this scene. The public API exposes only
   // HRL_Voxel; chunking and GPU resources remain backend/internal details.
   HRL_VoxelWorld* voxel_world = nullptr;
   HRL_IdMap<HRL_Landscape*> landscapes;
+  HRL_IdMap<HRL_Foliage*> foliage;
+  HRL_IdMap<HRL_Grass*> grass;
+  // Wind for foliage and grass: direction (x, z), strength, gustiness.
+  glm::vec4 wind{1.f, 0.f, 0.f, 0.f};
+  HRL_FoliageInteractor foliage_interactors[kFoliageMaxInteractors];
   HRL_IdMap<HRL_Light*> lights;
   HRL_IdMap<HRL_VolumetricFog*> volumetric_fogs;
   HRL_IdMap<HRL_Decal*> decals;
@@ -861,6 +959,8 @@ struct HRL_Context {
   //ressources copié des scenes (pour favoriser l'acces)
   HRL_IdMap<HRL_Mesh*> meshes;
   HRL_IdMap<HRL_Landscape*> landscapes;
+  HRL_IdMap<HRL_Foliage*> foliage;
+  HRL_IdMap<HRL_Grass*> grass;
   HRL_IdMap<HRL_Light*> lights;
   HRL_IdMap<HRL_VolumetricFog*> volumetric_fogs;
   HRL_IdMap<HRL_Decal*> decals;

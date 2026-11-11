@@ -273,6 +273,13 @@ glm::vec3 HRLFBX_NormalizeOrFallback(const glm::vec3& value, const glm::vec3& fa
 void HRLFBX_BuildFallbackTangentSpace( const glm::vec3& p0, const glm::vec3& p1, const glm::vec3& p2, const glm::vec2& uv0, const glm::vec2& uv1, const glm::vec2& uv2, const glm::vec3& normal, glm::vec3& tangent, glm::vec3& bitangent);
 void MarkAllScenesGILightingDirty();
 void MarkSceneGIGeometryDirty(hrl_scene_t* scene);
+// Regenerates the LODs 1.. of a mesh from LOD 0 (CPU data only).
+bool GenerateMeshLODs(HRL_Mesh* mesh, HRL_uint levels);
+// World position / normal of a landscape at a world (x, z); false outside.
+bool SampleLandscape(const HRL_Landscape* landscape, float worldX, float worldZ, glm::vec3* position, glm::vec3* normal);
+// Renderer caches (see hrl_scene_t::mesh_revision / moved_meshes).
+void MarkMeshMoved(HRL_id id, HRL_Mesh* mesh);
+void MarkSceneMeshesChanged(HRL_id scene);
 void MarkSceneGILightingDirty(hrl_scene_t* scene);
 void MarkScenesUsingMaterialGILightingDirty(HRL_id materialId);
 void ProcessAsyncResourceUploads();

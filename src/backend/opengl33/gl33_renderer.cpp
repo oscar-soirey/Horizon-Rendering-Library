@@ -6009,6 +6009,16 @@ void GL33_DrawDebug(const DebugRenderer &_renderer, float line_thickness)
 
 
 //HRL REQUESTS
+int GL33_ReadTexturePixels(HRL_id tex, std::vector<unsigned char>* rgba, int* width, int* height)
+{
+	auto it = bck_->textures.find(tex);
+	if (it == bck_->textures.end() || !it->second || !rgba) return HRL_FALSE;
+	*rgba = it->second->GetCpuRGBA();
+	if (width) *width = (int)it->second->GetWidth();
+	if (height) *height = (int)it->second->GetHeight();
+	return rgba->empty() ? HRL_FALSE : HRL_TRUE;
+}
+
 int GL33_IsValidTexture(HRL_id tex)
 {
 	auto it = bck_->textures.find(tex);

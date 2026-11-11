@@ -83,6 +83,7 @@ int GL33_IsGlobalIlluminationMethodSupported(int method);
 uint32_t GL33_GetGlobalIlluminationSupportedMethods();
 
 int GL33_IsValidTexture(HRL_id tex);
+int GL33_ReadTexturePixels(HRL_id tex, std::vector<unsigned char>* rgba, int* width, int* height);
 int GL33_IsValidShader(HRL_id shader);
 
 //Color Picking

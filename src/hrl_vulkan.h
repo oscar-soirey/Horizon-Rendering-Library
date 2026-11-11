@@ -98,8 +98,40 @@ HRL_API int HRL_Vulkan_GetRayTracedShadows(void);
  */
 HRL_API void HRL_Vulkan_SetShadowDistance(float distance);
 
+/** Instances of a foliage kind drawn by the first camera (read back from the GPU, 2 frames late). */
+typedef struct HRL_VulkanFoliageStats {
+    uint32_t lod_instances[3];   /* mesh LOD 0, 1, 2 (cross-fading instances count in both levels) */
+    uint32_t impostor_instances;
+} HRL_VulkanFoliageStats;
+HRL_API int HRL_Vulkan_GetFoliageStats(HRL_id foliage, HRL_VulkanFoliageStats* stats);
+
+/**
+ * Occlusion culling of the 3D meshes, foliage and grass (default on): what is
+ * hidden behind the meshes visible in the previous frame and the landscapes is
+ * skipped on the GPU. Disabling it is only useful to measure its effect.
+ */
+HRL_API void HRL_Vulkan_SetOcclusionCulling(int enabled);
+HRL_API int HRL_Vulkan_GetOcclusionCulling(void);
+
 /** Name of the GPU selected by HRL, or an empty string before initialization. */
 HRL_API const char* HRL_Vulkan_GetDeviceName(void);
+
+/**
+ * File used to keep compiled pipelines between runs. Call before
+ * HRL_InitContext(): the file is read when it exists and matches the GPU and
+ * driver, and (re)written by HRL_Shutdown(). It removes most of the pipeline
+ * compilation time of the following runs. NULL or "" (default): no file, unless
+ * the HRL_VULKAN_PIPELINE_CACHE environment variable names one.
+ */
+HRL_API void HRL_Vulkan_SetPipelineCachePath(const char* path);
+
+/**
+ * GPU memory used by the process and its current budget, in bytes (the amount
+ * usable before the system has to evict memory; it varies with the other
+ * applications). Either pointer may be NULL. Returns HRL_FALSE before
+ * initialization or with another backend.
+ */
+HRL_API int HRL_Vulkan_GetMemoryUsage(uint64_t* used_bytes, uint64_t* budget_bytes);
 
 /** Counters of the last rendered frame of a scene (diagnostics, profiling). */
 typedef struct HRL_VulkanSceneStats {
@@ -110,6 +142,7 @@ typedef struct HRL_VulkanSceneStats {
     uint32_t scene_rebuilds;        /**< 1 when the cached scene data had to be rebuilt entirely. */
     uint32_t transform_updates;     /**< Instances whose transform was recomputed. */
     uint32_t material_updates;      /**< Materials whose GPU data was recomputed. */
+    uint32_t skinned_mesh_count;    /**< Skeletal meshes skinned this frame (their pose changed). */
 } HRL_VulkanSceneStats;
 
 /**

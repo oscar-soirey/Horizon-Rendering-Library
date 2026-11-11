@@ -37,6 +37,7 @@ HRL_id HRL_CreateMeshSprite(HRL_id _sceneid)
 		return HRL_INVALID_ID;
 	}
 	it_scene->second->meshes.emplace(newId, m);
+	++it_scene->second->mesh_revision;
 	ctx_.meshes.emplace(newId, m);
 
 	return newId;
@@ -55,6 +56,7 @@ void HRL_SetMeshPivotPoint(HRL_id _meshid, float x, float y, float z)
 	if (it->second->pivot_point_ == pivot)
 		return;
 	it->second->pivot_point_ = pivot;
+	MarkMeshMoved(_meshid, it->second);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
 		MarkSceneGIGeometryDirty(scene_it->second);
@@ -97,6 +99,9 @@ void HRL_DeleteMesh(HRL_id _meshid)
 	if (scene_it != ctx_.scenes.end())
 	{
 		scene_it->second->meshes.erase(_meshid);
+		++scene_it->second->mesh_revision;
+		auto& moved = scene_it->second->moved_meshes;
+		moved.erase(std::remove(moved.begin(), moved.end(), _meshid), moved.end());
 		if (it->second->type_ != HRL_SPRITE)
 			MarkSceneGIGeometryDirty(scene_it->second);
 	}
@@ -117,6 +122,7 @@ void HRL_SetMeshMaterial(HRL_id _meshid, HRL_id _matid)
 	if (it->second->material_ == _matid)
 		return;
 	it->second->material_ = _matid;
+	MarkSceneMeshesChanged(it->second->scene_);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ == HRL_3D_MESH)
 		MarkSceneGILightingDirty(scene_it->second);
@@ -161,6 +167,7 @@ void HRL_SetMeshLocation(HRL_id _meshid, float x, float y, float z)
 	if (it->second->position_ == position)
 		return;
 	it->second->position_ = position;
+	MarkMeshMoved(_meshid, it->second);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
 		MarkSceneGIGeometryDirty(scene_it->second);
@@ -193,6 +200,7 @@ void HRL_SetMeshRotation(HRL_id _meshid, float pitch, float yaw, float roll)
 	if (it->second->rotation_ == rotation)
 		return;
 	it->second->rotation_ = rotation;
+	MarkMeshMoved(_meshid, it->second);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
 		MarkSceneGIGeometryDirty(scene_it->second);
@@ -210,6 +218,7 @@ void HRL_SetMeshScale(HRL_id _meshid, float x, float y, float z)
 	if (it->second->scale_ == scale)
 		return;
 	it->second->scale_ = scale;
+	MarkMeshMoved(_meshid, it->second);
 	auto scene_it = ctx_.scenes.find(it->second->scene_);
 	if (scene_it != ctx_.scenes.end() && it->second->type_ != HRL_SPRITE)
 		MarkSceneGIGeometryDirty(scene_it->second);
@@ -311,6 +320,8 @@ void HRL_SetMeshLODAutomatic(HRL_id id, int enabled)
 	if (!mesh) return;
 	mesh->lod_automatic_ = enabled != HRL_FALSE;
 	mesh->last_lod_level_ = 0;
+	++mesh->lod_revision_;
+	MarkSceneMeshesChanged(mesh->scene_);
 	if (mesh->lod_automatic_ && mesh->lods_.size() < mesh->lod_levels_)
 		HRL_ForceMeshLODRebuild(id);
 	MarkMeshSceneShadowsDirty(mesh);
@@ -328,6 +339,8 @@ void HRL_SetMeshLODMode(HRL_id id, HRL_ELODMode mode)
 	}
 	mesh->lod_mode_ = mode;
 	mesh->last_lod_level_ = 0;
+	++mesh->lod_revision_;
+	MarkSceneMeshesChanged(mesh->scene_);
 	MarkMeshSceneShadowsDirty(mesh);
 }
 
@@ -364,6 +377,8 @@ void HRL_SetMeshLODDistance(HRL_id id, float distance)
 	}
 	mesh->lod_base_distance_ = distance;
 	mesh->last_lod_level_ = 0;
+	++mesh->lod_revision_;
+	MarkSceneMeshesChanged(mesh->scene_);
 	MarkMeshSceneShadowsDirty(mesh);
 }
 
@@ -393,6 +408,8 @@ void HRL_SetMeshLODMinDistance(HRL_id id, float distance)
 	}
 	mesh->lod_min_distance_ = distance;
 	mesh->last_lod_level_ = 0;
+	++mesh->lod_revision_;
+	MarkSceneMeshesChanged(mesh->scene_);
 	MarkMeshSceneShadowsDirty(mesh);
 }
 
@@ -408,6 +425,8 @@ void HRL_SetMeshLODMaxDistance(HRL_id id, float distance)
 	}
 	mesh->lod_max_distance_ = distance;
 	mesh->last_lod_level_ = 0;
+	++mesh->lod_revision_;
+	MarkSceneMeshesChanged(mesh->scene_);
 	MarkMeshSceneShadowsDirty(mesh);
 }
 
@@ -423,6 +442,8 @@ void HRL_SetMeshLODScreenThreshold(HRL_id id, float threshold)
 	}
 	mesh->lod_screen_threshold_ = threshold;
 	mesh->last_lod_level_ = 0;
+	++mesh->lod_revision_;
+	MarkSceneMeshesChanged(mesh->scene_);
 	MarkMeshSceneShadowsDirty(mesh);
 }
 
@@ -438,6 +459,8 @@ void HRL_SetMeshLODScreenScale(HRL_id id, float scale)
 	}
 	mesh->lod_screen_scale_ = scale;
 	mesh->last_lod_level_ = 0;
+	++mesh->lod_revision_;
+	MarkSceneMeshesChanged(mesh->scene_);
 	MarkMeshSceneShadowsDirty(mesh);
 }
 
@@ -467,6 +490,8 @@ void HRL_SetMeshLODOverride(HRL_id id, int level)
 	}
 	mesh->lod_override_ = level;
 	mesh->last_lod_level_ = level < 0 ? 0 : std::min(level, (int)mesh->lods_.size() - 1);
+	++mesh->lod_revision_;
+	MarkSceneMeshesChanged(mesh->scene_);
 	MarkMeshSceneShadowsDirty(mesh);
 }
 
@@ -503,6 +528,9 @@ void HRL_ForceMeshLODRebuild(HRL_id id)
 		mesh->lods_.resize(uploaded);
 
 	mesh->last_lod_level_ = 0;
+
+	++mesh->lod_revision_;
+	MarkSceneMeshesChanged(mesh->scene_);
 	MarkMeshSceneShadowsDirty(mesh);
 }
 
@@ -655,6 +683,7 @@ HRL_id HRL_CreateMesh3D(HRL_id _sceneid, const HRL_Vertex3D* _vertices, size_t _
 		mesh->bounds_radius_ = std::sqrt(radius2);
 	}
 	it_scene->second->meshes.emplace(newId, mesh);
+	++it_scene->second->mesh_revision;
 	MarkSceneGIGeometryDirty(it_scene->second);
 	ctx_.meshes.emplace(newId, mesh);
 
@@ -855,6 +884,13 @@ static bool RebuildLODs(HRL_Mesh* mesh)
 	if(!mesh||mesh->type_==HRL_SPRITE||mesh->lods_.empty())return false;const size_t desired=std::max<size_t>(1,mesh->lod_levels_);HRL_MeshLODData base=mesh->lods_[0];mesh->lods_.clear();mesh->lods_.push_back(std::move(base));for(size_t level=1;level<desired;++level){HRL_MeshLODData lod;if(!GenerateLODLevel(mesh->lods_[0],std::pow(0.5f,(float)level),lod))break;if(lod.indices.size()>=mesh->lods_.back().indices.size())break;mesh->lods_.push_back(std::move(lod));}mesh->last_lod_level_=std::clamp(mesh->last_lod_level_,0,(int)mesh->lods_.size()-1);return true;
 }
 
+
+bool GenerateMeshLODs(HRL_Mesh* mesh, HRL_uint levels)
+{
+	if (!mesh) return false;
+	mesh->lod_levels_ = std::max<HRL_uint>(1u, levels);
+	return RebuildLODs(mesh);
+}
 
 HRL_id HRL_CreateMesh(HRL_id _sceneid, HRL_EMeshType _type, const float *_vertices)
 {

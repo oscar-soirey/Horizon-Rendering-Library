@@ -68,6 +68,7 @@ HRL_vtable GetOpenGL33Backend()
 	vtable.RHI_DrawDebug = GL33_DrawDebugAfterScene;
 
 	vtable.RHI_IsValidTexture = GL33_IsValidTexture;
+	vtable.RHI_ReadTexturePixels = GL33_ReadTexturePixels;
 	vtable.RHI_IsValidShader = GL33_IsValidShader;
 
 	vtable.RHI_EnableColorPickingBuffer = GL33_EnableColorPickingBuffer;

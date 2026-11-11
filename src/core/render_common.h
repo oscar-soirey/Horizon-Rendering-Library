@@ -43,6 +43,8 @@ glm::vec3 ComputeMeshAverageNormal(const HRL_Mesh* mesh, int lodLevel);
 void BuildMeshDebugInfoText(const HRL_Mesh* mesh, std::string& out);
 
 bool WritePNG_RGBA8(const char* path, int width, int height, const std::vector<unsigned char>& rgbaTopDown);
+// PNG file in memory (stored, uncompressed blocks).
+bool EncodePNG_RGBA8(int width, int height, const std::vector<unsigned char>& rgbaTopDown, std::vector<unsigned char>& png);
 
 glm::vec3 GetLightDirection(const HRL_Light* light);
 constexpr float HRL_POINT_SHADOW_NEAR = 0.05f;
