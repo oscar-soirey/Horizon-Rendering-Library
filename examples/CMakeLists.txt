@@ -43,6 +43,11 @@ if(HRL_ENABLE_VULKAN)
     endif()
 endif()
 
+# ---- Vulkan: scene editor with a Raven interface -------------------------------
+if(HRL_ENABLE_VULKAN AND NOT APPLE)
+    add_subdirectory(editor)
+endif()
+
 # ---- OpenGL 3.3 (deprecated backend) -----------------------------------------
 # Resources (textures, FBX, fonts) are read from examples/assets, which is not
 # versioned: see examples/README.md.
