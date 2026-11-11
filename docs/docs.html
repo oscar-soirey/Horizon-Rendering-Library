@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HRL documentation</title>
+<meta name="description" content="Complete documentation of the Horizon Rendering Library: build, backends, object model, full API reference, 2D voxel worlds, feature matrix, troubleshooting and FAQ.">
+<meta property="og:title" content="HRL documentation">
+<meta property="og:description" content="Complete documentation of the Horizon Rendering Library: build, backends, object model, full API reference, 2D voxel worlds, feature matrix, troubleshooting and FAQ.">
+<meta property="og:image" content="assets/screenshots/lit.png">
+<meta name="theme-color" content="#2563eb">
+<link rel="icon" type="image/png" href="assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><button id="menu" aria-controls="side" aria-expanded="false">Menu</button><a class="brand" href="index.html"><img src="assets/icon.png" alt="" width="34" height="34">HRL</a></div>
+<div class="layout">
+<aside class="side" id="side"><a class="brand" href="index.html"><img src="assets/icon.png" alt="" width="34" height="34">HRL</a><p class="label">Documentation</p><ul class="pages"><li><a href="docs.html" aria-current="page">Reference</a><ul class="sections"><li class="grp">Start here</li><li><a href="#overview">Overview</a></li><li><a href="#build">Getting the code &amp; building</a></li><li><a href="#backends">Supported backends</a></li><li class="grp">Concepts</li><li><a href="#concepts">Core concepts</a></li><li class="grp">API reference</li><li><a href="#init">Initialization</a></li><li><a href="#frame">Frame loop</a></li><li><a href="#scenes">Scenes</a></li><li><a href="#meshes">Meshes &amp; sprites</a></li><li><a href="#materials">Materials &amp; shaders</a></li><li><a href="#textures">Textures &amp; fonts</a></li><li><a href="#lights">Lights</a></li><li><a href="#camera">Cameras &amp; viewports</a></li><li><a href="#voxels">2D voxel worlds</a></li><li><a href="#postprocess">Post-processing</a></li><li><a href="#errors">Error handling</a></li><li><a href="#debug">Debug utilities</a></li><li class="grp">More</li><li><a href="#features">Feature support</a></li><li><a href="#example">Minimal example</a></li><li><a href="#troubleshooting">Troubleshooting</a></li><li><a href="#faq">FAQ</a></li><li><a href="#glossary">Glossary</a></li><li><a href="#license">License &amp; contact</a></li></ul></li></ul><p class="label">Elsewhere</p><ul class="extra"><li><a href="index.html">Home</a></li><li><a href="index.html#download">Download</a></li><li><a href="https://github.com/oscar-soirey/Horizon-Rendering-Library">GitHub</a></li></ul></aside>
+<main class="doc"><article>
+<h1>HRL documentation</h1>
+<p>HRL is a C/C++ rendering library that sits on top of several graphics backends behind one stable API. <small>Version 26.6 · Apache License 2.0</small></p>
+<div class="note"><b>In a hurry?</b> Read <a href="#concepts">Core concepts</a>, then <a href="#example">Minimal example</a>. If nothing shows on screen, go to <a href="#troubleshooting">Troubleshooting</a>.</div>
+
+<h2 id="overview">Overview</h2>
+<p>HRL gives you one set of functions for 2D and 3D rendering, whatever the graphics API underneath. You pick a backend once at start-up and the rest of your code does not change.</p>
+<ul>
+<li><b>Explicit.</b> Nothing exists until you create it, and everything you create must be destroyed. No hidden allocations, no garbage collection.</li>
+<li><b>Multi-backend.</b> OpenGL 3.3/4.5, Vulkan, Direct3D 11/12, Metal, NVN and GNM share the same functions. Feature coverage differs per backend, see the <a href="#features">feature matrix</a>.</li>
+<li><b>Complete scene model.</b> Meshes, sprites, skeletal meshes, PBR materials, lights, cameras, viewports, VFX, widgets and debug drawing.</li>
+<li><b>Windowing-agnostic.</b> HRL does not open windows or read input. You bring your own layer (GLFW, SDL, Win32…) and hand HRL a function loader.</li>
+</ul>
+<h3>Credits</h3>
+<p>Structure, OpenGL and Vulkan backends: Oscar Soirey (<a href="mailto:oscarsoirey.contact@gmail.com">oscarsoirey.contact@gmail.com</a>). Direct3D 11 backend: <a href="https://github.com/CodeBYMehdi">@CodeBYMehdi</a>.</p>
+
+<h2 id="build">Getting the code &amp; building</h2>
+<pre>git clone https://github.com/oscar-soirey/Horizon-Rendering-Library.git
+cd Horizon-Rendering-Library</pre>
+<p>The project uses CMake (<code>CMakeLists.txt</code> at the repository root). A typical out-of-source build:</p>
+<pre>cmake -S . -B build
+cmake --build build --config Release</pre>
+<p>On Windows, helper scripts are included at the root: <code>build.bat</code>, <code>build-hrl-example.bat</code>, <code>generate-cmake-project.bat</code> and <code>generate-bindings.bat</code>.</p>
+<h3>Repository layout</h3>
+<div class="tw"><table class="v"><thead><tr><th>Folder / file</th><th>Content</th></tr></thead><tbody>
+<tr><td><code>src</code></td><td>Library sources, including the backends.</td></tr>
+<tr><td><code>example</code></td><td>Complete sample programs. Start here after the minimal example.</td></tr>
+<tr><td><code>bindings</code></td><td>Bindings for other languages.</td></tr>
+<tr><td><code>docs</code></td><td>Source of this documentation site and its screenshots.</td></tr>
+<tr><td><code>third_party</code></td><td>Bundled dependencies.</td></tr>
+<tr><td><code>tools</code></td><td>Development tools.</td></tr>
+<tr><td><code>VOXEL_CHANGELOG.md</code></td><td>Change notes for the 2D voxel world, see <a href="#voxels">2D voxel worlds</a>.</td></tr>
+</tbody></table></div>
+<p>Your application includes the public header <code>hrl.h</code>, which is valid both as a C11 and a C++17 header.</p>
+
+<h2 id="backends">Supported backends</h2>
+<div class="tw"><table class="v"><thead><tr><th>Constant</th><th>Backend</th><th>Platform</th></tr></thead><tbody><tr><td><code>HRL_OpenGL33</code></td><td>OpenGL 3.3</td><td>Windows, Linux, macOS</td></tr><tr><td><code>HRL_OpenGL45</code></td><td>OpenGL 4.5</td><td>Windows, Linux, macOS</td></tr><tr><td><code>HRL_Vulkan</code></td><td>Vulkan</td><td>Windows, Linux</td></tr><tr><td><code>HRL_D3D11</code></td><td>Direct3D 11</td><td>Windows, Xbox</td></tr><tr><td><code>HRL_D3D12</code></td><td>Direct3D 12</td><td>Windows, Xbox</td></tr><tr><td><code>HRL_Metal</code></td><td>Metal</td><td>Apple</td></tr><tr><td><code>HRL_NVN</code></td><td>NVN</td><td>Nintendo</td></tr><tr><td><code>HRL_GNM</code></td><td>GNM</td><td>PlayStation</td></tr></tbody></table></div>
+<h3>Choosing a backend</h3>
+<ul>
+<li><b>OpenGL 3.3</b> is the most complete backend today: post-processing, shadows, volumetric fog, GI and more run here. </li>
+<li><b>Vulkan, Direct3D 12 and Metal</b> are the backends with ray tracing and virtualized geometry.</li>
+<li><b>Direct3D 11</b> covers the core feature set.</li>
+<li>Check the <a href="#features">feature matrix</a> before relying on a feature: the same call can be fully, partly or not yet supported depending on the backend.</li>
+</ul>
+<p>The matrix lists OpenGL 3.3, Vulkan, D3D11, D3D12 and Metal. It has no column for OpenGL 4.5, NVN or GNM.</p>
+
+<h2 id="concepts">Core concepts</h2>
+<h3 id="philosophy">Explicit object model</h3>
+<p>HRL does <b>not</b> manage object lifetimes for you. Every object (scene, mesh, texture, shader, material, light, camera, viewport, font) must be created before use and destroyed when no longer needed. <b>If you did not call the <code>HRL_Create*</code> function for an object, it does not exist.</b></p>
+<ul><li>A mesh without a material will not render correctly.</li><li>A viewport without a camera will not render.</li><li>A material without a shader is invalid.</li><li>A scene with no camera produces no output.</li></ul>
+<h3 id="conventions">Conventions</h3>
+<div class="tw"><table class="v"><thead><tr><th>Topic</th><th>Rule</th></tr></thead><tbody>
+<tr><td>Handles</td><td>Every <code>HRL_Create*</code> returns an <code>HRL_id</code>. Compare it with <code>HRL_INVALID_ID</code> before use. Objects are referred to by id, never by pointer.</td></tr>
+<tr><td>Booleans</td><td><code>HRL_True</code> and <code>HRL_False</code>.</td></tr>
+<tr><td>Naming</td><td><code>HRL_Create*</code> makes an object, <code>HRL_Delete*</code> destroys it, <code>HRL_Set*</code> changes a property, <code>HRL_Draw*</code> is immediate-mode.</td></tr>
+<tr><td>Memory buffers</td><td>Files (textures, fonts, meshes, shaders) are passed as a pointer and a size. HRL never opens files for you. The exception is <code>HRL_TakeScreenshot</code>, which writes a path.</td></tr>
+<tr><td>Viewport coordinates</td><td>Normalized <code>[0..1]</code>, origin at the top-left.</td></tr>
+<tr><td>Field of view</td><td>Degrees. Orthographic height is in world units.</td></tr>
+<tr><td>Text</td><td>UTF-8.</td></tr>
+<tr><td>Errors</td><td>Recorded internally, not thrown. See <a href="#errors">Error handling</a>.</td></tr>
+</tbody></table></div>
+<h3 id="lifecycle">Lifecycle</h3>
+<pre>HRL_Init(backend)
+HRL_InitContext(width, height, loader)
+|
++-- Create scenes, cameras, viewports
++-- Create shaders, materials, textures
++-- Create meshes and assign materials
++-- Create lights
+|
++-- Main loop:
+|     HRL_BeginFrame()
+|     update transforms, uniforms, ...
+|     HRL_EndFrame()
+|     swap buffers (your windowing layer)
+|
+HRL_Shutdown()   // cleans every object</pre>
+<p><code>HRL_Shutdown</code> cleans every remaining object, so a program that exits right after it does not have to delete things one by one. Delete objects yourself when you want to free GPU memory <em>during</em> the run, for example when leaving a level.</p>
+<h3 id="objects">Objects</h3>
+<div class="tw"><table class="v"><thead><tr><th>Object</th><th>Created by</th><th>Depends on</th></tr></thead><tbody><tr><td>Scene</td><td><code>HRL_CreateScene</code></td><td>—</td></tr><tr><td>Camera</td><td><code>HRL_CreateCamera</code></td><td>Scene</td></tr><tr><td>Viewport</td><td><code>HRL_CreateViewport</code></td><td>Scene, Camera</td></tr><tr><td>Shader</td><td><code>HRL_CreateShader</code></td><td>—</td></tr><tr><td>Material</td><td><code>HRL_CreateMaterial</code></td><td>Shader</td></tr><tr><td>Texture</td><td><code>HRL_CreateTexture</code></td><td>—</td></tr><tr><td>Font</td><td><code>HRL_CreateFont</code></td><td>—</td></tr><tr><td>Mesh</td><td><code>HRL_CreateMesh</code></td><td>Scene, Material</td></tr><tr><td>Sprite</td><td><code>HRL_CreateMeshSprite</code></td><td>Scene, Material</td></tr><tr><td>Light</td><td><code>HRL_CreateLight</code></td><td>Scene</td></tr><tr><td>Post process</td><td><code>HRL_CreatePostProcess</code></td><td>Scene, Material</td></tr></tbody></table></div>
+<p>Read “depends on” as “must exist first”. Shaders, textures and fonts have no dependency: they are shared resources that any number of materials and meshes can use.</p>
+<pre>Shader --> Material --> Mesh / Sprite / PostProcess
+Texture ---^ (bound as a uniform)
+Font -----> TextureFromText ---^
+Scene --> Camera --> Viewport
+Scene --> Light</pre>
+
+<h2 id="init">Initialization</h2>
+<pre class="sig">HRL_Init(HRL_uint api);</pre><p>Selects the graphics backend. Must be called first, before any other function.</p>
+<pre class="sig">HRL_InitContext(HRL_uint width, HRL_uint height, void* loader);</pre><p>Creates the rendering context. <code>loader</code> is your platform's function loader (e.g. <code>glfwGetProcAddress</code> for OpenGL). Create your window and make its context current <em>before</em> calling this.</p>
+<pre class="sig">HRL_Shutdown();</pre><p>Releases all internal resources. Call it before closing the window.</p>
+
+<h2 id="frame">The frame loop</h2>
+<pre class="sig">HRL_BeginFrame();
+HRL_EndFrame();</pre>
+<p>Everything that changes what the frame looks like happens between these two calls: moving meshes, lights and cameras, setting material uniforms, issuing <code>HRL_Draw*</code> debug calls. Presenting the image is up to your windowing layer, so call your swap function (e.g. <code>glfwSwapBuffers</code>) after <code>HRL_EndFrame</code>.</p>
+<p>Only immediate-mode debug geometry has to be repeated every frame (see <a href="#debug">Debug utilities</a>).</p>
+
+<h2 id="scenes">Scenes</h2>
+<p>A scene is the top-level container for renderable objects, lights and cameras. You need at least one to render anything.</p>
+<pre class="sig">HRL_id HRL_CreateScene(int renderOnScreen);</pre><p>Pass <code>HRL_True</code> to render to the screen, or <code>HRL_False</code> to render into an off-screen texture (480×480 by default; use <code>HRL_ResizeSceneTexture</code> to change it). An off-screen scene is the basis for render-to-texture and for post-processing pipelines.</p>
+<pre class="sig">void HRL_DeleteScene(HRL_id sceneid);</pre>
+<p>Several scenes can coexist, for example a 3D world scene and a separate 2D interface scene.</p>
+
+<h2 id="meshes">Meshes &amp; sprites</h2>
+<pre class="sig">HRL_id HRL_CreateMesh(HRL_id sceneid, HRL_uint type, float* vertices);
+HRL_id HRL_CreateMeshFromFile(HRL_id sceneid, HRL_uint type, const char* data, size_t size);
+HRL_id HRL_CreateMeshSprite(HRL_id sceneid);</pre>
+<div class="tw"><table class="v"><thead><tr><th><code>type</code></th><th>Use for</th></tr></thead><tbody>
+<tr><td><code>HRL_2D_Mesh</code></td><td>Flat geometry in 2D scenes.</td></tr>
+<tr><td><code>HRL_3D_Mesh</code></td><td>Static 3D geometry.</td></tr>
+<tr><td><code>HRL_3D_SkeletalMesh</code></td><td>Animated, skinned 3D geometry.</td></tr>
+</tbody></table></div>
+<p>File loading supports <code>.fbx</code> and <code>.obj</code>. As with textures, <code>data</code> is the raw file content read in binary mode and <code>size</code> its length in bytes. A sprite is a textured quad for 2D and UI work; see the built-in <code>HRL_SpriteShader</code> below.</p>
+<p>A mesh needs a material before it renders:</p>
+<pre class="sig">void HRL_SetMeshMaterial(HRL_id meshid, HRL_id matid);</pre>
+<h3>Transforms</h3>
+<pre>void HRL_SetMeshLocation(HRL_id meshid, float x, float y, float z);
+void HRL_SetMeshRotation(HRL_id meshid, float pitch, float yaw, float roll);
+void HRL_SetMeshScale(HRL_id meshid, float x, float y, float z);</pre>
+<p>Rotation is given as pitch, yaw and roll, as for lights and cameras.</p>
+<p>Level of detail (LOD), indexed meshes and screen-space displacement maps are supported on every backend in the <a href="#features">matrix</a>.</p>
+
+<h2 id="materials">Materials &amp; shaders</h2>
+<p>A shader is a compiled GPU program. A material is an instance of a shader with its own uniform values; one shader can back many materials.</p>
+<pre>HRL_id HRL_CreateShader(const char* vertSrc, size_t vertSize, const char* fragSrc, size_t fragSize);
+HRL_id HRL_CreateMaterial(HRL_id shaderid);</pre>
+<p>Shader sources are passed from memory, in the language of the selected backend (GLSL for the OpenGL backends).</p>
+<h3>Uniforms</h3>
+<pre>void HRL_MaterialSetFloat(HRL_id matid, const char* name, float value);
+void HRL_MaterialSetVec3(HRL_id matid, const char* name, float x, float y, float z);
+void HRL_MaterialSetTexture(HRL_id matid, const char* name, HRL_id textureid);
+// Also available: SetInt, SetBool, SetVec2, SetVec4</pre>
+<p><code>name</code> must match the uniform name in your shader. Textures are bound by name too; for the standard PBR slots use the predefined names such as <code>HRL_T_ALBEDO</code>.</p>
+<h3>PBR materials</h3>
+<p>The standard material model covers albedo, normal map, metallic, roughness, specular and alpha, with texture filtering. All of it is supported on every backend listed in the <a href="#features">matrix</a>.</p>
+<h3>Built-in shaders</h3>
+<div class="tw"><table class="v"><thead><tr><th>Name</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>HRL_SpriteShader</code></td><td>Textured quads (sprites, UI, text).</td></tr>
+<tr><td><code>HRL_Mesh2DShader</code></td><td>2D meshes.</td></tr>
+<tr><td><code>HRL_Mesh3DShader</code></td><td>3D meshes with the standard lighting.</td></tr>
+<tr><td><code>HRL_DebugShader</code></td><td>Debug geometry.</td></tr>
+</tbody></table></div>
+
+<h2 id="textures">Textures &amp; fonts</h2>
+<pre class="sig">HRL_id HRL_CreateTexture(const char* data, size_t size);</pre><p>Formats: png, jpeg, bmp, tga, gif (first frame), hdr, psd (partial). <code>data</code> is the raw file content read in binary mode. Do not decode the image yourself first.</p>
+<pre class="sig">HRL_id HRL_CreateTextureFromText(const char* text, HRL_id fontid,
+    float fontSize, float wrapWidth,
+    float r, float g, float b,
+    float bg_r, float bg_g, float bg_b, float bg_a);</pre><p>Rasterizes a UTF-8 string into a texture. <code>wrapWidth = 0</code> disables wrapping; <code>bg_a = 0</code> gives a transparent background. The result is a regular texture: bind it to a material like any other. To change the text, create a new texture and delete the old one.</p>
+<pre class="sig">HRL_id HRL_CreateFont(const char* data, size_t size);</pre><p>Loads a <code>.ttf</code> font from memory. Required before <code>HRL_CreateTextureFromText</code>.</p>
+
+<h2 id="lights">Lights</h2>
+<pre class="sig">HRL_id HRL_CreateLight(HRL_id sceneid, HRL_uint type);</pre>
+<div class="tw"><table class="v"><thead><tr><th><code>type</code></th><th>Behaviour</th></tr></thead><tbody>
+<tr><td><code>HRL_PointLight</code></td><td>Radiates in all directions from a position.</td></tr>
+<tr><td><code>HRL_DirectionalLight</code></td><td>Parallel rays, like the sun. Direction comes from its rotation.</td></tr>
+<tr><td><code>HRL_SpotLight</code></td><td>A cone from a position, along its rotation.</td></tr>
+</tbody></table></div>
+<pre>void HRL_SetLightColor(HRL_id lightid, float r, float g, float b);
+void HRL_SetLightIntensity(HRL_id lightid, float intensity);
+void HRL_SetLightAttenuation(HRL_id lightid, float attenuation);
+void HRL_SetLightLocation(HRL_id lightid, float x, float y, float z);
+void HRL_SetLightRotation(HRL_id lightid, float pitch, float yaw, float roll);</pre>
+<p>Light shadows are currently available on OpenGL 3.3 only. A sky light is supported on all listed backends.</p>
+
+<h2 id="camera">Cameras &amp; viewports</h2>
+<p>A camera defines the point of view; a viewport maps a camera's output to a region of the screen. You need both.</p>
+<pre>HRL_id HRL_CreateCamera(HRL_id sceneid, HRL_uint type);  // HRL_Ortho or HRL_Perspective
+void HRL_SetCameraPosition(HRL_id camid, float x, float y, float z);
+void HRL_SetCameraRotation(HRL_id camid, float pitch, float yaw, float roll);
+void HRL_SetCameraPerspectiveFov(HRL_id camid, float fov);    // degrees
+void HRL_SetCameraOrthoVertical(HRL_id camid, float height);  // world units
+
+// Normalized [0..1]. (0,0) = top-left, (1,1) = bottom-right.
+HRL_id HRL_CreateViewport(HRL_id sceneid, HRL_id cameraid, float x, float y, float w, float h);</pre>
+<p>Use <code>HRL_Perspective</code> with <code>HRL_SetCameraPerspectiveFov</code> for 3D, and <code>HRL_Ortho</code> with <code>HRL_SetCameraOrthoVertical</code> for 2D and UI.</p>
+<h3>Split-screen</h3>
+<p>Several viewports can share a scene (split-screen, picture-in-picture). Give each its own camera:</p>
+<pre>HRL_id camA = HRL_CreateCamera(scene, HRL_Perspective);
+HRL_id camB = HRL_CreateCamera(scene, HRL_Perspective);
+
+HRL_CreateViewport(scene, camA, 0.0f, 0.0f, 0.5f, 1.0f);  // left half
+HRL_CreateViewport(scene, camB, 0.5f, 0.0f, 0.5f, 1.0f);  // right half</pre>
+
+<h2 id="voxels">2D voxel worlds</h2>
+<p>HRL has a built-in 2D voxel world. Voxels are squares in the XY plane. A voxel's <code>type</code> is a number, and <b><code>type == 0</code> is reserved for empty space</b>. Each type gets a color.</p>
+<div class="note"><b>Backend.</b> Voxel rendering is implemented on the <b>OpenGL 3.3</b> backend.</div>
+<h3>Functions</h3>
+<div class="tw"><table class="v"><thead><tr><th>Function</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>HRL_SetVoxelSize</code></td><td>Sets the world dimensions in voxels (width and height).</td></tr>
+<tr><td><code>HRL_SetVoxelPhysicalSize</code></td><td>Sets the size of one voxel in world units.</td></tr>
+<tr><td><code>HRL_SetVoxelChunkSize</code></td><td>Sets the chunk size, in voxels.</td></tr>
+<tr><td><code>HRL_SetVoxelTypeColor</code></td><td>Sets the RGBA color of a voxel type.</td></tr>
+<tr><td><code>HRL_LoadVoxelWorld</code></td><td>Copies a complete world into HRL.</td></tr>
+<tr><td><code>HRL_SetVoxelType</code></td><td>Changes one voxel.</td></tr>
+<tr><td><code>HRL_GetVoxelType</code></td><td>Reads one voxel.</td></tr>
+</tbody></table></div>
+<p>The calls shown below take the scene first. Check <code>hrl.h</code> for the exact parameter lists of the others. The world is described by an array of <code>HRL_Voxel</code>.</p>
+<pre class="sig">HRL_SetVoxelSize(sceneid, 1024, 1024);
+HRL_SetVoxelType(sceneid, x, y, type);</pre>
+<h3>Memory layout</h3>
+<p>After <code>HRL_SetVoxelSize(scene, 1024, 1024)</code>, the array given to <code>HRL_LoadVoxelWorld</code> is indexed row by row:</p>
+<pre>voxels[y * 1024 + x]</pre>
+<h3>How it works</h3>
+<ul>
+<li><b>Storage stays on the CPU.</b> <code>HRL_LoadVoxelWorld</code> copies the whole world into RAM but does not upload it all to the GPU.</li>
+<li><b>Chunk streaming.</b> The world is cut into chunks. HRL intersects each camera's frustum with the XY plane and keeps GPU buffers only for the chunks that are visible, plus a margin of one chunk. Chunks that leave this zone are destroyed.</li>
+<li><b>Greedy meshing.</b> Inside a chunk, neighbouring voxels of the same type are merged into rectangles. A uniformly filled chunk is one rectangle instead of one quad per voxel; a checkerboard is the worst case with one rectangle per voxel.</li>
+<li><b>Live edits.</b> <code>HRL_SetVoxelType</code> updates the CPU data at once and marks the chunk as dirty. The chunk is regenerated at the next render, and its GPU buffer is replaced if it is loaded.</li>
+<li><b>Colors.</b> The color is baked into the vertices of each chunk, so <code>HRL_SetVoxelTypeColor</code> forces every loaded chunk to be rebuilt. Set colors before loading the world, not every frame.</li>
+</ul>
+<p>Voxels use fog and the existing G-buffer outputs, so they combine with the rest of the pipeline. The voxel change introduced the structure <code>HRL_Voxel</code> and moved the API version from 0.6 to 0.7.</p>
+<h3>Sketch</h3>
+<pre>// World of 96 x 64 voxels, three types, drawn with chunks of 16 x 16
+HRL_SetVoxelSize(scene, 96, 64);
+HRL_SetVoxelChunkSize(scene, /* 16, 16 */);
+HRL_SetVoxelTypeColor(scene, /* type 1, 2, 3 and their RGBA colors */);
+HRL_LoadVoxelWorld(scene, /* your HRL_Voxel array, y * 96 + x */);
+
+// Later, in the frame loop: dig a voxel
+HRL_SetVoxelType(scene, 48, 48, 0);   // 0 = empty</pre>
+<p>A complete version of this scene, with a voxel modified when SPACE is pressed, is in the repository's <code>example</code> folder.</p>
+
+<h2 id="postprocess">Post-processing</h2>
+<p>A post-process is created with <code>HRL_CreatePostProcess</code>. It depends on a scene and a material, so build the material from your own shader first (see <code>hrl.h</code> for the exact parameters). Post-process materials are supported on <b>OpenGL 3.3 only</b> for now.</p>
+<p>Related screen-space effects (ambient occlusion, god rays) and environment features (sky sphere, environment mapping) are listed in the <a href="#features">matrix</a>.</p>
+
+<h2 id="errors">Error handling</h2>
+<p>HRL records the last error. Query it after any call that may fail:</p>
+<pre class="sig">HRL_Error HRL_GetLastError(const char** detail, HRL_Severity* severity);</pre>
+<p>Or register a callback invoked on every error:</p>
+<pre>void HRL_RegisterErrorCallback(HRL_ErrorCallback callback);
+// void callback(HRL_Error code, HRL_Severity severity, const char* detail)</pre>
+<p>The macro <code>HRL_CheckErrors()</code> prints any pending error with file and line (handy in debug builds).</p>
+<div class="tw"><table class="v"><thead><tr><th>Severity</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>HRL_SEVERITY_WEAK_WARNING</code></td><td>Probably harmless; worth a look.</td></tr>
+<tr><td><code>HRL_SEVERITY_WARNING</code></td><td>Something is wrong, rendering continues.</td></tr>
+<tr><td><code>HRL_SEVERITY_ERROR</code></td><td>An operation failed.</td></tr>
+<tr><td><code>HRL_SEVERITY_FATAL</code></td><td>HRL cannot continue.</td></tr>
+</tbody></table></div>
+<h3>Recommended setup</h3>
+<pre>void on_error(HRL_Error code, HRL_Severity severity, const char* detail) {
+    fprintf(stderr, "[HRL %d] %s\n", (int)severity, detail ? detail : "(no detail)");
+}
+
+HRL_RegisterErrorCallback(on_error);   // register early, right after HRL_Init
+
+HRL_id mesh = HRL_CreateMeshFromFile(scene, HRL_3D_Mesh, data, size);
+if (mesh == HRL_INVALID_ID) {
+    // creation failed: the callback has already reported why
+}</pre>
+<p>Because a missing object and an invalid object both produce silent black output, a callback registered from the start is the fastest way to find a mistake.</p>
+
+<h2 id="debug">Debug utilities</h2>
+<pre class="sig">void HRL_DrawSceneAsDebugMode(HRL_id sceneid, HRL_uint mode);</pre>
+<div class="tw"><table class="v"><thead><tr><th><code>mode</code></th><th>Shows</th></tr></thead><tbody>
+<tr><td><code>HRL_DebugViewNone</code></td><td>Normal rendering.</td></tr>
+<tr><td><code>HRL_DebugViewNormal</code></td><td>Surface normals.</td></tr>
+<tr><td><code>HRL_DebugViewLights</code></td><td>Light debug view.</td></tr>
+</tbody></table></div>
+<p>Debug views are complete on OpenGL 3.3 and partial on the other backends.</p>
+<p>Immediate-mode debug geometry must be called every frame to persist: <code>HRL_DrawDebugSegment</code>, <code>HRL_DrawDebugCircle</code>, <code>HRL_DrawDebugCapsule</code>, <code>HRL_DrawDebugPolygon</code>, <code>HRL_DrawDebugPoint</code>. Circles and capsules can be hollow or solid; the point is drawn in screen space.</p>
+<pre class="sig">void HRL_TakeScreenshot(HRL_id sceneid, const char* path); // saves a PNG</pre>
+
+<h2 id="features">Feature support</h2>
+<p>Full backend comparison. ✅ supported, ⚠️ partial, ❌ not yet, — not applicable.</p>
+<div class="tw"><table class="v"><thead><tr><th>Feature</th><th>OpenGL 3.3</th><th>Vulkan</th><th>D3D11</th><th>D3D12</th><th>Metal</th></tr></thead><tbody>
+<tr class="grp"><td colspan="6">Core</td></tr>
+<tr><td>Initialization / context</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Swapchain / presentation</td><td>—</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Screenshot</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>MSAA / antialiasing</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Color picking</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr class="grp"><td colspan="6">Geometry</td></tr>
+<tr><td>3D mesh</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Indexed mesh</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Sprite</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Skeletal mesh</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>LOD</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>FBX</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Screen-space displacement map</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Virtualized geometry</td><td>❌</td><td>✅</td><td>❌</td><td>✅</td><td>✅</td></tr>
+<tr class="grp"><td colspan="6">Materials &amp; textures</td></tr>
+<tr><td>Textures</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Texture filtering</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>PBR materials</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Albedo</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Normal map</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Metallic / roughness</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Specular</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Alpha</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Async texture / shader</td><td>CPU / API</td><td>✅</td><td>⚠️</td><td>✅</td><td>✅</td></tr>
+<tr class="grp"><td colspan="6">Lighting &amp; atmosphere</td></tr>
+<tr><td>Lights: point / directional / spot</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Sky light</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Classic fog</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Light shadows</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>Volumetric fog</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>Global volumetric fog</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>Sky sphere</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>Environment mapping</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr class="grp"><td colspan="6">Global illumination &amp; ray tracing</td></tr>
+<tr><td>GI / DDGI</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>SSGI</td><td>API only</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>VCT</td><td>API only</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>LPV</td><td>API only</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>Path tracing</td><td>API only</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>Ray tracing</td><td>❌</td><td>✅</td><td>❌</td><td>✅</td><td>✅</td></tr>
+<tr class="grp"><td colspan="6">Post-processing</td></tr>
+<tr><td>Post-processing</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>Post-process materials</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>Ambient occlusion</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>God rays</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr class="grp"><td colspan="6">Effects, UI &amp; tooling</td></tr>
+<tr><td>VFX / particles</td><td>✅</td><td>✅/⚠️</td><td>✅/⚠️</td><td>✅/⚠️</td><td>✅/⚠️</td></tr>
+<tr><td>VFX mesh particles</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Widgets</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Gizmos</td><td>✅</td><td>⚠️</td><td>⚠️</td><td>⚠️</td><td>⚠️</td></tr>
+<tr><td>Debug rendering</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+<tr><td>Debug views</td><td>✅</td><td>⚠️</td><td>⚠️</td><td>⚠️</td><td>⚠️</td></tr>
+</tbody></table></div>
+<p><b>API only</b> means the functions exist in the public API but the rendering behind them is not implemented yet. “✅/⚠️” means supported with some limitations.</p>
+
+<h2 id="example">Minimal example</h2><pre>// 1. Initialize
+HRL_Init(HRL_OpenGL45);
+HRL_InitContext(1280, 720, glfwGetProcAddress);
+
+// 2. Scene, camera, viewport
+HRL_id scene    = HRL_CreateScene(HRL_True);
+HRL_id camera   = HRL_CreateCamera(scene, HRL_Perspective);
+HRL_id viewport = HRL_CreateViewport(scene, camera, 0.f, 0.f, 1.f, 1.f);
+HRL_SetCameraPerspectiveFov(camera, 60.f);
+HRL_SetCameraPosition(camera, 0.f, 0.f, -5.f);
+
+// 3. Shader, material, texture
+HRL_id shader   = HRL_CreateShader(vert_src, vert_len, frag_src, frag_len);
+HRL_id material = HRL_CreateMaterial(shader);
+HRL_id texture  = HRL_CreateTexture(png_data, png_size);
+HRL_MaterialSetTexture(material, HRL_T_ALBEDO, texture);
+
+// 4. Mesh
+HRL_id mesh = HRL_CreateMeshFromFile(scene, HRL_3D_Mesh, obj_data, obj_size);
+HRL_SetMeshMaterial(mesh, material);
+
+// 5. Render loop
+while (!glfwWindowShouldClose(window)) {
+    HRL_BeginFrame();
+    HRL_EndFrame();
+    glfwSwapBuffers(window);
+    glfwPollEvents();
+}
+
+// 6. Cleanup
+HRL_Shutdown();</pre>
+<h3>What each step does</h3>
+<ol>
+<li><b>Initialize.</b> Choose the backend, then create the context with your loader.</li>
+<li><b>Scene, camera, viewport.</b> The scene holds everything, the camera looks at it, the viewport puts the result on screen.</li>
+<li><b>Shader, material, texture.</b> The material is the shader plus its values, here an albedo texture.</li>
+<li><b>Mesh.</b> Load geometry from memory and give it its material.</li>
+<li><b>Loop.</b> Draw a frame, then present it with your windowing layer.</li>
+<li><b>Cleanup.</b> <code>HRL_Shutdown</code> releases everything.</li>
+</ol>
+<p>The camera sits at <code>z = -5</code>, so a mesh near the origin should be in view. Add a light with <code>HRL_CreateLight</code> if your shader is lit.</p>
+
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p>HRL does not guess for you, so a black window almost always means a missing object. Go through the list in order.</p>
+<div class="tw"><table class="v"><thead><tr><th>Symptom</th><th>Check</th></tr></thead><tbody>
+<tr><td>Black window, nothing at all</td><td>Is there a camera in the scene? Is there a <b>viewport</b> that uses it, covering <code>0,0,1,1</code>? Are you calling <code>HRL_BeginFrame</code> and <code>HRL_EndFrame</code> every iteration?</td></tr>
+<tr><td>Mesh missing</td><td>Did you call <code>HRL_SetMeshMaterial</code>? Does the material have a valid shader? Is the mesh in front of the camera and inside its view (for a 60° camera at <code>z = -5</code>, near the origin)?</td></tr>
+<tr><td>Mesh is black or flat</td><td>Is the shader lit? Create at least one light. Check that the albedo texture was bound with <code>HRL_MaterialSetTexture</code>.</td></tr>
+<tr><td>A <code>HRL_Create*</code> returns <code>HRL_INVALID_ID</code></td><td>Read the error: <code>HRL_GetLastError</code> or your callback. Check that its dependencies (scene, material…) were created first.</td></tr>
+<tr><td>Texture fails to load</td><td>Open the file in <b>binary</b> mode and pass the raw bytes and their exact size. Check that the format is supported.</td></tr>
+<tr><td>Text does not appear</td><td>Did you create a font with <code>HRL_CreateFont</code>? Is the background alpha <code>0</code> and the text color different from the background?</td></tr>
+<tr><td>Crash in <code>HRL_InitContext</code></td><td>Create the window and make its context current first. Pass the correct loader for the backend.</td></tr>
+<tr><td>Effect has no result</td><td>Look at the <a href="#features">feature matrix</a>: the effect may not be implemented on your backend.</td></tr>
+<tr><td>Debug shapes flicker or vanish</td><td>Immediate-mode <code>HRL_DrawDebug*</code> calls must be repeated every frame.</td></tr>
+<tr><td>Voxel world not visible</td><td>Voxel rendering is on OpenGL 3.3. Check the world size, that types are not all <code>0</code>, that colors are set and that the camera looks at the XY plane.</td></tr>
+</tbody></table></div>
+
+<h2 id="faq">FAQ</h2>
+<h3>Does HRL create the window?</h3>
+<p>No. HRL only renders. Use GLFW, SDL, Win32 or any other layer and pass HRL the right loader.</p>
+<h3>Do I have to delete everything myself?</h3>
+<p>For objects you want to free before the program ends, yes. <code>HRL_Shutdown</code> cleans every remaining object.</p>
+<h3>Can I switch backend at run time?</h3>
+<p>The backend is chosen with <code>HRL_Init</code>, which must be the first call. Pick it at start-up, for example from a command-line option.</p>
+<h3>Can several materials share a shader?</h3>
+<p>Yes, that is the intended use. One shader is compiled once; each material holds its own values.</p>
+<h3>Can I render into a texture?</h3>
+<p>Yes. Create the scene with <code>HRL_False</code>; it renders into an off-screen texture (480×480 by default, resizable with <code>HRL_ResizeSceneTexture</code>).</p>
+<h3>Which backend should I use?</h3>
+<p>For maximum features today, OpenGL 3.3. For ray tracing or virtualized geometry, Vulkan, Direct3D 12 or Metal. See <a href="#backends">Choosing a backend</a>.</p>
+<h3>Can I use HRL from another language?</h3>
+<p>The library has a C API and ships a <code>bindings</code> folder in the repository. See it for the languages available.</p>
+
+<h2 id="glossary">Glossary</h2>
+<div class="tw"><table class="v"><thead><tr><th>Term</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>Backend</td><td>The graphics API HRL talks to (OpenGL, Vulkan, Direct3D, Metal…).</td></tr>
+<tr><td>Chunk</td><td>A fixed-size block of a voxel world, loaded to the GPU only when visible.</td></tr>
+<tr><td>DDGI</td><td>Dynamic diffuse global illumination.</td></tr>
+<tr><td>Frustum</td><td>The volume a camera can see.</td></tr>
+<tr><td>G-buffer</td><td>Intermediate render targets that store per-pixel data for lighting.</td></tr>
+<tr><td>Greedy meshing</td><td>Merging neighbouring identical voxels into larger rectangles.</td></tr>
+<tr><td><code>HRL_id</code></td><td>Handle to an HRL object.</td></tr>
+<tr><td>LOD</td><td>Level of detail: simpler versions of a mesh at a distance.</td></tr>
+<tr><td>LPV, SSGI, VCT</td><td>Light propagation volumes, screen-space GI, voxel cone tracing: global illumination techniques.</td></tr>
+<tr><td>MSAA</td><td>Multisample anti-aliasing.</td></tr>
+<tr><td>PBR</td><td>Physically based rendering: albedo, metallic, roughness…</td></tr>
+<tr><td>Viewport</td><td>A rectangle of the screen where a camera's image is drawn.</td></tr>
+<tr><td>Virtualized geometry</td><td>Streaming and refining mesh detail on the fly.</td></tr>
+</tbody></table></div>
+
+<h2 id="license">License &amp; contact</h2>
+<p>HRL is licensed under the <a href="http://www.apache.org/licenses/LICENSE-2.0">Apache License 2.0</a>. Questions and bug reports: open an <a href="https://github.com/oscar-soirey/Horizon-Rendering-Library/issues">issue on GitHub</a> or write to <a href="mailto:oscarsoirey.contact@gmail.com">oscarsoirey.contact@gmail.com</a>.</p>
+<div class="pager"><a href="index.html"><small>back</small>Home</a><a class="next" href="https://github.com/oscar-soirey/Horizon-Rendering-Library"><small>sources</small>GitHub</a></div>
+
+</article></main>
+</div>
+<script src="docs.js"></script>
+</body>
+</html>
