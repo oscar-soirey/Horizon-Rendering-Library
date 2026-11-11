@@ -8,6 +8,36 @@
 
 #include <hrl_vulkan.h>
 
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb/stb_image.h>
+
+namespace
+{
+std::vector<unsigned char> Screenshot(HRL_id scene, const char* path, int& w, int& h)
+{
+	HRL_BeginFrame();
+	HRL_TakeScreenshot(scene, path);
+	HRL_EndFrame();
+	Frames(3);
+	int c = 0;
+	unsigned char* data = stbi_load(path, &w, &h, &c, 4);
+	std::vector<unsigned char> out;
+	if (data) out.assign(data, data + (size_t)w * h * 4);
+	stbi_image_free(data);
+	return out;
+}
+
+// Mean absolute difference of two images, per channel.
+double Difference(const std::vector<unsigned char>& a, const std::vector<unsigned char>& b)
+{
+	if (a.size() != b.size() || a.empty()) return 1e9;
+	double sum = 0.0;
+	for (size_t i = 0; i < a.size(); ++i) sum += std::abs((int)a[i] - (int)b[i]);
+	return sum / (double)a.size();
+}
+} // namespace
+
 int main()
 {
 	HRL_RegisterErrorCallback(OnError);
@@ -294,8 +324,73 @@ int main()
 		Frames(2);
 	}
 
-	// Features of the deprecated OpenGL backend must fail cleanly, not crash.
-	CHECK(HRL_IsGlobalIlluminationMethodSupported(HRL_GI_DDGI) == HRL_FALSE);
+	// ---- Point light shadows (shadow maps, or ray traced when available) -----------
+	{
+		const HRL_id pScene = HRL_CreateScene(HRL_FALSE);
+		HRL_ResizeSceneTexture(pScene, 160, 160);
+		const HRL_id pCam = HRL_CreateCamera(pScene, HRL_PERSPECTIVE);
+		HRL_SetCameraPerspectiveFov(pCam, 60.f);
+		HRL_SetCameraLocation(pCam, 0.f, 10.f, 0.01f);
+		HRL_SetCameraRotation(pCam, -89.9f, -90.f, 0.f); // looking down
+		HRL_CreateViewport(pScene, pCam, 0.f, 0.f, 1.f, 1.f);
+		const HRL_id pLight = HRL_CreateLight(pScene, HRL_POINT_LIGHT);
+		HRL_SetLightLocation(pLight, 0.f, 4.f, 0.f);
+		HRL_SetLightIntensity(pLight, 20.f);
+		HRL_SetLightCastShadows(pLight, HRL_TRUE);
+		HRL_SetLightShadowResolution(pLight, 512);
+		const HRL_id white = HRL_CreateMaterial(HRL_MESH_3D_SHADER);
+		AddMesh(pScene, ground, white, 0.f, 0.f, 0.f);
+		// A sphere between the light and the ground at +X: its shadow lands further out.
+		AddMesh(pScene, sphere, white, 1.5f, 2.f, 0.f);
+		for (int rayTraced = 0; rayTraced < (rt ? 2 : 1); ++rayTraced)
+		{
+			HRL_Vulkan_SetRayTracedShadows(rayTraced);
+			Frames(3);
+			int w = 0, h = 0;
+			const std::vector<unsigned char> img = Screenshot(pScene, rayTraced ? "hrl_test_point_shadow_rt.png" : "hrl_test_point_shadow.png", w, h);
+			CHECK(w == 160 && h == 160);
+			if (w != 160 || h != 160) continue;
+			// Ground point at x = 3 (behind the sphere seen from the light) and at x = -3.
+			// 10 m high camera, 60 degrees: 1 m = 160 / (2 * 10 * tan 30) = 13.9 px.
+			auto luma = [&](int x, int y) { const unsigned char* p = &img[((size_t)y * w + x) * 4]; return p[0] + p[1] + p[2]; };
+			const int shadowed = luma(80 + 42, 80), lit = luma(80 - 42, 80);
+			std::printf("point light shadow (%s): lit %d, shadowed %d\n", rayTraced ? "ray traced" : "maps", lit, shadowed);
+			CHECK(lit > 60 && shadowed < lit / 2);
+		}
+		HRL_Vulkan_SetRayTracedShadows(HRL_FALSE);
+		HRL_DeleteScene(pScene);
+		Frames(2);
+	}
+
+	// ---- Anti-aliasing ------------------------------------------------------------
+	{
+		HRL_SetMeshLocation(center, 0.f, 1.f, 0.f);
+		CHECK(HRL_Vulkan_GetAntiAliasing() == HRL_VULKAN_AA_FXAA); // default
+		int w = 0, h = 0;
+		HRL_Vulkan_SetAntiAliasing(HRL_VULKAN_AA_NONE);
+		Frames(2);
+		const std::vector<unsigned char> none = Screenshot(scene, "hrl_test_aa_none.png", w, h);
+		HRL_Vulkan_SetAntiAliasing(HRL_VULKAN_AA_FXAA);
+		Frames(2);
+		const std::vector<unsigned char> fxaa = Screenshot(scene, "hrl_test_aa_fxaa.png", w, h);
+		HRL_SetAntialiasingMode(4); // MSAA request: temporal anti-aliasing on Vulkan
+		CHECK(HRL_Vulkan_GetAntiAliasing() == HRL_VULKAN_AA_TAA);
+		Frames(16);
+		const std::vector<unsigned char> taa = Screenshot(scene, "hrl_test_aa_taa.png", w, h);
+		// Anti-aliasing only changes the edges: the images stay close to each other.
+		const double dFxaa = Difference(none, fxaa), dTaa = Difference(none, taa);
+		std::printf("anti-aliasing: FXAA %.2f, TAA %.2f (mean difference with no AA)\n", dFxaa, dTaa);
+		CHECK(dFxaa > 0.01 && dFxaa < 6.0);
+		CHECK(dTaa > 0.01 && dTaa < 8.0);
+		HRL_Vulkan_SetVSync(HRL_FALSE); // off-screen: no swapchain, only kept
+		CHECK(HRL_Vulkan_GetVSync() == HRL_FALSE);
+		HRL_Vulkan_SetVSync(HRL_TRUE);
+		HRL_Vulkan_SetAntiAliasing(HRL_VULKAN_AA_FXAA);
+	}
+
+	// Global illumination: the probe volume (DDGI) only.
+	CHECK(HRL_IsGlobalIlluminationMethodSupported(HRL_GI_DDGI) == HRL_TRUE);
+	CHECK(HRL_IsGlobalIlluminationMethodSupported(HRL_GI_SSGI) == HRL_FALSE);
 
 	uint64_t usedMemory = 0, memoryBudget = 0;
 	CHECK(HRL_Vulkan_GetMemoryUsage(&usedMemory, &memoryBudget) == HRL_TRUE);

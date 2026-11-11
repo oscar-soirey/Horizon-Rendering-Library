@@ -4,6 +4,7 @@ if(HRL_ENABLE_VULKAN)
     # lavapipe is enough) but no window system.
     add_executable(hrl_test_vulkan vulkan_smoke.cpp)
     target_link_libraries(hrl_test_vulkan PRIVATE hrldll)
+    target_include_directories(hrl_test_vulkan PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
     add_test(NAME vulkan_smoke COMMAND hrl_test_vulkan WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     add_test(NAME vulkan_smoke_no_raytracing COMMAND hrl_test_vulkan WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     # Validation layers turn every Vulkan misuse into a test failure when installed.
@@ -17,6 +18,34 @@ if(HRL_ENABLE_VULKAN)
     add_test(NAME vulkan_nature_no_raytracing COMMAND hrl_test_vulkan_nature WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     set_tests_properties(vulkan_nature PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1")
     set_tests_properties(vulkan_nature_no_raytracing PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1;HRL_VULKAN_NO_RAYTRACING=1")
+
+    # Sprites, widgets, texts, gizmos (checks screenshot pixels).
+    add_executable(hrl_test_vulkan_2d vulkan_2d.cpp)
+    target_link_libraries(hrl_test_vulkan_2d PRIVATE hrldll)
+    target_include_directories(hrl_test_vulkan_2d PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
+    target_compile_definitions(hrl_test_vulkan_2d PRIVATE HRL_TEST_FONT="${CMAKE_SOURCE_DIR}/examples/assets/JetBrainsMono.ttf")
+    add_test(NAME vulkan_2d COMMAND hrl_test_vulkan_2d WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(vulkan_2d PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1")
+
+    # Custom shaders: surface / vertex functions, OpenGL post-processes (needs glslang).
+    add_executable(hrl_test_vulkan_custom vulkan_custom.cpp)
+    target_link_libraries(hrl_test_vulkan_custom PRIVATE hrldll)
+    target_include_directories(hrl_test_vulkan_custom PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
+    if(HRL_VK_GLSLANG_TARGETS)
+        add_test(NAME vulkan_custom COMMAND hrl_test_vulkan_custom WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(vulkan_custom PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1")
+        add_test(NAME vulkan_custom_no_raytracing COMMAND hrl_test_vulkan_custom WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(vulkan_custom_no_raytracing PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1;HRL_VULKAN_NO_RAYTRACING=1")
+    endif()
+
+    # Screen space effects (the OpenGL effect shaders compiled at run time, needs glslang).
+    add_executable(hrl_test_vulkan_effects vulkan_effects.cpp)
+    target_link_libraries(hrl_test_vulkan_effects PRIVATE hrldll)
+    target_include_directories(hrl_test_vulkan_effects PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
+    if(HRL_VK_GLSLANG_TARGETS)
+        add_test(NAME vulkan_effects COMMAND hrl_test_vulkan_effects WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(vulkan_effects PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1")
+    endif()
 
     # CPU cost of preparing a large scene (prints timings, see docs/ARCHITECTURE.md).
     add_executable(hrl_bench_scene bench_scene.cpp)
