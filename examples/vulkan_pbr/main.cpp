@@ -1,4 +1,5 @@
-// HRL example: physically based 3D scene with the native Vulkan backend.
+// HRL example: physically based 3D scene with the native Vulkan backend
+// (PBR materials, shadows, image based lighting, translucency, bloom).
 //
 //   hrl_vulkan_pbr                       opens a window
 //   hrl_vulkan_pbr --screenshot out.png  renders off-screen and writes a PNG
@@ -141,7 +142,13 @@ void BuildScene(App& app, const Options& opt)
 	HRL_SetCameraPerspectiveFov(app.camera, 55.f);
 	HRL_SetCameraNearPlane(app.camera, 0.1f);
 	HRL_SetCameraFarPlane(app.camera, 500.f);
-	HRL_CreateViewport(app.scene, app.camera, 0.f, 0.f, 1.f, 1.f);
+	const HRL_id viewport = HRL_CreateViewport(app.scene, app.camera, 0.f, 0.f, 1.f, 1.f);
+
+	// Post-processing: exposure (in stops) and bloom.
+	const HRL_id post = HRL_CreateMaterial(HRL_DEFAULT_POST_PROCESS_SHADER);
+	HRL_MaterialSetFloat(post, "exposure", 0.f);
+	HRL_MaterialSetFloat(post, "bloomStrength", 1.f);
+	HRL_CreatePostProcess(viewport, post, 0);
 
 	// Sky: procedural gradient, also used as the image based lighting source.
 	HRL_SetSkySphereEnabled(app.scene, HRL_TRUE);
@@ -197,6 +204,20 @@ void BuildScene(App& app, const Options& opt)
 	HRL_MaterialSetEmissiveColor(glow, 0.2f, 1.0f, 0.5f, 4.f);
 	AddMesh(app.scene, sphere, glow, -3.f, 0.8f, 5.f);
 
+	// Translucent glass panes: blended back to front over the scene.
+	const MeshData pane = MakeBox(1.1f, 0.9f, 0.03f);
+	const float tints[3][3] = {{0.55f, 0.85f, 1.0f}, {1.0f, 0.75f, 0.45f}, {0.6f, 1.0f, 0.65f}};
+	for (int i = 0; i < 3; ++i)
+	{
+		const HRL_id glass = MakeMaterial(tints[i][0], tints[i][1], tints[i][2], 0.08f, 0.f);
+		HRL_MaterialSetBool(glass, HRL_MATERIAL_PARAM_TRANSLUCENT, HRL_TRUE);
+		HRL_MaterialSetBool(glass, HRL_MATERIAL_PARAM_TWO_SIDED, HRL_TRUE);
+		HRL_MaterialSetInt(glass, "OpacityUseValue", 1);
+		HRL_MaterialSetFloat(glass, "OpacityValue", 0.35f);
+		const HRL_id mesh = AddMesh(app.scene, pane, glass, -1.5f + 1.6f * (float)i, 0.9f, 3.6f + 0.5f * (float)i);
+		HRL_SetMeshRotation(mesh, 0.f, -45.f, 0.f);
+	}
+
 	HRL_Vulkan_SetRayTracedShadows(opt.rayTracedShadows ? HRL_TRUE : HRL_FALSE);
 }
 
@@ -223,6 +244,8 @@ int RunWindow(Options& opt)
 	GLFWwindow* window = glfwCreateWindow(opt.width, opt.height, "HRL - Vulkan PBR", nullptr, nullptr);
 	if (!window) { glfwTerminate(); return 1; }
 
+	glfwSwapInterval(0);
+
 	uint32_t extensionCount = 0;
 	const char** extensions = glfwGetRequiredInstanceExtensions(&extensionCount);
 	HRL_RegisterErrorCallback(OnError);
@@ -247,6 +270,24 @@ int RunWindow(Options& opt)
 		const double now = glfwGetTime();
 		const float dt = (float)(now - lastTime);
 		lastTime = now;
+
+		static float elapsed = 0.f;
+		static int frames = 0;
+
+		elapsed += dt;
+		frames++;
+
+		if (elapsed >= 1.0f)
+		{
+			char title[128];
+			std::snprintf(title, sizeof(title),
+				"HRL Vulkan - %d FPS", frames);
+
+			glfwSetWindowTitle(window, title);
+
+			elapsed = 0.f;
+			frames = 0;
+		}
 
 		int w = 0, h = 0;
 		glfwGetFramebufferSize(window, &w, &h);

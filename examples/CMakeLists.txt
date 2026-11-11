@@ -43,6 +43,16 @@ if(HRL_ENABLE_VULKAN)
     endif()
 endif()
 
+# ---- Vulkan: landscape, foliage and grass ---------------------------------------
+if(HRL_ENABLE_VULKAN)
+    add_executable(hrl_vulkan_nature vulkan_nature/main.cpp)
+    target_link_libraries(hrl_vulkan_nature PRIVATE hrldll)
+    if(glfw3_FOUND)
+        target_link_libraries(hrl_vulkan_nature PRIVATE glfw)
+        target_compile_definitions(hrl_vulkan_nature PRIVATE HRL_EXAMPLE_HAS_GLFW)
+    endif()
+endif()
+
 # ---- Vulkan: scene editor with a Raven interface -------------------------------
 if(HRL_ENABLE_VULKAN AND NOT APPLE)
     add_subdirectory(editor)

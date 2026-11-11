@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <vector>
 
 int main(int argc, char** argv)
 {
@@ -79,6 +80,40 @@ int main(int argc, char** argv)
 	measure("static scene", 0, 0);
 	measure("100 meshes moving", std::min(100, meshCount), 0);
 	measure("10 materials changing", 0, std::min(10, materialCount));
+
+	// Foliage: one million instances on a 2 x 2 km landscape. The CPU only
+	// prepares the cells; culling and LOD run on the GPU.
+	{
+		const HRL_uint n = 257;
+		std::vector<float> heights((size_t)n * n, 0.f);
+		const HRL_id land = HRL_CreateLandscapeFromHeights(scene, heights.data(), n, n);
+		HRL_SetLandscapeSize(land, 2048.f, 2048.f);
+		const MeshData bush = MakeSphere(0.5f, 6, 8);
+		const HRL_id foliage = HRL_CreateFoliage(scene);
+		HRL_AddFoliageMesh(foliage, bush.v.data(), bush.v.size(), bush.i.data(), bush.i.size(), materials[0]);
+		HRL_FoliageScatter s = HRL_DefaultFoliageScatter();
+		s.density = 0.25f;
+		const auto t0 = std::chrono::steady_clock::now();
+		const size_t count = HRL_ScatterFoliage(foliage, land, &s);
+		const double scatterMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		std::printf("%zu foliage instances scattered in %.0f ms\n", count, scatterMs);
+		Frames(3); // first upload
+		measure("1M foliage instances, static", 0, 0);
+		// A brush stroke per frame: only the cells it touches are sent again.
+		std::vector<double> times;
+		for (int f = 0; f < frames; ++f)
+		{
+			const float x = -500.f + (float)f * 2.f;
+			HRL_EraseFoliage(foliage, x, 0.f, 6.f);
+			HRL_PaintFoliage(foliage, land, x, 0.f, 6.f, &s);
+			HRL_BeginFrame();
+			const auto a = std::chrono::steady_clock::now();
+			HRL_EndFrame();
+			times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count());
+		}
+		std::sort(times.begin(), times.end());
+		std::printf("%-34s median %7.3f ms   p90 %7.3f ms\n", "1M foliage, brush every frame", times[times.size() / 2], times[times.size() * 9 / 10]);
+	}
 
 	HRL_Shutdown();
 	return g_errors ? 1 : 0;

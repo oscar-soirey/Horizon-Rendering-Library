@@ -11,6 +11,8 @@
 int main()
 {
 	HRL_RegisterErrorCallback(OnError);
+	std::remove("hrl_test_pipeline_cache.bin");
+	HRL_Vulkan_SetPipelineCachePath("hrl_test_pipeline_cache.bin");
 	HRL_Init(HRL_VULKAN);
 	HRL_InitContext(320, 200, nullptr);
 	if (g_errors) { std::fprintf(stderr, "Vulkan initialisation failed\n"); return 1; }
@@ -68,6 +70,31 @@ int main()
 	for (int i = 0; i < 12; ++i)
 		extra.push_back(AddMesh(scene, sphere, i % 2 ? twoSided : redMat, -6.f + (float)i, 1.f, -4.f));
 
+	// Alpha tested fence (its holes must not cast a shadow) and a translucent sphere.
+	std::vector<unsigned char> holes(32 * 32 * 4, 255);
+	for (int y = 0; y < 32; ++y)
+		for (int x = 0; x < 32; ++x)
+			if (((x / 8) + (y / 8)) % 2) holes[(size_t)(y * 32 + x) * 4] = holes[(size_t)(y * 32 + x) * 4 + 1] = holes[(size_t)(y * 32 + x) * 4 + 2] = 0;
+	const std::vector<unsigned char> holesPng = EncodePNG(32, 32, holes);
+	const HRL_id holesTexture = HRL_CreateTexture(reinterpret_cast<const char*>(holesPng.data()), holesPng.size());
+	const HRL_id fenceMat = HRL_CreateMaterial(HRL_MESH_3D_SHADER);
+	HRL_MaterialSetTexture(fenceMat, HRL_T_ALPHA, holesTexture);
+	HRL_MaterialSetBool(fenceMat, HRL_MATERIAL_PARAM_TWO_SIDED, HRL_TRUE);
+	const MeshData fence = MakeGround(1.5f);
+	const HRL_id fenceMesh = AddMesh(scene, fence, fenceMat, 3.f, 2.f, 1.f);
+	HRL_SetMeshRotation(fenceMesh, 90.f, 0.f, 0.f);
+	const HRL_id glassMat = HRL_CreateMaterial(HRL_MESH_3D_SHADER);
+	HRL_MaterialSetBool(glassMat, HRL_MATERIAL_PARAM_TRANSLUCENT, HRL_TRUE);
+	HRL_MaterialSetVec3(glassMat, "TintColor", 0.2f, 0.5f, 1.f);
+	HRL_MaterialSetInt(glassMat, "OpacityUseValue", 1);
+	HRL_MaterialSetFloat(glassMat, "OpacityValue", 0.4f);
+	AddMesh(scene, sphere, glassMat, -2.5f, 1.f, 2.f);
+	// Post-process material: exposure and bloom.
+	const HRL_id postMat = HRL_CreateMaterial(HRL_DEFAULT_POST_PROCESS_SHADER);
+	HRL_MaterialSetFloat(postMat, "bloomStrength", 1.f);
+	const HRL_id post = HRL_CreatePostProcess(viewport, postMat, 0);
+	CHECK(post != HRL_INVALID_ID);
+
 	// ---- Shadow maps -----------------------------------------------------------
 	Frames(3);
 	HRL_EMeshType type = HRL_SPRITE;
@@ -83,7 +110,7 @@ int main()
 	HRL_VulkanSceneStats stats{};
 	Frames(1);
 	CHECK(HRL_Vulkan_GetSceneStats(scene, &stats) == HRL_TRUE);
-	CHECK(stats.instance_count == 14 && stats.material_count == 3);
+	CHECK(stats.instance_count == 16 && stats.material_count == 5);
 	CHECK(stats.drawn_instance_count > 0 && stats.render_pass_count >= 3);
 	CHECK(stats.scene_rebuilds == 0 && stats.transform_updates == 0 && stats.material_updates == 0);
 	HRL_SetMeshLocation(center, 40.f, 1.f, 0.f);
@@ -104,11 +131,11 @@ int main()
 	const HRL_id temporary = AddMesh(scene, sphere, redMat, 3.f, 1.f, 3.f);
 	Frames(1);
 	HRL_Vulkan_GetSceneStats(scene, &stats);
-	CHECK(stats.scene_rebuilds == 1 && stats.instance_count == 15);
+	CHECK(stats.scene_rebuilds == 1 && stats.instance_count == 17);
 	HRL_DeleteMesh(temporary);
 	Frames(1);
 	HRL_Vulkan_GetSceneStats(scene, &stats);
-	CHECK(stats.scene_rebuilds == 1 && stats.instance_count == 14);
+	CHECK(stats.scene_rebuilds == 1 && stats.instance_count == 16);
 	CHECK(HRL_GetHoveredObject(scene, 160, 100, &type) == center);
 
 	// ---- Ray traced shadows ----------------------------------------------------
@@ -176,10 +203,121 @@ int main()
 	HRL_DeleteScene(offscreen);
 	Frames(3);
 
+	// ---- Skeletal mesh: skinned on the GPU by a compute pass ----------------------
+	{
+		const HRL_id skScene = HRL_CreateScene(HRL_FALSE);
+		HRL_ResizeSceneTexture(skScene, 128, 96);
+		const HRL_id skCamera = HRL_CreateCamera(skScene, HRL_PERSPECTIVE);
+		HRL_SetCameraPerspectiveFov(skCamera, 60.f);
+		HRL_SetCameraNearPlane(skCamera, 0.1f);
+		HRL_SetCameraFarPlane(skCamera, 100.f);
+		HRL_SetCameraLocation(skCamera, 0.f, 0.f, 4.f);
+		HRL_SetCameraRotation(skCamera, 0.f, -90.f, 0.f);
+		HRL_CreateViewport(skScene, skCamera, 0.f, 0.f, 1.f, 1.f);
+		const HRL_id skLight = HRL_CreateLight(skScene, HRL_DIRECTIONAL_LIGHT);
+		HRL_SetLightRotation(skLight, -50.f, 30.f, 0.f);
+		HRL_SetLightCastShadows(skLight, HRL_TRUE);
+		HRL_SetLightShadowResolution(skLight, 512);
+
+		// A sphere bound to bone 1. Animation: frame 0 in place, frame 1 moved 30 units away.
+		std::vector<HRL_SkeletalVertex> vertices(sphere.v.size());
+		for (size_t i = 0; i < vertices.size(); ++i)
+		{
+			vertices[i] = HRL_SkeletalVertex{};
+			vertices[i].vertex = sphere.v[i];
+			vertices[i].boneIndices[0] = 1;
+			vertices[i].boneWeights[0] = 1.f;
+		}
+		std::vector<HRL_uint> indices = sphere.i;
+		const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+		HRL_SkeletalBoneTransform rest{};
+		rest.rotation[3] = 1.f;
+		rest.scale[0] = rest.scale[1] = rest.scale[2] = 1.f;
+		HRL_SkeletalBone bones[2]{};
+		const char* boneNames[2] = {"root", "body"};
+		for (int b = 0; b < 2; ++b)
+		{
+			bones[b].name = boneNames[b];
+			bones[b].parentIndex = 0;
+			bones[b].bindTransform = rest;
+			for (int e = 0; e < 16; ++e) bones[b].bindWorldMatrix[e] = bones[b].inverseBindMatrix[e] = identity[e];
+		}
+		HRL_SkeletalBoneTransform frames[4] = {rest, rest, rest, rest}; // 2 frames x 2 bones
+		float poses[4 * 16];
+		for (int m = 0; m < 4; ++m)
+			for (int e = 0; e < 16; ++e) poses[m * 16 + e] = identity[e];
+		poses[3 * 16 + 12] = 30.f; // frame 1, bone 1 : translation x
+		HRL_SkeletalAnimation animation{};
+		animation.name = "move";
+		animation.duration = 1.f;
+		animation.frameRate = 1.f;
+		animation.frameCount = 2;
+		animation.frames = frames;
+		animation.poseMatrices = poses;
+		HRL_SkeletalMeshData data{};
+		data.vertices = vertices.data();
+		data.vertexCount = vertices.size();
+		data.indices = indices.data();
+		data.indexCount = indices.size();
+		data.bones = bones;
+		data.boneCount = 2;
+		data.animations = &animation;
+		data.animationCount = 1;
+		for (int e = 0; e < 16; ++e) data.geometryToWorldMatrix[e] = identity[e];
+
+		const HRL_id skeletal = HRL_CreateSkeletalMesh(skScene, &data);
+		CHECK(skeletal != HRL_INVALID_ID);
+		HRL_SetMeshMaterial(skeletal, redMat);
+		HRL_PlaySkeletalAnimation(skeletal, 0);
+		HRL_SetSkeletalAnimationLoop(skeletal, HRL_FALSE);
+		HRL_SetSkeletalAnimationTime(skeletal, 0.f);
+		Frames(3);
+		CHECK(HRL_GetHoveredObject(skScene, 64, 48, &type) == skeletal);
+		HRL_VulkanSceneStats skStats{};
+		HRL_Vulkan_GetSceneStats(skScene, &skStats);
+		CHECK(skStats.instance_count == 1 && skStats.skinned_mesh_count == 0); // pose unchanged: not skinned again
+		HRL_SetSkeletalAnimationTime(skeletal, 1.f);
+		Frames(1);
+		HRL_Vulkan_GetSceneStats(skScene, &skStats);
+		CHECK(skStats.skinned_mesh_count == 1);
+		HRL_BeginFrame();
+		HRL_TakeScreenshot(skScene, "hrl_test_skeletal_moved.png");
+		HRL_EndFrame();
+		Frames(2);
+		CHECK(HRL_GetHoveredObject(skScene, 64, 48, &type) == HRL_INVALID_ID); // the bone carried the mesh away
+		HRL_SetSkeletalAnimationTime(skeletal, 0.f);
+		Frames(3);
+		CHECK(HRL_GetHoveredObject(skScene, 64, 48, &type) == skeletal);
+		HRL_DeleteMesh(skeletal);
+		Frames(2);
+		HRL_DeleteScene(skScene);
+		Frames(2);
+	}
+
 	// Features of the deprecated OpenGL backend must fail cleanly, not crash.
 	CHECK(HRL_IsGlobalIlluminationMethodSupported(HRL_GI_DDGI) == HRL_FALSE);
 
-	(void)viewport;
+	uint64_t usedMemory = 0, memoryBudget = 0;
+	CHECK(HRL_Vulkan_GetMemoryUsage(&usedMemory, &memoryBudget) == HRL_TRUE);
+	CHECK(usedMemory > 0 && memoryBudget >= usedMemory);
+
+	HRL_Shutdown();
+
+	// The pipeline cache was written by the shutdown and is accepted by a second
+	// initialisation (same GPU, same driver).
+	FILE* cache = std::fopen("hrl_test_pipeline_cache.bin", "rb");
+	CHECK(cache != nullptr);
+	if (cache)
+	{
+		std::fseek(cache, 0, SEEK_END);
+		CHECK(std::ftell(cache) >= 32);
+		std::fclose(cache);
+	}
+	HRL_Init(HRL_VULKAN);
+	HRL_InitContext(64, 64, nullptr);
+	const HRL_id again = HRL_CreateScene(HRL_FALSE);
+	Frames(2);
+	CHECK(HRL_IsValidScene(again));
 	HRL_Shutdown();
 	std::printf("%d check failure(s), %d HRL error(s)\n", g_failures, g_errors);
 	return (g_failures || g_errors) ? 1 : 0;

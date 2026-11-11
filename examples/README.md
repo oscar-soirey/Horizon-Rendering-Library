@@ -13,6 +13,7 @@ The executables are written next to the HRL library, in `build/bin`
 | Target | Backend | Content |
 |-|-|-|
 | `hrl_vulkan_pbr` | Vulkan | PBR materials, cascaded shadows, image based lighting, ray traced shadows (`--rt`). No external resource. |
+| `hrl_vulkan_nature` | Vulkan | 1 km landscape, tens of thousands of trees / bushes / rocks (GPU culled, impostors, wind), procedural grass bending around the camera, paint / erase with the mouse, ray traced shadows (`R` or `--rt`). No external resource. |
 | `hrl_editor` | Vulkan | Small scene editor with a [Raven](https://github.com/oscar-soirey/Raven) interface: add, select, move, duplicate and delete objects, edit their material, lighting, save / load. See below. |
 | `hrl_gl_showcase` | OpenGL 3.3 | Full feature tour (FBX, landscape, VFX, widgets, GI) |
 | `hrl_gl_minimal` | OpenGL 3.3 | Smaller 3D scene |

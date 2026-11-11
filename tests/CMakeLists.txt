@@ -10,6 +10,14 @@ if(HRL_ENABLE_VULKAN)
     set_tests_properties(vulkan_smoke PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1")
     set_tests_properties(vulkan_smoke_no_raytracing PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1;HRL_VULKAN_NO_RAYTRACING=1")
 
+    # Landscapes, foliage, grass, GPU culling.
+    add_executable(hrl_test_vulkan_nature vulkan_nature.cpp)
+    target_link_libraries(hrl_test_vulkan_nature PRIVATE hrldll)
+    add_test(NAME vulkan_nature COMMAND hrl_test_vulkan_nature WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    add_test(NAME vulkan_nature_no_raytracing COMMAND hrl_test_vulkan_nature WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(vulkan_nature PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1")
+    set_tests_properties(vulkan_nature_no_raytracing PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1;HRL_VULKAN_NO_RAYTRACING=1")
+
     # CPU cost of preparing a large scene (prints timings, see docs/ARCHITECTURE.md).
     add_executable(hrl_bench_scene bench_scene.cpp)
     target_link_libraries(hrl_bench_scene PRIVATE hrldll)
