@@ -71,10 +71,16 @@ changes a value.
 | File | Role |
 |-|-|
 | `vk_device` | Device layer (above) |
+| `vk_jobs` | Worker threads for the CPU side of a frame (LOD selection, culling) |
 | `vk_frame_graph` | Pass declaration, automatic barriers and rendering scopes, transient image pool |
 | `vk_pipelines` | Descriptor set layouts and pipelines |
 | `vk_resources` | Bindless textures, geometry pool, bottom level acceleration structures |
-| `vk_scene_data` | Cached instances / materials, lights, cameras, shadow cascades |
+| `vk_scene_data` | Cached instances / materials, draw records, lights, cameras, shadow cascades |
+| `vk_culling` | GPU culling and LOD selection of meshes, Hi-Z pyramids, statistics read back |
+| `vk_landscape` | CDLOD landscapes: height textures, quadtree, node selection, ray traced geometry |
+| `vk_foliage` | Foliage cells, GPU culling / LOD / cross-fades, draw commands, ray traced instances |
+| `vk_impostor` | Baking and drawing of octahedral impostors |
+| `vk_grass` | Procedural grass tiles around the camera |
 | `vk_environment` | Image based lighting |
 | `vk_renderer` | Render targets, frame of a scene, picking, screenshots |
 | `vulkan_backend` | `HRL_vtable` and the `hrl_vulkan.h` functions |
@@ -98,11 +104,80 @@ changes a value.
   Measured with `hrl_bench_scene` (20 000 meshes, 500 materials, CPU time of
   `HRL_EndFrame`, Mesa lavapipe, x86-64): 4.2 ms before the cache and the flat
   object storage, 1.5 ms after.
-* **Draw submission**: each pass builds a list of
-  `VkDrawIndexedIndirectCommand` and issues one `vkCmdDrawIndexedIndirect` per
-  pipeline bucket (opaque / alpha tested × one / two sided). Culling and LOD
-  selection run on the CPU today; the data layout is the one a GPU culling
-  pass needs.
+* **Event driven updates**: the frontend increments `mesh_revision` when the
+  list of meshes changes and records moved meshes (`moved_meshes`), so a
+  frame with nothing changed does no per-mesh CPU work at all.
+* **Draw records**: one record per mesh part and LOD (index range, material,
+  bucket: opaque / alpha tested / translucent × one / two sided). An instance
+  points to its LOD range of records.
+
+### GPU driven culling (`vk_culling`)
+
+The CPU no longer chooses what is drawn. For each view a compute pass reads
+every instance, selects its LOD (screen size with hysteresis, the rule of the
+OpenGL backend), tests it against the frustum and the Hi-Z pyramid, then
+appends `VkDrawIndexedIndirectCommand`s per bucket; the draw passes issue one
+`vkCmdDrawIndexedIndirectCount` per bucket.
+
+Occlusion culling is done in two phases, so it never shows a hole:
+
+1. instances visible last frame are drawn (state buffer, bit per instance);
+2. a Hi-Z pyramid (reversed-Z: each level keeps the farthest depth) is built
+   from that depth;
+3. the other instances are tested against it and the newly visible ones drawn.
+
+Shadow views use frustum culling only. Statistics (instances drawn, LOD of
+each mesh for `HRL_GetMeshLODLevel`) are read back two frames later, without
+waiting. `HRL_Vulkan_SetOcclusionCulling(0)` keeps frustum culling only.
+`hrl_bench_scene` (20 000 meshes, 500 materials, CPU time of `HRL_EndFrame`,
+lavapipe): 4.2 ms with the 0.8 storage, 1.5 ms with the scene cache and CPU
+culling, 0.09 ms GPU driven.
+
+### Landscapes (`vk_landscape`)
+
+Heights are a 32-bit float texture (bindless) displaced in the vertex shader.
+The landscape is a quadtree of 32 × 32 quad patches (CDLOD): nodes are chosen
+per view on the CPU from their min / max heights (a few hundred nodes for a
+1 km terrain), the vertices morph between levels so there are no cracks or
+pops. Normals are computed per pixel from the height texture. Edits
+(`HRL_UpdateLandscapeHeights`) update the rectangle in the texture and the
+min / max tree. With ray tracing, the landscape is a full resolution BLAS; the
+shadow ray starts from the position of the real triangle to avoid acne.
+
+### Foliage (`vk_foliage`, `vk_impostor`)
+
+A foliage kind is a set of parts (mesh + material), with automatic LODs. Its
+instances (32 bytes: position, scale, quaternion) live in cells of 32 m,
+allocated in one GPU pool with a VMA virtual block; painting or erasing
+re-uploads only the touched cells, and the table of cells is cached on the GPU
+(`instances_revision`).
+
+Per view: a compute pass (one workgroup per cell, cell bounds tested first)
+culls each instance (frustum, Hi-Z in phase 2), picks LOD 0 / 1 / 2 / impostor
+by distance and writes it to one of four visible lists. Around a LOD
+boundary an instance is written in both lists with complementary dithered
+coverage, giving a cross-fade without blending. A second small pass writes
+the indirect commands. Wind (direction, strength, gusts) and up to 16
+interactors (spheres that push plants away) are applied in the vertex shader
+from the view uniform, so they cost nothing on the CPU.
+
+Impostors are baked once per foliage kind: 8 × 8 hemi-octahedral views of
+128 px (albedo with coverage, normal) with mipmaps. The impostor quad blends
+the 4 nearest views and is lit as the real mesh.
+
+Ray traced shadows: foliage within the impostor distance (100 m at most,
+65 536 instances at most, nearest first) is added to the TLAS with one BLAS
+per part and LOD, built from the rest pose (no wind), as non-opaque
+instances. The shadow ray query alpha tests them against their material
+(geometry table and vertex / index pools bound as storage buffers).
+
+### Grass (`vk_grass`)
+
+No per-blade data: a grid of 4 m tiles around the camera is culled in compute
+(frustum, Hi-Z, landscape slope / mask), then each visible tile is one instanced
+draw where the vertex shader generates the blades from a hash of their
+position (15 vertices near, 3 far, density decreasing with distance). Grass
+casts shadows in the two nearest cascades.
 
 ### Frame graph
 
@@ -115,9 +190,11 @@ descriptor sets) is done while the passes are declared; GPU commands are
 recorded by `FrameGraph::Execute`.
 
 ```
-[brdf lut] [environment] [tlas build]                 when needed
-per viewport:  shadow map × N  →  forward (+ sky)
-tone mapping → [debug] → [screenshot] → [present copy]
+[brdf lut] [environment] [skinning] [impostor bake] [tlas build]   when needed
+per viewport:  cull phase 1 → shadow map × N → forward phase 1 (meshes, landscapes)
+               → Hi-Z → cull phase 2 (meshes, foliage, grass) → forward phase 2
+               (meshes, foliage, impostors, grass, sky, translucent)
+[bloom downsample × N → upsample × N] → tone mapping → [debug] → [screenshot] → [present copy]
 ```
 
 Passes run in declaration order and none is culled: no pass is optional yet.
@@ -132,6 +209,15 @@ Reordering and culling belong with the first optional passes (SSAO, SSR...).
   depth (D32F). Metallic-roughness BRDF (GGX, height correlated Smith,
   Schlick), image based lighting with multiple scattering compensation, fog,
   then the sky where the depth buffer is still empty.
+* **Skinning**: a compute pass writes the skinned vertices of each skeletal
+  mesh whose pose changed into its range of the vertex pool. Every later pass
+  then draws it as a static mesh (they are not occlusion culled, their bounds
+  change). Skinned meshes have no acceleration structure yet.
+* **Translucency**: translucent buckets are drawn after the sky, back to front,
+  with alpha blending and no depth write; they cast no shadow.
+* **Bloom**: when the scene has a post-process material, the HDR image is
+  downsampled level by level (first level weighted against fireflies) then
+  upsampled and accumulated; tone mapping mixes it with the image.
 * **Tone mapping** (ACES) into the LDR scene image, then debug primitives, the
   screenshot copy and the blit to the swapchain for on-screen scenes.
 

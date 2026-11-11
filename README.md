@@ -93,22 +93,27 @@ A few screenshots showcasing HRL's rendering and debug capabilities:
 |-|:-:|:-:|
 |Swapchain / presentation|✅ HRL presents in `HRL_EndFrame`|Application (`SwapBuffers`)|
 |Off-screen rendering without a window|✅|❌|
-|Static 3D meshes, LOD|✅ multi-draw-indirect|✅|
+|Static 3D meshes, LOD|✅ GPU driven: culling, LOD selection and two-phase occlusion culling in compute, draw-indirect-count|✅|
 |Textures, filtering, mipmaps, anisotropy|✅ bindless|✅|
 |PBR materials (albedo, normal, metallic / roughness, specular, AO, alpha test, emissive)|✅|✅ (no emissive)|
+|Translucent materials (`HRL_MATERIAL_PARAM_TRANSLUCENT`), sorted back to front|✅|❌|
+|Skeletal meshes|✅ skinned by a compute pass (not in the ray traced scene)|✅|
 |Point / directional / spot / sky lights|✅ (no fixed light limit)|✅ (32 lights)|
-|Directional shadows|✅ 4 stable cascades, PCF|✅ single map|
+|Directional shadows|✅ 4 stable cascades, PCF, alpha tested casters|✅ single map|
 |Spot light shadows|✅ (4)|✅|
 |Point light shadows|✅ with ray traced shadows only|✅ cube maps|
 |Hardware ray traced shadows (`HRL_Vulkan_SetRayTracedShadows`)|✅ when the GPU supports it|❌|
 |Image based lighting (prefiltered specular + irradiance + BRDF LUT)|✅|❌ (single reflection lookup)|
 |Sky sphere (gradient or equirectangular texture)|✅|✅|
 |HDR rendering, ACES tone mapping, exposure|✅|✅ (opt-in)|
+|Bloom (post-process material, `bloomStrength`)|✅|✅|
 |Fog (linear / exponential)|✅|✅|
 |Color picking, screenshots, debug primitives, unlit / normal debug views|✅|✅|
 |Custom shaders (`HRL_CreateShader`)|❌ planned as surface functions|✅ GLSL 3.30|
-|Skeletal meshes, landscapes|❌ planned|✅|
-|Post-process materials, bloom, MSAA|❌ planned (TAA instead of MSAA)|✅|
+|Landscapes|✅ continuous LOD (CDLOD), float heights, edits, ray traced|✅ (8-bit heightmaps only)|
+|Foliage: mesh instances (LOD, impostors, wind, interaction, scatter / paint / erase)|✅ GPU culled, millions of instances|❌|
+|Procedural GPU grass|✅|❌|
+|Custom post-process materials, MSAA|❌ planned (TAA instead of MSAA)|✅|
 |SSAO, SSR, decals, volumetric fog, clouds, god rays|❌ planned|✅|
 |Global illumination|❌ planned (hardware ray traced, with fallback)|✅ software BVH in shaders|
 |Sprites, widgets, text, gizmos, VFX, 2D voxel worlds|❌ not started (3D first)|✅|
@@ -224,7 +229,7 @@ if (HRL_Vulkan_IsRayTracingSupported())
     HRL_Vulkan_SetRayTracedShadows(HRL_TRUE);   // optional
 ```
 
-Without a surface callback the Vulkan backend renders off-screen (scenes, screenshots and picking still work). Environment variables: `HRL_VULKAN_VALIDATION=1` enables the Khronos validation layer (messages go to the HRL error callback), `HRL_VULKAN_NO_RAYTRACING=1` disables hardware ray tracing.
+Without a surface callback the Vulkan backend renders off-screen (scenes, screenshots and picking still work). Environment variables: `HRL_VULKAN_VALIDATION=1` enables the Khronos validation layer (messages go to the HRL error callback), `HRL_VULKAN_NO_RAYTRACING=1` disables hardware ray tracing, `HRL_VULKAN_THREADS=n` sets the number of threads used to prepare a frame, `HRL_VULKAN_PIPELINE_CACHE=file` keeps compiled pipelines between runs (also `HRL_Vulkan_SetPipelineCachePath`). Diagnostics: `HRL_Vulkan_GetSceneStats`, `HRL_Vulkan_GetMemoryUsage`.
 
 Build and run the example:
 
@@ -257,6 +262,42 @@ Pass `HRL_True` to render directly to the screen, or `HRL_False` to render into 
 ```c
 void HRL_DeleteScene(HRL_id sceneid);
 ```
+
+---
+
+### Landscapes, foliage \& grass (Vulkan)
+
+```c
+// 1 x 1 km terrain from float heights (metres, any grid size)
+HRL_id land = HRL_CreateLandscapeFromHeights(scene, heights, 1025, 1025);
+HRL_SetLandscapeSize(land, 1000.0f, 1000.0f);
+HRL_SetLandscapeMaterial(land, groundMaterial);
+
+// a foliage kind: one or more parts (trunk, leaves...), each with a material
+HRL_id tree = HRL_CreateFoliage(scene);
+HRL_AddFoliageMesh(tree, trunk, trunkCount, trunkIdx, trunkIdxCount, bark);
+HRL_AddFoliageMesh(tree, leaves, leafCount, leafIdx, leafIdxCount, leafMaterial); // alpha tested
+
+HRL_FoliageScatter s = HRL_DefaultFoliageScatter();
+s.density = 0.002f;                       // instances per square unit
+HRL_ScatterFoliage(tree, land, &s);       // whole landscape (or a 3D mesh)
+HRL_PaintFoliage(tree, land, x, z, 10.0f, &s); // brush
+HRL_EraseFoliage(tree, x, z, 5.0f);
+
+HRL_SetWind(scene, 1.0f, 0.3f, 0.6f, 0.5f);           // direction, strength, gusts
+HRL_SetFoliageInteractor(scene, 0, px, py, pz, 1.0f); // the player bends plants
+
+HRL_id grass = HRL_CreateGrass(land);     // procedural blades around the camera
+HRL_SetGrassDensity(grass, 40.0f);
+```
+
+Instances are stored in 32 m cells on the GPU; culling (frustum + occlusion),
+LOD selection with dithered cross-fades and the switch to octahedral impostors
+(baked automatically) are done in compute shaders, so the CPU cost does not
+depend on the instance count. With ray traced shadows, foliage closer than
+the impostor distance (100 m at most) is part of the ray traced scene, leaves
+alpha tested. Explicit placement: `HRL_AddFoliageInstances` (position, pitch / yaw / roll
+in degrees, scale). See `examples/vulkan_nature`.
 
 ---
 

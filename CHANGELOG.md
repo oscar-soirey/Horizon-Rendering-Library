@@ -5,7 +5,7 @@
 ### Changed (breaking for `HRL_VULKAN`)
 
 - `HRL_VULKAN` is now a **native Vulkan 1.3 renderer** (`src/backend/vulkan/`). The OpenGL-on-Vulkan layer (`vkgl`) and the copies of the OpenGL renderer compiled over it are removed.
-- The native backend covers 3D only for now: static meshes, LOD, PBR materials, lights, shadows, image based lighting, sky, fog, tone mapping, picking, screenshots, debug primitives. Sprites, widgets, VFX, voxels, skeletal meshes, landscapes, post-process materials, the OpenGL GI methods and `HRL_CreateShader` report `HRL_INVALID_BACKEND_OPERATION` (warning, once per feature) on Vulkan. Projects that need them stay on `HRL_OPENGL_33` for the moment. See the feature table in the README.
+- The native backend covers 3D only for now: static meshes, LOD, PBR materials, lights, shadows, image based lighting, sky, fog, tone mapping, picking, screenshots, debug primitives. Sprites, widgets, VFX, voxels, skeletal meshes, landscapes, post-process materials, the OpenGL GI methods and `HRL_CreateShader` report `HRL_INVALID_BACKEND_OPERATION` (warning, once per feature) on Vulkan. Projects that need them stay on `HRL_OPENGL_33` for the moment. See the feature table in the README (skeletal meshes and landscapes were added since, see below).
 - Vulkan requires a Vulkan 1.3 driver. Shaders are compiled to SPIR-V when HRL is built; nothing is compiled at run time and `glslangValidator` is no longer needed on the user's machine.
 - CMake: `HRL_ENABLE_VULKAN` (ON by default) replaces `COMPILE_VULKAN` (still accepted). CMake 3.20 is enough. The hard coded Vulkan SDK path is gone (`VULKAN_SDK` environment variable or `-DHRL_VULKAN_SDK=`). New options `HRL_BUILD_STATIC`, `HRL_BUILD_EXAMPLES`, `HRL_BUILD_TESTS`.
 
@@ -32,6 +32,27 @@
 - Frame preparation (LOD selection, culling for the camera and each shadow view) on worker threads (`HRL_VULKAN_THREADS`).
 - `HRL_Vulkan_GetMemoryUsage` (GPU memory used / budget, `VK_EXT_memory_budget` when available).
 - The device now requires the `independentBlend` feature.
+
+### Added (landscapes, foliage, GPU driven rendering)
+
+- Vulkan landscapes: CDLOD (quadtree, morphing, no cracks), 32-bit float heights, per pixel normals, ray traced shadows. New functions `HRL_CreateLandscapeFromHeights`, `HRL_SetLandscapeHeights`, `HRL_UpdateLandscapeHeights` (rectangle), `HRL_GetLandscapeHeightsSize`, `HRL_GetLandscapeHeightAt`, `HRL_GetLandscapeNormalAt`, `HRL_SetLandscapeLODDistance`. Landscapes can be picked (`HRL_LANDSCAPE`).
+- Foliage (Vulkan): `HRL_CreateFoliage`, `HRL_AddFoliageMesh` (several parts, one material each), `HRL_AddFoliageInstances`, `HRL_ScatterFoliage` (on a landscape or a 3D mesh: density, scale, slope, height, alignment, spacing), `HRL_PaintFoliage`, `HRL_EraseFoliage`, `HRL_ClearFoliage`, `HRL_GetFoliageInstances`, draw / LOD / impostor distances, shadows, wind response. Culled and LOD-selected on the GPU with dithered cross-fades, octahedral impostors baked automatically, wind (`HRL_SetWind`) and interaction (`HRL_SetFoliageInteractor`), ray traced shadows alpha tested up to the impostor distance (100 m at most). Picking returns `HRL_FOLIAGE`. `HRL_Vulkan_GetFoliageStats`.
+- Procedural grass (Vulkan): `HRL_CreateGrass` on a landscape, density, blade size, colours, distance, maximum slope, mask texture, shadows. Generated on the GPU, no per-blade memory.
+- `HRL_CreateTextureFromPixels` (RGBA8 from memory).
+- `HRL_Vulkan_SetOcclusionCulling` / `HRL_Vulkan_GetOcclusionCulling`.
+- Example `hrl_vulkan_nature`, test `vulkan_nature` (with and without ray tracing).
+
+### Changed (performance)
+
+- Vulkan meshes are culled and LOD-selected on the GPU (compute), with two-phase Hi-Z occlusion culling, and drawn with `vkCmdDrawIndexedIndirectCount`. The device now requires the `drawIndirectCount` feature (all Vulkan 1.3 desktop GPUs of the supported range have it).
+- The scene data cache is event driven (mesh list revision, list of moved meshes) instead of comparing every mesh each frame. `hrl_bench_scene`, 20 000 meshes: `HRL_EndFrame` CPU time 1.5 ms → 0.09 ms; 1 000 000 foliage instances: 0.17 ms per frame, 0.31 ms while painting every frame (lavapipe, x86-64).
+- `HRL_GetMeshLODLevel` on Vulkan reports the LOD chosen by the GPU two frames earlier.
+
+### Limitations
+
+- The OpenGL 3.3 backend does not render foliage and grass, and only uses 8-bit heightmap landscapes (float heights are ignored there).
+- `HRL_GetLandscapeHeightAt` ignores the pitch and roll of the landscape.
+- Foliage beyond 100 m and grass are not in the ray traced scene (grass shadows come from the cascades).
 
 ### Architecture
 

@@ -23,15 +23,22 @@ lighting, sky, fog, ACES tone mapping, LOD, picking, screenshots, debug
 primitives, off-screen rendering, tests, example. Architecture: frontend split,
 frame graph, scene data cache, backend isolation (see `ARCHITECTURE.md`).
 
+Then: skeletal meshes, translucency, alpha tested shadows, bloom, pipeline
+cache; GPU driven culling and LOD with two-phase Hi-Z occlusion; CDLOD
+landscapes; foliage (GPU culled instances, LOD cross-fades, impostors, wind,
+interaction, scatter / paint / erase, ray traced alpha tested shadows);
+procedural grass.
+
 ## Next steps
 
-1. **3D parity**: skeletal meshes (compute skinning into the geometry pool, so
-   shadows and ray tracing see the skinned mesh), landscapes, alpha blended
-   materials, shadows of alpha tested geometry.
+1. **3D parity** (done: skeletal meshes, translucency, alpha tested
+   shadows, landscapes). Remaining: point light shadow maps for GPUs without
+   ray tracing, acceleration structures of skinned meshes (refit), landscape
+   layers (splat maps) and holes.
 2. **Custom materials**: surface functions (see `ARCHITECTURE.md`), which needs
    a run time GLSL → SPIR-V compiler linked into HRL (glslang) and a pipeline cache.
 3. **Temporal foundation**: thin G-buffer (normal, roughness, motion vectors),
-   depth pre-pass, TAA, then bloom and the post-process material chain.
+   depth pre-pass, TAA, then the custom post-process material chain (bloom is done).
    MSAA is not planned on Vulkan.
 4. **Lighting scale**: clustered light lists (forward+), point light shadow
    maps for GPUs without ray tracing, SSAO, SSR.
@@ -42,8 +49,11 @@ frame graph, scene data cache, backend isolation (see `ARCHITECTURE.md`).
    cache with change tracking, Vulkan backend isolated from the frontend state.
    Remaining: objects are still owned through raw pointers created and
    deleted by the frontend; the OpenGL backends still read the frontend context.
-7. **GPU driven**: culling and LOD selection in compute, Hi-Z occlusion,
-   draw-indirect-count; packed vertex format; texture streaming with a VRAM budget.
+7. **GPU driven** (culling, LOD selection, Hi-Z occlusion, draw-indirect-count:
+   done). Remaining: packed vertex format; texture streaming driven by
+   `HRL_Vulkan_GetMemoryUsage`; dedicated transfer queue for uploads; foliage
+   in the ray traced scene beyond 100 m (impostor proxies); foliage and grass
+   in point / spot light shadow maps; grass ray traced shadows.
 8. **Frame graph** (first version done): passes, automatic barriers,
    transient pool. To add with the passes of steps 3 to 5: pass culling and
    reordering, transient aliasing inside a frame, compute passes as first
