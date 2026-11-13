@@ -53,6 +53,16 @@ if(HRL_ENABLE_VULKAN)
     endif()
 endif()
 
+# ---- Vulkan: stylized Mediterranean village -------------------------------------
+if(HRL_ENABLE_VULKAN)
+    add_executable(hrl_vulkan_village vulkan_village/main.cpp)
+    target_link_libraries(hrl_vulkan_village PRIVATE hrldll)
+    if(glfw3_FOUND)
+        target_link_libraries(hrl_vulkan_village PRIVATE glfw)
+        target_compile_definitions(hrl_vulkan_village PRIVATE HRL_EXAMPLE_HAS_GLFW)
+    endif()
+endif()
+
 # ---- Vulkan: scene editor with a Raven interface -------------------------------
 if(HRL_ENABLE_VULKAN AND NOT APPLE)
     add_subdirectory(editor)
