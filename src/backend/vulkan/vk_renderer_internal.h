@@ -53,6 +53,7 @@ struct ViewData
 	glm::mat4 pointViewProj[kMaxPointShadows * 6];
 	glm::vec4 giOrigin, giSpacing, giResolution; // probe volume (vk_gi.cpp), giResolution.w : 1 when active
 	glm::vec4 voxelLightRegion, voxelLight;       // light field of the emissive voxels (vk_voxel.cpp)
+	glm::vec4 mediaParams;                       // participating media (media.glsl, vk_render_pipeline.cpp)
 };
 struct InstanceData { glm::mat4 model, normalMatrix; glm::uvec4 ids; };
 struct MaterialData { glm::vec4 baseColor, emissive, params; glm::uvec4 tex0, tex1, flags; };
@@ -737,6 +738,9 @@ VkPipeline CustomPostPipeline(HRL_id id);
 // paramSlots vec4s, from the material (or the defaults of the shader).
 void WriteCustomParams(const CustomShader& shader, const HRL_Material* m, glm::vec4* out);
 void WriteEffectParams(const CustomShader& shader, const EffectParams& values, glm::vec4* out);
+// Automatic values of the custom post-processes (camera, sun, ...): written for the
+// parameters the shader declares and the material does not set itself.
+void WriteAutoParams(const CustomShader& shader, const EffectParams& values, const HRL_Material* m, glm::vec4* out);
 // Built-in OpenGL effect shaders (backend/common/hrl_builtin_glsl.h) compiled
 // for Vulkan with the post-process rules; null when it does not compile.
 const CustomShader* EffectShader(const char* name, const char* source);
@@ -744,6 +748,16 @@ const CustomShader* EffectShader(const char* name, const char* source);
 VkPipeline MakeMeshPipeline(const HRL_VkShaderBlob* vs, const HRL_VkShaderBlob* fs, uint32_t bucket);
 VkPipeline MakeCustomShadowPipeline(const HRL_VkShaderBlob* vs, const HRL_VkShaderBlob* fs);
 VkPipeline MakePostPipeline(const HRL_VkShaderBlob* fs);
+// Render passes (vk_render_pipeline.cpp): fullscreen.vert + `fs`, one HRL_EPassBlend per attachment.
+VkPipeline MakeFullscreenPassPipeline(const HRL_VkShaderBlob* fs, VkPipelineLayout layout,
+	const std::vector<VkFormat>& formats, const std::vector<uint32_t>& blends);
+VkPipeline MakeComputePassPipeline(const HRL_VkShaderBlob* cs, VkPipelineLayout layout);
+// Run time compiler and parameter tables of vk_custom.cpp, for the render pass shaders.
+bool CompilePassGlsl(bool compute, const std::string& source, std::vector<uint32_t>& spirv, std::string& log);
+void ExtractPassParams(const std::string& src, std::string& code, std::vector<CustomParam>& params);
+uint32_t LayoutPassParams(std::vector<CustomParam>& params);
+std::string PassParamGlobals(const std::vector<CustomParam>& params);
+std::string StripGlslComments(const std::string& src);
 
 // ---- vk_vfx.cpp --------------------------------------------------------------
 struct Camera;
@@ -813,6 +827,48 @@ struct EffectView
 // the HDR image. Returns the image that holds the result.
 FrameGraph::Handle AddScreenEffects(FrameGraph& graph, SceneGPU& gpu, const HRL_SceneFrame& frame,
 	const std::vector<EffectView>& views, FrameGraph::Handle color, FrameGraph::Handle depth);
+
+// ---- vk_render_pipeline.cpp ---------------------------------------------------
+// Render pass shaders (HRL_CreateComputeShader / HRL_CreateFullscreenShader).
+bool CreatePassShader(HRL_id id, const std::string& source, bool compute);
+bool IsPassShader(HRL_id id);
+void DeletePassShader(HRL_id id);
+// Participating media of a viewport (HRL_SetViewportMediaVolume): the 3D images
+// its view set binds (placeholders when it has none) and ViewData::mediaParams.
+struct MediaBinding
+{
+	Image* integrated = nullptr;
+	Image* visibility = nullptr;
+	glm::vec4 params{1.f, 1.f, 0.f, 0.f};
+	bool active = false;
+};
+MediaBinding PrepareViewportMedia(FrameGraph& graph, const hrl_scene_t* scene, HRL_id viewportId, const HRL_Viewport* viewport,
+	uint32_t vw, uint32_t vh);
+// One viewport of the frame, as the render passes see it.
+struct PassView
+{
+	HRL_id sceneId = HRL_INVALID_ID, viewportId = HRL_INVALID_ID;
+	const HRL_Viewport* viewport = nullptr;
+	float x = 0.f, y = 0.f, w = 1.f, h = 1.f;    // rectangle in the scene image, origin top-left
+	uint32_t sceneWidth = 1, sceneHeight = 1;
+	VkDescriptorSet viewSet = VK_NULL_HANDLE;
+	glm::mat4 viewProjNoJitter{1.f};
+	glm::vec3 camera{0.f}, forward{0.f, 0.f, -1.f};
+	glm::vec2 jitter{0.f};                      // NDC offset of the anti-aliasing
+	Image* mediaIntegrated = nullptr;           // images bound by the view set (16, 17)
+	Image* mediaVisibility = nullptr;
+};
+bool HasRenderPasses(const HRL_Viewport* viewport, HRL_ERenderStage stage);
+// Records the camera of this frame (reprojection data of the next one).
+void BeginRenderPassView(const PassView& view);
+// Adds the enabled passes of `stage` of the viewport. Returns the image that
+// holds the HDR scene afterwards (a writable copy at HRL_STAGE_BEFORE_TONEMAP).
+FrameGraph::Handle AddRenderPasses(FrameGraph& graph, const HRL_SceneFrame& frame, const PassView& view, HRL_ERenderStage stage,
+	FrameGraph::Handle color, FrameGraph::Handle depth, FrameGraph::Handle shadows, FrameGraph::Handle pointShadows);
+// End of the frame of a viewport: histories flip, the camera becomes the previous one.
+void EndRenderPassFrame(HRL_id sceneId, HRL_id viewportId);
+void ReleaseUnusedRenderTargets();
+void ShutdownRenderPipeline();
 
 // ---- vk_overlay.cpp ----------------------------------------------------------
 struct OverlayView

@@ -7,6 +7,8 @@
 #extension GL_EXT_ray_query : require
 #endif
 
+#include "media.glsl"
+
 layout(set = 0, binding = 4) uniform sampler2DArrayShadow uShadowMaps;
 layout(set = 0, binding = 5) uniform samplerCube uIrradiance;
 layout(set = 0, binding = 6) uniform samplerCube uPrefiltered;
@@ -135,8 +137,10 @@ vec2 RtVertexUV(uint vertex)
 
 float TraceShadow(vec3 origin, vec3 dir, float tMax)
 {
+#ifndef HRL_COMPUTE_STAGE
 	// Helper invocations (quad padding) produce no pixel: no ray for them.
 	if (gl_HelperInvocation) return 1.0;
+#endif
 	rayQueryEXT rq;
 	rayQueryInitializeEXT(rq, uTlas, gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin, 0.0, dir, tMax);
 	// Opaque geometry is committed by the hardware; alpha tested instances
@@ -208,6 +212,7 @@ vec3 ShadeSurface(ShadedSurface s)
 
 	vec3 color = vec3(0.0);
 	vec3 ambient = vec3(0.0);
+	bool firstDirectional = true;
 	uint lightCount = uView.counts.x;
 	for (uint i = 0u; i < lightCount; ++i)
 	{
@@ -222,7 +227,12 @@ vec3 ShadeSurface(ShadedSurface s)
 		float attenuation = 1.0;
 		float dist = 1e4;
 		if (type == LIGHT_DIRECTIONAL)
+		{
 			L = normalize(-light.direction.xyz);
+			// Volumes of the participating media shadow the main directional light.
+			if (firstDirectional) attenuation = HRL_MediaVisibility(s.position);
+			firstDirectional = false;
+		}
 		else
 		{
 			vec3 toLight = light.position.xyz - s.position;
@@ -276,6 +286,8 @@ vec3 ShadeSurface(ShadedSurface s)
 			: clamp((d - uView.fogParams.x) / max(uView.fogParams.y - uView.fogParams.x, 1e-4), 0.0, 1.0);
 		color = mix(color, uView.fogColor.rgb, f);
 	}
+	// Participating media of the viewport (froxels written by render passes).
+	if (HRL_MediaActive() && debugView == 0u) color = HRL_ApplyMedia(color, s.position);
 	return color;
 }
 

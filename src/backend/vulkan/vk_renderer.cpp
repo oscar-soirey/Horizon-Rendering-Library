@@ -660,6 +660,7 @@ void RendererShutdown()
 
 	for (auto& [id, s] : R.scenes) DestroySceneResources(s);
 	R.scenes.clear();
+	ShutdownRenderPipeline();
 	DestroyAllLandscapes();
 	DestroyAllFoliage();
 	DestroyAllGrass();
@@ -838,7 +839,9 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 	hdrDesc.format = kHdrFormat;
 	hdrDesc.width = gpu.width;
 	hdrDesc.height = gpu.height;
-	hdrDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	// Storage: compute render passes may write the scene (hrl_SceneImage).
+	hdrDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+		VK_IMAGE_USAGE_STORAGE_BIT;
 	const FrameGraph::Handle hdr = graph.CreateTransient(hdrDesc, "scene hdr");
 	if (!graph.GetImage(hdr).handle) return;
 	const FrameGraph::Handle ids = graph.Import(gpu.ids);
@@ -981,6 +984,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 	uint32_t translucentDraws = 0;
 	std::vector<OverlayView> overlayViews;
 	std::vector<EffectView> effectViews;
+	std::vector<PassView> passViews; // render passes of the stages after the viewport loop
 	// Temporal anti-aliasing: sub-pixel jitter of every camera, then a resolve per viewport.
 	const bool taa = R.antiAliasing == AntiAliasing::Taa;
 	struct TaaView { float x, y, w, h; glm::mat4 reproject; bool history; };
@@ -1016,6 +1020,12 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		const VoxelLightField voxelLight = scene->voxel_world ? AddVoxelLightField(graph, frame.sceneId, scene, viewport) : VoxelLightField();
 		view.voxelLightRegion = voxelLight.region;
 		view.voxelLight = glm::vec4(voxelLight.falloff, voxelLight.active ? 1.f : 0.f, 0.f, 0.f);
+		// Participating media written by the render passes of the viewport (HRL_SetViewportMediaVolume).
+		const MediaBinding media = PrepareViewportMedia(graph, scene, viewports[vi].id, viewport, (uint32_t)vw, (uint32_t)vh);
+		view.mediaParams = media.params;
+		const FrameGraph::Handle mediaIntegrated = media.integrated ? graph.Import(*media.integrated) : 0;
+		const FrameGraph::Handle mediaVisibility = media.visibility ? graph.Import(*media.visibility) : 0;
+		const bool hasMedia = media.integrated && media.visibility;
 		view.giOrigin = gi.origin;
 		view.giSpacing = gi.spacing;
 		view.giResolution = gi.resolution;
@@ -1074,7 +1084,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			{R.linearClamp, hasEnvironment ? env.irradiance.view : R.dummyCube.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 			{R.linearClamp, hasEnvironment ? env.prefiltered.view : R.dummyCube.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
 			{R.linearClamp, R.brdfLut.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-		VkWriteDescriptorSet writes[16]{};
+		VkWriteDescriptorSet writes[20]{};
 		for (uint32_t i = 0; i < 8; ++i)
 		{
 			writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -1148,11 +1158,49 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			writes[writeCount].pBufferInfo = &extraBuffers[e];
 			++writeCount;
 		}
+		// Participating media (media.glsl): placeholders when the viewport has none.
+		VkDescriptorImageInfo mediaInfos[2]{};
+		if (hasMedia)
+		{
+			mediaInfos[0] = {R.linearClamp, media.integrated->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+			mediaInfos[1] = {R.linearClamp, media.visibility->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+			for (uint32_t e = 0; e < 2; ++e)
+			{
+				writes[writeCount] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+				writes[writeCount].dstSet = viewSet;
+				writes[writeCount].dstBinding = 16 + e;
+				writes[writeCount].descriptorCount = 1;
+				writes[writeCount].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				writes[writeCount].pImageInfo = &mediaInfos[e];
+				++writeCount;
+			}
+		}
 		vkUpdateDescriptorSets(dev.device, writeCount, writes, 0, nullptr);
 		return viewSet;
 		};
 		const VkDescriptorSet viewSet = makeViewSet({gpu.instances.handle, 0, VK_WHOLE_SIZE});
 		if (!viewSet) continue;
+
+		// The viewport as the render passes see it (vk_render_pipeline.cpp).
+		PassView passView;
+		passView.sceneId = frame.sceneId;
+		passView.viewportId = viewports[vi].id;
+		passView.viewport = viewport;
+		passView.x = vx; passView.y = vy; passView.w = vw; passView.h = vh;
+		passView.sceneWidth = gpu.width;
+		passView.sceneHeight = gpu.height;
+		passView.viewSet = viewSet;
+		passView.viewProjNoJitter = cam.proj * cam.view;
+		passView.camera = cam.position;
+		passView.forward = -glm::vec3(cam.view[0][2], cam.view[1][2], cam.view[2][2]);
+		passView.jitter = glm::vec2(jitter.x * 2.f / vw, jitter.y * 2.f / vh);
+		passView.mediaIntegrated = hasMedia ? media.integrated : nullptr;
+		passView.mediaVisibility = hasMedia ? media.visibility : nullptr;
+		BeginRenderPassView(passView);
+		auto useMedia = [=](FrameGraph::Pass& pass)
+		{
+			if (hasMedia) pass.Use(mediaIntegrated, Access::Sampled).Use(mediaVisibility, Access::Sampled);
+		};
 		if (vi == 0) PrepareImpostors(scene, data, frame, graph, viewSet);
 
 		// ---- Landscapes: LOD follows this camera in every view of the viewport ----
@@ -1255,6 +1303,10 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				sv.point ? R.pointShadowLayers[sv.layer] : R.shadowLayers[sv.layer]);
 		}
 
+		// ---- Render passes before the surfaces (lights and shadows are ready) ----
+		if (HasRenderPasses(viewport, HRL_STAGE_BEFORE_OPAQUE))
+			AddRenderPasses(graph, frame, passView, HRL_STAGE_BEFORE_OPAQUE, hdr, depth, shadows, pointShadows);
+
 		// ---- Translucent meshes: few, sorted back to front on the CPU ----
 		const IndirectList translucent = BuildTranslucent(data, cam, request.frustum, viewport, vh);
 		translucentDraws += translucent.total;
@@ -1284,14 +1336,10 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 		VFXFrame vfx = PrepareVFX(scene, data, frame, cam);
 		if (!vfx.meshes.empty())
 			vfx.meshViewSet = makeViewSet({vfx.meshInstances.buffer, vfx.meshInstances.offset, vfx.meshInstances.size});
-		auto drawEnd = [=](VkCommandBuffer c)
+		// Render passes after the opaque surfaces: the translucent ones get a pass of their own, after them.
+		const bool splitTranslucent = HasRenderPasses(viewport, HRL_STAGE_AFTER_OPAQUE);
+		auto drawTranslucent = [=](VkCommandBuffer c)
 		{
-			if (drawSky)
-			{
-				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.skyPipeline);
-				vkCmdPushConstants(c, R.sceneLayout, VF, 0, sizeof(sky), &sky);
-				vkCmdDraw(c, 3, 1, 0, 0);
-			}
 			// Translucent surfaces blend over the opaque scene and the sky.
 			for (uint32_t b = BucketTranslucent; b < BucketCount; ++b)
 			{
@@ -1301,6 +1349,16 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 			}
 			DrawCustom(c, custom.translucent);
 			DrawVFX(c, vfx, viewSet);
+		};
+		auto drawEnd = [=](VkCommandBuffer c)
+		{
+			if (drawSky)
+			{
+				vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, R.skyPipeline);
+				vkCmdPushConstants(c, R.sceneLayout, VF, 0, sizeof(sky), &sky);
+				vkCmdDraw(c, 3, 1, 0, 0);
+			}
+			if (!splitTranslucent) drawTranslucent(c);
 		};
 
 		const std::vector<LandscapeView> visibleLandscapes = selectLandscapes(request.frustum);
@@ -1352,6 +1410,7 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				drawEnd(c);
 			}
 		});
+		useMedia(forwardPass);
 		forwardPass.Use(shadows, Access::Sampled).Use(pointShadows, Access::Sampled)
 		  .Color(hdr, load)
 		  .Color(ids, load, noObject)
@@ -1385,11 +1444,30 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 				SetGeometryState(c, viewSet);
 				drawEnd(c);
 			});
+			useMedia(phase2Pass);
 			phase2Pass.Use(shadows, Access::Sampled).Use(pointShadows, Access::Sampled)
 			  .Color(hdr, VK_ATTACHMENT_LOAD_OP_LOAD)
 			  .Color(ids, VK_ATTACHMENT_LOAD_OP_LOAD)
 			  .Depth(depth, VK_ATTACHMENT_LOAD_OP_LOAD);
 			if (voxelLight.active) phase2Pass.Use(voxelLight.image, Access::Sampled);
+		}
+
+		// ---- Render passes after the opaque surfaces, then the translucent ones ----
+		if (splitTranslucent)
+		{
+			AddRenderPasses(graph, frame, passView, HRL_STAGE_AFTER_OPAQUE, hdr, depth, shadows, pointShadows);
+			auto& translucentPass = graph.AddPass("translucent", [=](VkCommandBuffer c)
+			{
+				SetViewport(c, vx, vy, vw, vh, true);
+				SetGeometryState(c, viewSet);
+				drawTranslucent(c);
+			});
+			useMedia(translucentPass);
+			translucentPass.Use(shadows, Access::Sampled).Use(pointShadows, Access::Sampled)
+			  .Color(hdr, VK_ATTACHMENT_LOAD_OP_LOAD)
+			  .Color(ids, VK_ATTACHMENT_LOAD_OP_LOAD)
+			  .Depth(depth, VK_ATTACHMENT_LOAD_OP_LOAD);
+			if (voxelLight.active) translucentPass.Use(voxelLight.image, Access::Sampled);
 		}
 
 		// ---- Screen space displacement: over a copy of the scene of this viewport ----
@@ -1453,6 +1531,11 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 					  .Depth(depth, VK_ATTACHMENT_LOAD_OP_LOAD);
 			}
 		}
+
+		// ---- Render passes after the translucent surfaces ----
+		if (HasRenderPasses(viewport, HRL_STAGE_AFTER_TRANSLUCENT))
+			AddRenderPasses(graph, frame, passView, HRL_STAGE_AFTER_TRANSLUCENT, hdr, depth, shadows, pointShadows);
+		passViews.push_back(passView);
 
 		lastViewProj = view.viewProj;
 		lastRect[0] = vx; lastRect[1] = vy; lastRect[2] = vw; lastRect[3] = vh;
@@ -1523,6 +1606,13 @@ void RendererRenderScene(const HRL_SceneFrame& frame)
 
 	// Screen space effects and custom post-processes, in HDR, before the tone mapping.
 	if (cleared) resolved = AddScreenEffects(graph, gpu, frame, effectViews, resolved, depth);
+	// Render passes on the final HDR image, before bloom and tone mapping.
+	for (const PassView& pv : passViews)
+	{
+		if (cleared && HasRenderPasses(pv.viewport, HRL_STAGE_BEFORE_TONEMAP))
+			resolved = AddRenderPasses(graph, frame, pv, HRL_STAGE_BEFORE_TONEMAP, resolved, depth, shadows, pointShadows);
+		EndRenderPassFrame(pv.sceneId, pv.viewportId);
+	}
 
 	// Tone mapping into the LDR scene image (FXAA: into a temporary image first).
 	const PostSettings post = ScenePostSettings(frame);
@@ -1673,6 +1763,7 @@ void RendererEndFrame()
 	ReleaseUnusedFoliage();
 	ReleaseUnusedGrass();
 	ReleaseUnusedVoxels();
+	ReleaseUnusedRenderTargets();
 	dev.EndFrame();
 }
 

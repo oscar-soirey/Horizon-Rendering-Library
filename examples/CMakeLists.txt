@@ -63,6 +63,16 @@ if(HRL_ENABLE_VULKAN)
     endif()
 endif()
 
+# ---- Vulkan: Heaven, the programmable render pipeline (src/extras) -------------------
+if(HRL_ENABLE_VULKAN)
+    add_executable(hrl_vulkan_heaven vulkan_heaven/main.cpp)
+    target_link_libraries(hrl_vulkan_heaven PRIVATE hrldll)
+    if(glfw3_FOUND)
+        target_link_libraries(hrl_vulkan_heaven PRIVATE glfw)
+        target_compile_definitions(hrl_vulkan_heaven PRIVATE HRL_EXAMPLE_HAS_GLFW)
+    endif()
+endif()
+
 # ---- Vulkan: scene editor with a Raven interface -------------------------------
 if(HRL_ENABLE_VULKAN AND NOT APPLE)
     add_subdirectory(editor)

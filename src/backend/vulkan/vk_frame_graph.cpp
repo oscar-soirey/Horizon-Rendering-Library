@@ -11,7 +11,7 @@ constexpr uint32_t kMaxIdleFrames = 8;
 
 bool SameDesc(const ImageDesc& a, const ImageDesc& b)
 {
-	return a.format == b.format && a.width == b.width && a.height == b.height && a.mips == b.mips &&
+	return a.format == b.format && a.width == b.width && a.height == b.height && a.depth == b.depth && a.mips == b.mips &&
 		a.layers == b.layers && a.usage == b.usage && a.cube == b.cube && a.arrayView == b.arrayView &&
 		a.mutableFormat == b.mutableFormat;
 }
@@ -151,7 +151,12 @@ void FrameGraph::Execute(VkCommandBuffer cmd)
 
 		device_.BeginLabel(cmd, pass.name);
 		for (const auto& u : pass.uses)
-			device_.Transition(cmd, *images_[u.image].image, LayoutFor(u.access));
+		{
+			Image& image = *images_[u.image].image;
+			// Storage after storage: same layout, but the earlier writes must be visible.
+			if (u.access == Access::Storage && image.layout == VK_IMAGE_LAYOUT_GENERAL) device_.StorageBarrier(cmd, image);
+			else device_.Transition(cmd, image, LayoutFor(u.access));
+		}
 		for (const auto& a : pass.colors)
 			device_.Transition(cmd, *images_[a.image].image, LayoutFor(Access::ColorAttachment));
 		if (pass.hasDepth)

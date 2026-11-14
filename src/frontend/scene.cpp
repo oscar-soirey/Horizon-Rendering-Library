@@ -50,6 +50,9 @@ void HRL_DeleteScene(HRL_id _sceneid)
 	for (auto id : vfx_system_ids) HRL_DeleteVFXSystem(id);
 	for (auto id : viewport_ids)  HRL_DeleteViewport(id);
 	for (auto id : camera_ids)    HRL_DeleteCamera(id);
+	std::vector<HRL_id> target_ids;
+	for (const auto& [id, target] : it->second->render_targets) { (void)target; target_ids.push_back(id); }
+	for (auto id : target_ids)    HRL_DeleteRenderTarget(id);
 
 	delete it->second->voxel_world;
 	it->second->voxel_world = nullptr;

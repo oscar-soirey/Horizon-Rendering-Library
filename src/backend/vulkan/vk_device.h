@@ -45,6 +45,7 @@ struct Image
 	VkImageView view = VK_NULL_HANDLE;
 	VkFormat format = VK_FORMAT_UNDEFINED;
 	VkExtent2D extent{0, 0};
+	uint32_t depth = 1;   // 3D images: number of slices (> 1 : VK_IMAGE_TYPE_3D)
 	uint32_t mips = 1;
 	uint32_t layers = 1;
 	VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -56,6 +57,7 @@ struct ImageDesc
 {
 	VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 	uint32_t width = 1, height = 1;
+	uint32_t depth = 1;         // > 1 : 3D image (one layer, no cube)
 	uint32_t mips = 1;
 	uint32_t layers = 1;
 	VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -145,6 +147,9 @@ public:
 		uint32_t baseMip, uint32_t mipCount, uint32_t baseLayer, uint32_t layerCount);
 	// Layout transition with the matching synchronization2 barrier.
 	void Transition(VkCommandBuffer cmd, Image& image, VkImageLayout newLayout);
+	// Image kept in VK_IMAGE_LAYOUT_GENERAL between two storage uses: waits for
+	// the writes of the previous compute work before the next one reads or writes it.
+	void StorageBarrier(VkCommandBuffer cmd, Image& image);
 	// Uploads tightly packed pixels into mip 0 / layer and leaves the image in TRANSFER_DST.
 	bool UploadToImage(Image& image, uint32_t layer, const void* pixels, VkDeviceSize size);
 	// Builds the mip chain with linear blits; leaves the image in SHADER_READ_ONLY.

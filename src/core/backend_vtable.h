@@ -101,6 +101,11 @@ typedef struct {
 	//When set, it is called instead of RHI_UpdateLights + RHI_RenderScene +
 	//RHI_DrawDebug + RHI_TakeScreenshot: the frame data arrives in one structure.
 	void(*RHI_RenderSceneFrame)(const HRL_SceneFrame& frame);
+
+	//Programmable render pipeline (Vulkan): compiles a render pass shader under
+	//`id` (compute != 0: compute shader, otherwise fullscreen fragment shader).
+	//Null when the backend has none.
+	int(*RHI_CreatePassShader)(HRL_id id, const char* source, size_t size, int compute);
 }HRL_vtable;
 
 #endif

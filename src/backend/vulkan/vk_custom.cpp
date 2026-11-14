@@ -669,34 +669,57 @@ void WriteCustomParams(const CustomShader& shader, const HRL_Material* m, glm::v
 	}
 }
 
+namespace
+{
+// Writes one effect value (floats in the OpenGL layout) into the parameter slots of `p`.
+void PutEffectValue(const CustomParam& p, const std::vector<float>& f, glm::vec4* out)
+{
+	const uint32_t count = std::max(p.arraySize, 1u);
+	const uint32_t stride = p.slots / count;
+	if (p.kind == CustomParam::Mat3 || p.kind == CustomParam::Mat4)
+	{
+		const uint32_t n = p.kind == CustomParam::Mat4 ? 4u : 3u;
+		for (uint32_t e = 0; e < count; ++e)
+			for (uint32_t c = 0; c < n; ++c)
+				for (uint32_t r = 0; r < n; ++r)
+				{
+					const size_t k = (size_t)e * n * n + c * n + r;
+					if (k < f.size()) out[p.first + e * stride + c][(int)r] = f[k];
+				}
+		return;
+	}
+	for (uint32_t e = 0; e < count; ++e)
+		for (uint32_t c = 0; c < p.components && c < 4; ++c)
+		{
+			const size_t k = (size_t)e * p.components + c;
+			if (k < f.size()) out[p.first + e * stride][(int)c] = f[k];
+		}
+}
+
+bool MaterialSets(const HRL_Material* m, const std::string& name)
+{
+	return m && (m->floatParams_.count(name) || m->vec2Params_.count(name) || m->vec3Params_.count(name) ||
+		m->vec4Params_.count(name) || m->intParams_.count(name));
+}
+} // namespace
+
 void WriteEffectParams(const CustomShader& shader, const EffectParams& values, glm::vec4* out)
 {
 	for (const CustomParam& p : shader.params)
 	{
 		for (uint32_t i = 0; i < p.slots; ++i) out[p.first + i] = i == 0 ? p.value : glm::vec4(0.f);
 		auto it = values.find(p.name);
-		if (it == values.end()) continue;
-		const std::vector<float>& f = it->second;
-		const uint32_t count = std::max(p.arraySize, 1u);
-		const uint32_t stride = p.slots / count;
-		if (p.kind == CustomParam::Mat3 || p.kind == CustomParam::Mat4)
-		{
-			const uint32_t n = p.kind == CustomParam::Mat4 ? 4u : 3u;
-			for (uint32_t e = 0; e < count; ++e)
-				for (uint32_t c = 0; c < n; ++c)
-					for (uint32_t r = 0; r < n; ++r)
-					{
-						const size_t k = (size_t)e * n * n + c * n + r;
-						if (k < f.size()) out[p.first + e * stride + c][(int)r] = f[k];
-					}
-			continue;
-		}
-		for (uint32_t e = 0; e < count; ++e)
-			for (uint32_t c = 0; c < p.components && c < 4; ++c)
-			{
-				const size_t k = (size_t)e * p.components + c;
-				if (k < f.size()) out[p.first + e * stride][(int)c] = f[k];
-			}
+		if (it != values.end()) PutEffectValue(p, it->second, out);
+	}
+}
+
+void WriteAutoParams(const CustomShader& shader, const EffectParams& values, const HRL_Material* m, glm::vec4* out)
+{
+	for (const CustomParam& p : shader.params)
+	{
+		if (p.kind == CustomParam::Sampler || MaterialSets(m, p.name)) continue;
+		auto it = values.find(p.name);
+		if (it != values.end()) PutEffectValue(p, it->second, out);
 	}
 }
 
@@ -719,4 +742,27 @@ const CustomShader* EffectShader(const char* name, const char* source)
 	R.customShaders[id] = std::move(shader);
 	return FindCustomShader(id);
 }
+// ---------------------------------------------------------------------------
+// Render pass shaders (vk_render_pipeline.cpp)
+// ---------------------------------------------------------------------------
+bool CompilePassGlsl(bool compute, const std::string& source, std::vector<uint32_t>& spirv, std::string& log)
+{
+#ifndef HRL_VK_RUNTIME_SHADERS
+	(void)compute; (void)source; (void)spirv;
+	log = "no run time compiler (HRL built without glslang)";
+	return false;
+#else
+	const std::string empty;
+	return Compile(compute ? EShLangCompute : EShLangFragment, source, {}, empty, spirv, log);
+#endif
+}
+
+void ExtractPassParams(const std::string& src, std::string& code, std::vector<CustomParam>& params)
+{
+	ExtractUniforms(src, code, params, {}, true);
+}
+
+uint32_t LayoutPassParams(std::vector<CustomParam>& params) { return LayoutParams(params, 0); }
+std::string PassParamGlobals(const std::vector<CustomParam>& params) { return ParamGlobals(params); }
+std::string StripGlslComments(const std::string& src) { return StripComments(src); }
 } // namespace hrlvk

@@ -49,6 +49,10 @@ bool GetSceneStats(HRL_id scene, HRL_VulkanSceneStats& stats);
 bool CreateCustomShader(HRL_id id, const std::string& vert, const std::string& frag);
 void DeleteCustomShader(HRL_id id);
 bool IsCustomShader(HRL_id id);
+// Render pass shaders (programmable render pipeline, vk_render_pipeline.cpp).
+bool CreatePassShader(HRL_id id, const std::string& source, bool compute);
+bool IsPassShader(HRL_id id);
+void DeletePassShader(HRL_id id);
 
 // File the pipeline cache is loaded from / saved to (null or empty: none).
 void SetPipelineCachePath(const char* path);

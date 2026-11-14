@@ -132,6 +132,8 @@ struct PipelineDesc
 	bool additiveAlpha = false; // with blend: destination + source * alpha (particles)
 	bool multiply = false; // with blend: destination * source (particles)
 	bool writeSecond = true; // false: the second attachment (object ids) is not written
+	// Render passes: HRL_EPassBlend of each colour attachment (overrides `blend`).
+	std::vector<uint32_t> passBlends;
 };
 
 VkPipeline MakeGraphicsPipeline(const PipelineDesc& d)
@@ -239,6 +241,31 @@ VkPipeline MakeGraphicsPipeline(const PipelineDesc& d)
 		{
 			blends[0].srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
 			blends[0].dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+		}
+	}
+	for (size_t i = 0; i < d.passBlends.size() && i < blends.size(); ++i)
+	{
+		VkPipelineColorBlendAttachmentState& b = blends[i];
+		const uint32_t mode = d.passBlends[i];
+		if (mode == HRL_PASS_BLEND_NONE) { b.blendEnable = VK_FALSE; continue; }
+		b.blendEnable = VK_TRUE;
+		b.colorBlendOp = b.alphaBlendOp = VK_BLEND_OP_ADD;
+		b.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+		b.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+		if (mode == HRL_PASS_BLEND_ALPHA)
+		{
+			b.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+			b.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+		}
+		else if (mode == HRL_PASS_BLEND_ADDITIVE)
+		{
+			b.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+			b.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+		}
+		else // premultiplied: target * a + rgb
+		{
+			b.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+			b.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
 		}
 	}
 	if (!d.writeSecond && blends.size() > 1) blends[1].colorWriteMask = 0;
@@ -380,11 +407,30 @@ VkPipeline MakePostPipeline(const HRL_VkShaderBlob* fs)
 	return MakeGraphicsPipeline(d);
 }
 
+VkPipeline MakeFullscreenPassPipeline(const HRL_VkShaderBlob* fs, VkPipelineLayout layout,
+	const std::vector<VkFormat>& formats, const std::vector<uint32_t>& blends)
+{
+	PipelineDesc d;
+	d.vs = &hrl_vk_fullscreen_vert;
+	d.fs = fs;
+	d.layout = layout;
+	d.colorFormats = formats;
+	d.passBlends = blends;
+	return MakeGraphicsPipeline(d);
+}
+
+VkPipeline MakeComputePassPipeline(const HRL_VkShaderBlob* cs, VkPipelineLayout layout)
+{
+	return MakeComputePipeline(*cs, layout);
+}
+
 bool CreatePipelines()
 {
 	Device& dev = Dev();
 	const VkShaderStageFlags VF = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
+	// The view set is also bound by the compute render passes (vk_render_pipeline.cpp),
+	// which read the lights, their shadows and the participating media.
 	std::vector<VkDescriptorSetLayoutBinding> view = {
 		{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VF, nullptr},
 		{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VF, nullptr},
@@ -397,13 +443,16 @@ bool CreatePipelines()
 		{12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // point light shadows
 		{13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VF, nullptr}, // parameters of the custom materials
 		{14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // global illumination probes
-		{15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}}; // voxel light field
+		{15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // voxel light field
+		{16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // participating media (media.glsl)
+		{17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}}; // visibility of the main light
 	if (dev.caps.rayQuery)
 	{
 		view.push_back({8, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
 		// Vertices, indices and table of the alpha tested shadow casters.
 		for (uint32_t b = 9; b <= 11; ++b) view.push_back({b, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
 	}
+	for (VkDescriptorSetLayoutBinding& b : view) b.stageFlags |= VK_SHADER_STAGE_COMPUTE_BIT;
 	R.viewLayout = MakeSetLayout(view);
 
 	const VkDescriptorBindingFlags bindlessFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |

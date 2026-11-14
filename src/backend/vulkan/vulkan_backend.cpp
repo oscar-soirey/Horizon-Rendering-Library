@@ -153,9 +153,15 @@ HRL_id VK_CreateShader(const char* vert, size_t vertSize, const char* frag, size
 int VK_IsValidShader(HRL_id shader)
 {
 	return (shader == HRL_MESH_3D_SHADER || shader == HRL_SKINNED_3D_MESH_SHADER || shader == HRL_DEFAULT_POST_PROCESS_SHADER ||
-		shader == HRL_SPRITE_SHADER || hrlvk::IsCustomShader(shader)) ? HRL_TRUE : HRL_FALSE;
+		shader == HRL_SPRITE_SHADER || hrlvk::IsCustomShader(shader) || hrlvk::IsPassShader(shader)) ? HRL_TRUE : HRL_FALSE;
 }
-void VK_DeleteShader(HRL_id id) { hrlvk::DeleteCustomShader(id); }
+void VK_DeleteShader(HRL_id id) { hrlvk::DeleteCustomShader(id); hrlvk::DeletePassShader(id); }
+int VK_CreatePassShader(HRL_id id, const char* source, size_t size, int compute)
+{
+	std::string text(source ? source : "", source ? size : 0);
+	while (!text.empty() && text.back() == '\0') text.pop_back();
+	return hrlvk::CreatePassShader(id, text, compute != 0) ? HRL_TRUE : HRL_FALSE;
+}
 
 void VK_GetModelMatrix(HRL_Mesh* mesh, float* out)
 {
@@ -221,6 +227,7 @@ HRL_vtable GetVulkanBackend()
 	t.RHI_CreateShader = VK_CreateShader;
 	t.RHI_CreateShaderWithId = VK_CreateShaderWithId;
 	t.RHI_DeleteShader = VK_DeleteShader;
+	t.RHI_CreatePassShader = VK_CreatePassShader;
 	t.RHI_GetProjectionMatrix = hrlvk::GetProjectionMatrix;
 	t.RHI_GetViewMatrix = hrlvk::GetViewMatrix;
 	t.RHI_GetModelMatrix = VK_GetModelMatrix;

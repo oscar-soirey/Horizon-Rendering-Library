@@ -228,6 +228,35 @@ FrameGraph::Handle AddScreenEffects(FrameGraph& graph, SceneGPU& gpu, const HRL_
 		{
 			return a->priority_ != b->priority_ ? a->priority_ < b->priority_ : a->id_ < b->id_;
 		});
+		// Values every custom post-process can read by declaring the uniform
+		// (camera, sun, planes): see HRL_CreatePostProcess in hrl.h.
+		EffectParams autoValues = common;
+		Put(autoValues, "uView", v.viewGL);
+		Put(autoValues, "uProjection", v.projGL);
+		Put(autoValues, "uInvProjection", glm::inverse(v.projGL));
+		Put(autoValues, "uInvView", glm::inverse(v.viewGL));
+		{
+			const glm::mat4 invView = glm::inverse(v.viewGL);
+			Put(autoValues, "uCameraForward", glm::normalize(-glm::vec3(invView[2])));
+			const HRL_Camera* cam = v.viewport ? v.viewport->camera_ : nullptr;
+			Put(autoValues, "uNearFar", glm::vec2(cam ? cam->near_plane_ : 0.1f, cam ? cam->far_plane_ : 1000.f));
+			// First directional light: direction the light travels, colour * intensity,
+			// and where the sun is on screen (uSunScreen.z: 1 when it is in front of the camera).
+			glm::vec3 dir(0.f, -1.f, 0.f), col(0.f);
+			for (const auto& [lid, light] : scene->lights)
+			{
+				if (!light || light->type_ != HRL_DIRECTIONAL_LIGHT) continue;
+				dir = GetLightDirection(light);
+				col = light->color_ * std::max(0.f, light->intensity_);
+				break;
+			}
+			Put(autoValues, "uSunDirection", dir);
+			Put(autoValues, "uSunColor", col);
+			const glm::vec4 sunClip = viewProj * glm::vec4(v.camera - dir * 1000.f, 1.f);
+			glm::vec3 sunScreen(0.5f, 0.5f, 0.f);
+			if (sunClip.w > 1e-5f) sunScreen = glm::vec3(glm::vec2(sunClip) / sunClip.w * 0.5f + 0.5f, 1.f);
+			Put(autoValues, "uSunScreen", sunScreen);
+		}
 		for (const HRL_PostProcess* pp : posts)
 		{
 			auto m = frame.materials->find(pp->material_);
@@ -240,6 +269,7 @@ FrameGraph::Handle AddScreenEffects(FrameGraph& graph, SceneGPU& gpu, const HRL_
 			step.shader = FindCustomShader(m->second->shader_);
 			step.pipeline = pipeline;
 			step.material = m->second;
+			step.values = autoValues;
 			step.screenSize = glm::vec2(v.w, v.h);
 			steps.push_back(std::move(step));
 		}
@@ -324,7 +354,11 @@ FrameGraph::Handle AddScreenEffects(FrameGraph& graph, SceneGPU& gpu, const HRL_
 		const VkDescriptorSet set = params.ptr ? AllocFrameSet(R.postSetLayout) : VK_NULL_HANDLE;
 		if (!set) continue;
 		auto* p = static_cast<glm::vec4*>(params.ptr);
-		if (step.material) WriteCustomParams(*step.shader, step.material, p);
+		if (step.material)
+		{
+			WriteCustomParams(*step.shader, step.material, p);
+			WriteAutoParams(*step.shader, step.values, step.material, p);
+		}
 		else
 		{
 			WriteEffectParams(*step.shader, step.values, p);

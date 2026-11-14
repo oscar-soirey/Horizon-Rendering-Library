@@ -56,6 +56,11 @@ void HRL_DeleteViewport(HRL_id _viewportid)
 	{ (void)pp; postIds.push_back(id); }
 	for (HRL_id id : postIds) HRL_DeletePostProcess(id);
 
+	std::vector<HRL_id> passIds;
+	for (const auto& [id, pass] : it->second->render_passes)
+	{ (void)pass; passIds.push_back(id); }
+	for (HRL_id id : passIds) HRL_DeleteRenderPass(id);
+
 	std::vector<HRL_id> widgetIds;
 	for (const auto& [id, widget] : it->second->widgets)
 	{ (void)widget; widgetIds.push_back(id); }

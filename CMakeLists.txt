@@ -104,6 +104,7 @@ set(HRL_SOURCES
     src/frontend/widget.cpp
     src/frontend/debug.cpp
     src/frontend/overlay.cpp
+    src/frontend/render_pipeline.cpp
 
     # Core: CPU systems shared by the frontend and the backends
     src/core/utils_functions.cpp
@@ -309,7 +310,7 @@ if(HRL_ENABLE_VULKAN)
     endif()
     # GLSL sources the run time compiler builds the custom shaders from.
     set(HRL_VK_GLSL_EMBED "")
-    foreach(F common.glsl brdf.glsl lighting.glsl material_alpha.glsl custom.glsl mesh.vert mesh.frag shadow.vert shadow.frag)
+    foreach(F common.glsl brdf.glsl lighting.glsl material_alpha.glsl custom.glsl pass.glsl media.glsl mesh.vert mesh.frag shadow.vert shadow.frag)
         list(APPEND HRL_VK_GLSL_EMBED ${F}=${HRL_VK_SHADER_DIR}/${F})
         list(APPEND HRL_VK_GLSL_DEPS ${HRL_VK_SHADER_DIR}/${F})
     endforeach()
@@ -345,6 +346,7 @@ if(HRL_ENABLE_VULKAN)
         src/backend/vulkan/vk_vfx.cpp
         src/backend/vulkan/vk_voxel.cpp
         src/backend/vulkan/vk_gi.cpp
+        src/backend/vulkan/vk_render_pipeline.cpp
         src/backend/vulkan/vulkan_backend.cpp
     )
 endif()

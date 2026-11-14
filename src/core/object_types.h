@@ -277,6 +277,47 @@ struct HRL_PostProcess {
   int priority_ = 0;
 };
 
+//PROGRAMMABLE RENDER PIPELINE (Vulkan)
+struct HRL_RenderTarget {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id scene_ = HRL_INVALID_ID;
+  HRL_ERenderTargetFormat format_ = HRL_RENDER_TARGET_RGBA16F;
+  // Fixed size, or follows each viewport (scale_ > 0): width / height = viewport * scale_.
+  HRL_uint width_ = 1, height_ = 1, depth_ = 1;
+  float scale_ = 0.f;
+  bool history_ = false;
+  bool linear_ = true;
+  // Incremented by HRL_ResetRenderTargetHistory.
+  uint64_t history_reset_ = 0;
+};
+
+struct HRL_RenderPassBinding {
+  HRL_id target = HRL_INVALID_ID;
+  HRL_ERenderPassAccess access = HRL_PASS_READ;
+};
+struct HRL_RenderPassBuffer {
+  std::vector<unsigned char> data;
+};
+struct HRL_RenderPassOutput {
+  HRL_id target = HRL_INVALID_ID;
+  HRL_EPassBlend blend = HRL_PASS_BLEND_NONE;
+};
+struct HRL_RenderPass {
+  HRL_id id_ = HRL_INVALID_ID;
+  HRL_id viewport_ = HRL_INVALID_ID;
+  HRL_ERenderStage stage_ = HRL_STAGE_AFTER_OPAQUE;
+  int priority_ = 0;
+  HRL_id material_ = HRL_INVALID_ID;
+  bool enabled_ = true;
+  std::unordered_map<std::string, HRL_RenderPassBinding> bindings_;
+  std::unordered_map<std::string, HRL_RenderPassBuffer> buffers_;
+  // Compute dispatch: per texel of a target, an explicit size, or (both unset) per viewport pixel.
+  HRL_id dispatch_target_ = HRL_INVALID_ID;
+  HRL_uint dispatch_size_[3] = {0, 0, 0};
+  HRL_uint dispatch_divisor_[3] = {1, 1, 1};
+  HRL_RenderPassOutput outputs_[4];
+};
+
 //MATERIAL
 struct HRL_Material {
   HRL_id shader_;
@@ -336,6 +377,14 @@ struct HRL_Viewport {
 
   //Indexed by stable post-process ID. Priority is stored inside HRL_PostProcess.
   HRL_IdMap<HRL_PostProcess*> post_processes;
+
+  // Programmable render pipeline (Vulkan): passes of this viewport and the
+  // participating media volume its surfaces are shaded through.
+  HRL_IdMap<HRL_RenderPass*> render_passes;
+  HRL_id media_integrated_ = HRL_INVALID_ID;
+  HRL_id media_visibility_ = HRL_INVALID_ID;
+  float media_max_distance_ = 100.f;
+  float media_exponent_ = 2.f;
 
   HRL_IdMap<HRL_Widget*> widgets;
 };
@@ -860,6 +909,7 @@ struct hrl_scene_t {
   HRL_IdMap<HRL_Decal*> decals;
   HRL_IdMap<HRL_Gizmo*> gizmos;
   HRL_IdMap<HRL_VFXSystem*> vfx_systems;
+  HRL_IdMap<HRL_RenderTarget*> render_targets;
 
   //Per-scene diagnostic rendering state.
   HRL_EDebugView debug_view = HRL_DEBUG_VIEW_NONE;
@@ -972,6 +1022,8 @@ struct HRL_Context {
   HRL_IdMap<HRL_Camera*> cameras;
   HRL_IdMap<HRL_PostProcess*> post_processes;
   HRL_IdMap<HRL_Widget*> widgets;
+  HRL_IdMap<HRL_RenderTarget*> render_targets;
+  HRL_IdMap<HRL_RenderPass*> render_passes;
 
   //global ressources
   HRL_IdMap<HRL_Material*> materials;

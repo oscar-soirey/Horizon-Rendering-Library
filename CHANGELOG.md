@@ -1,5 +1,17 @@
 # Changelog
 
+## Programmable render pipeline, Heaven style (Vulkan)
+
+### Added (Vulkan)
+
+- **Render passes**: compute (`HRL_CreateComputeShader`) and fullscreen (`HRL_CreateFullscreenShader`) shaders run at a stage of the frame of a viewport (`HRL_CreateRenderPass`, `HRL_ERenderStage`: before / after the opaque surfaces, after the translucent ones, before tone mapping). They see the view, the lights and their shadows (shadow maps or ray traced) through the built-in lighting code, the scene depth and HDR image, their render targets and buffers (`HRL_SetRenderPassTarget`, `HRL_SetRenderPassBuffer`); their `uniform` declarations are material parameters. See `docs/RENDER_PIPELINE.md`.
+- **Render targets**: 2D and 3D, fixed size or following each viewport, optional history of the previous frame (`HRL_CreateRenderTarget`, `HRL_CreateViewportRenderTarget`, `HRL_SetRenderTargetHistory`), instanced per viewport.
+- **Participating media of a viewport** (`HRL_SetViewportMediaVolume`): a froxel volume written by render passes that every lit surface and the sky are shaded through, with an optional visibility volume for the main directional light (shadows of volumes).
+- Custom post-processes receive the camera, its matrices and the main light when they declare them (`uInvViewProjection`, `uCameraPos`, `uSunDirection`...).
+- `src/extras` (header-only C++): `hrl::CustomShaderRenderer` (a custom renderer for one viewport) and `hrl::heaven::HeavenStyle` (froxel volumetrics, ray marched smoke volumes, lens and grade, smooth back lit materials, embers).
+- Example `hrl_vulkan_heaven`, test `vulkan_render_passes` (pixels checked, with and without ray tracing).
+- Device: 3D images; the frame graph orders storage writes between passes.
+
 ## Vulkan: feature parity with OpenGL (API 0.9)
 
 ### Added (Vulkan)

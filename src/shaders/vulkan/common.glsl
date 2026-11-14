@@ -47,6 +47,7 @@ layout(set = 0, binding = 0, std140) uniform ViewData
 	vec4 giResolution;    // xyz : probes per axis, w : 1 when the volume is active
 	vec4 voxelLightRegion; // light of the emissive voxels: xy world min, zw 1 / world size
 	vec4 voxelLight;       // x : falloff (world), y : 1 when the light field is active
+	vec4 mediaParams;      // participating media (media.glsl): x max distance, y exponent, z 1 when active, w 1 with a visibility volume
 } uView;
 
 struct Instance

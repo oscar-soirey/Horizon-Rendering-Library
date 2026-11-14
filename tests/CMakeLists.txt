@@ -47,6 +47,17 @@ if(HRL_ENABLE_VULKAN)
         set_tests_properties(vulkan_effects PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1")
     endif()
 
+    # Programmable render pipeline: render passes, render targets, participating media (needs glslang).
+    add_executable(hrl_test_vulkan_render_passes vulkan_render_passes.cpp)
+    target_link_libraries(hrl_test_vulkan_render_passes PRIVATE hrldll)
+    target_include_directories(hrl_test_vulkan_render_passes PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
+    if(HRL_VK_GLSLANG_TARGETS)
+        add_test(NAME vulkan_render_passes COMMAND hrl_test_vulkan_render_passes WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(vulkan_render_passes PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1")
+        add_test(NAME vulkan_render_passes_no_raytracing COMMAND hrl_test_vulkan_render_passes WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set_tests_properties(vulkan_render_passes_no_raytracing PROPERTIES ENVIRONMENT "HRL_VULKAN_VALIDATION=1;HRL_VULKAN_NO_RAYTRACING=1")
+    endif()
+
     # CPU cost of preparing a large scene (prints timings, see docs/ARCHITECTURE.md).
     add_executable(hrl_bench_scene bench_scene.cpp)
     target_link_libraries(hrl_bench_scene PRIVATE hrldll)

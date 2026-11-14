@@ -3,6 +3,7 @@
 #extension GL_EXT_nonuniform_qualifier : require
 #include "common.glsl"
 #include "brdf.glsl"
+#include "media.glsl"
 
 layout(set = 1, binding = 0) uniform sampler2D uTextures[];
 layout(push_constant) uniform Push
@@ -30,6 +31,12 @@ void main()
 	else
 		color = dir.y >= 0.0 ? mix(pc.horizon.rgb, pc.top.rgb, clamp(dir.y, 0.0, 1.0))
 		                     : mix(pc.horizon.rgb, pc.bottom.rgb, clamp(-dir.y, 0.0, 1.0));
+	// Participating media: everything between the camera and the far end of the froxels.
+	if (HRL_MediaActive())
+	{
+		vec4 m = textureLod(uMediaVolume, vec3(vUV.x, 1.0 - vUV.y, 1.0), 0.0);
+		color = color * m.a + m.rgb;
+	}
 	outColor = vec4(color, 1.0);
 	outObjectId = 0xFFFFFFFFu;
 }

@@ -368,6 +368,49 @@ typedef enum HRL_ESeverity{
 	HRL_SEVERITY_FATAL
 }HRL_ESeverity;
 
+/** Pixel format of a render target (HRL_CreateRenderTarget). */
+typedef enum HRL_ERenderTargetFormat {
+	HRL_RENDER_TARGET_RGBA16F = 0, /**< 4 x 16 bit float (default: colour, light, density) */
+	HRL_RENDER_TARGET_RGBA32F,     /**< 4 x 32 bit float */
+	HRL_RENDER_TARGET_RG16F,       /**< 2 x 16 bit float */
+	HRL_RENDER_TARGET_R16F,        /**< 1 x 16 bit float */
+	HRL_RENDER_TARGET_R32F,        /**< 1 x 32 bit float */
+	HRL_RENDER_TARGET_RGBA8        /**< 4 x 8 bit unsigned normalized */
+} HRL_ERenderTargetFormat;
+
+/** Where a render pass runs in the frame of its viewport (HRL_CreateRenderPass). */
+typedef enum HRL_ERenderStage {
+	/** After the shadow maps, before any surface: lights and shadows are ready, no depth yet
+	 *  (participating media, light volumes, anything the surfaces read). */
+	HRL_STAGE_BEFORE_OPAQUE = 0,
+	/** After the opaque surfaces and the sky, before the translucent ones: the depth is final
+	 *  (volumes ray marched against the depth, composited under the translucent surfaces). */
+	HRL_STAGE_AFTER_OPAQUE,
+	/** After the translucent surfaces and particles, before the anti-aliasing. */
+	HRL_STAGE_AFTER_TRANSLUCENT,
+	/** After the anti-aliasing, the screen space effects and the post-processes: the HDR image
+	 *  just before bloom and tone mapping (lens, grading). */
+	HRL_STAGE_BEFORE_TONEMAP
+} HRL_ERenderStage;
+
+/** How a render pass uses a render target (HRL_SetRenderPassTarget). */
+typedef enum HRL_ERenderPassAccess {
+	HRL_PASS_READ = 0,       /**< sampled (texture()), the content written earlier this frame */
+	HRL_PASS_WRITE,          /**< storage image (imageLoad / imageStore), compute passes */
+	HRL_PASS_READ_PREVIOUS   /**< sampled, the content of the previous frame (targets with history) */
+} HRL_ERenderPassAccess;
+
+/** Blending of an output of a fullscreen render pass (HRL_SetRenderPassOutput). */
+typedef enum HRL_EPassBlend {
+	HRL_PASS_BLEND_NONE = 0,       /**< replaces the target */
+	HRL_PASS_BLEND_ALPHA,          /**< target * (1 - a) + rgb * a */
+	HRL_PASS_BLEND_ADDITIVE,       /**< target + rgb */
+	HRL_PASS_BLEND_PREMULTIPLIED   /**< target * a + rgb (rgb: light added, a: transmittance) */
+} HRL_EPassBlend;
+
+/** Output of a fullscreen render pass that is the HDR image of the scene. */
+#define HRL_SCENE_COLOR_TARGET (UINT32_MAX - 16)
+
 typedef enum HRL_EFogType{
 	HRL_FOG_LINEAR = 0x0090,
 	HRL_FOG_EXPONENTIAL,
@@ -1716,6 +1759,19 @@ extern "C" {
 	 * Passes are applied in creation order after the scene is rendered.
 	 * @param _matid Material containing the full-screen shader to apply.
 	 * @return HRL_id of the new post-process object, or HRL_INVALID_ID on failure.
+	 *
+	 * Custom post-process shaders (OpenGL 3.30 style, `in vec2 uv`, origin
+	 * bottom-left) always receive uScene, uDepth (OpenGL depth, 1 = sky),
+	 * uNormal (world normals), uScreenSize and uTime. On Vulkan they also
+	 * receive, when they declare the uniform and the material does not set it:
+	 *   mat4 uView, uProjection, uViewProjection, uInvView, uInvProjection,
+	 *        uInvViewProjection (OpenGL conventions, world = uInvViewProjection * vec4(uv*2-1, depth*2-1, 1));
+	 *   vec3 uCameraPos, uCameraForward;
+	 *   vec2 uNearFar, uViewportOrigin, uViewportSize (0..1 of the image);
+	 *   vec3 uSunDirection (direction the first directional light travels),
+	 *        uSunColor (colour * intensity, 0 without directional light),
+	 *        uSunScreen (uv of the sun, z = 1 when it is in front of the camera).
+	 * Custom passes run on the HDR image, before bloom and tone mapping.
 	 */
 	HRL_API HRL_id HRL_CreatePostProcess(HRL_id _viewport, HRL_id _matid, int priority);
 
@@ -1731,6 +1787,98 @@ extern "C" {
 	 * @return HRL_TRUE if valid, HRL_FALSE otherwise.
 	 */
 	HRL_API int HRL_IsValidPostProcess(HRL_id _id);
+
+	/* ============================================================================
+	 *  PROGRAMMABLE RENDER PIPELINE (Vulkan)
+	 *
+	 * Render passes are application shaders inserted in the frame of a viewport
+	 * at a given stage (HRL_ERenderStage): compute passes, which read and write
+	 * render targets (2D or 3D, with an optional history of the previous frame),
+	 * and fullscreen passes, which draw into render targets or into the HDR
+	 * image of the scene. Every pass shader sees what the HRL surfaces see: the
+	 * view (uView), the lights and their shadows (shadow maps or ray traced),
+	 * through the functions of the built-in lighting (HRL_LightRadiance...).
+	 *
+	 * Render targets belong to a scene and are instanced per viewport: each
+	 * viewport running a pass has its own images (and its own history).
+	 *
+	 * Shader contract (GLSL 4.60, see src/shaders/vulkan/pass.glsl):
+	 *   HRL_IMAGE2D(rgba16f, Name);   HRL_IMAGE3D(rgba16f, Name);   storage image (HRL_PASS_WRITE)
+	 *   HRL_TEXTURE2D(Name);          HRL_TEXTURE3D(Name);          sampled (HRL_PASS_READ / _PREVIOUS)
+	 *   HRL_BUFFER(Name) { ... };     read-only buffer (HRL_SetRenderPassBuffer)
+	 *   uniform float Density = 1.0;  material parameter (HRL_MaterialSet*), as for surface shaders
+	 * Built in: hrlPass (frame data), hrl_Depth (depth of the scene), hrl_SceneColor
+	 * (copy of the HDR image before the pass), hrl_SceneImage (the HDR image,
+	 * read / write, compute passes after the opaque surfaces).
+	 * ============================================================================ */
+
+	/** @brief Compiles a compute render pass shader (`layout(local_size_x = ...) in;` and main()). */
+	HRL_API HRL_id HRL_CreateComputeShader(const char* _source, size_t _size);
+	/** @brief Compiles a fullscreen render pass shader: a fragment main() with `in vec2 vUV`
+	 *  (0..1 over the viewport, origin top-left) and `layout(location = i) out vec4` outputs. */
+	HRL_API HRL_id HRL_CreateFullscreenShader(const char* _source, size_t _size);
+
+	/**
+	 * @brief Creates a render target of a fixed size. _depth > 1 makes a 3D target.
+	 * @return The new target, or HRL_INVALID_ID.
+	 */
+	HRL_API HRL_id HRL_CreateRenderTarget(HRL_id _scene, HRL_ERenderTargetFormat _format,
+		HRL_uint _width, HRL_uint _height, HRL_uint _depth);
+	/**
+	 * @brief Creates a render target whose width and height follow each viewport (times _scale,
+	 * 0.5 : half resolution). _depth > 1 makes a 3D target (froxel volumes).
+	 */
+	HRL_API HRL_id HRL_CreateViewportRenderTarget(HRL_id _scene, HRL_ERenderTargetFormat _format,
+		float _scale, HRL_uint _depth);
+	HRL_API void HRL_DeleteRenderTarget(HRL_id _target);
+	HRL_API int HRL_IsValidRenderTarget(HRL_id _target);
+	/** @brief Keeps the content of the previous frame (HRL_PASS_READ_PREVIOUS): temporal accumulation. */
+	HRL_API void HRL_SetRenderTargetHistory(HRL_id _target, int _enable);
+	/** @brief The next frame has no valid history (camera cut): hrlPass.frame.w is 0 for it. */
+	HRL_API void HRL_ResetRenderTargetHistory(HRL_id _target);
+	/** @brief Sampling filter: HRL_TRUE (default) linear, HRL_FALSE nearest. */
+	HRL_API void HRL_SetRenderTargetLinearFilter(HRL_id _target, int _linear);
+
+	/**
+	 * @brief Adds a render pass to a viewport.
+	 * @param _material A material whose shader comes from HRL_CreateComputeShader or
+	 *                  HRL_CreateFullscreenShader; its parameters are the uniforms of the shader.
+	 * @param _priority Order of the passes of a stage (lowest first, then creation order).
+	 */
+	HRL_API HRL_id HRL_CreateRenderPass(HRL_id _viewport, HRL_ERenderStage _stage, int _priority, HRL_id _material);
+	HRL_API void HRL_DeleteRenderPass(HRL_id _pass);
+	HRL_API int HRL_IsValidRenderPass(HRL_id _pass);
+	HRL_API void HRL_SetRenderPassEnabled(HRL_id _pass, int _enable);
+	/** @brief Binds a render target to a resource the shader declares (HRL_IMAGE* / HRL_TEXTURE*). */
+	HRL_API void HRL_SetRenderPassTarget(HRL_id _pass, const char* _name, HRL_id _target, HRL_ERenderPassAccess _access);
+	/** @brief Copies data for a HRL_BUFFER(_name) of the shader (uploaded with the next frame). */
+	HRL_API void HRL_SetRenderPassBuffer(HRL_id _pass, const char* _name, const void* _data, size_t _size);
+	/** @brief Compute passes: one invocation per texel of _target (default: per pixel of the viewport). */
+	HRL_API void HRL_SetRenderPassDispatchTarget(HRL_id _pass, HRL_id _target);
+	/** @brief Compute passes: divides the dispatch size per axis (rounded up), e.g. (1, 1, depth) for one
+	 *  invocation per column of a 3D target. Default (1, 1, 1). */
+	HRL_API void HRL_SetRenderPassDispatchDivisor(HRL_id _pass, HRL_uint _x, HRL_uint _y, HRL_uint _z);
+	/** @brief Compute passes: _x * _y * _z invocations (rounded up to whole work groups). */
+	HRL_API void HRL_SetRenderPassDispatchSize(HRL_id _pass, HRL_uint _x, HRL_uint _y, HRL_uint _z);
+	/**
+	 * @brief Fullscreen passes: output _index (0..3) goes to _target (a 2D render target, or
+	 * HRL_SCENE_COLOR_TARGET for the HDR image of the viewport), blended with _blend.
+	 */
+	HRL_API void HRL_SetRenderPassOutput(HRL_id _pass, HRL_uint _index, HRL_id _target, HRL_EPassBlend _blend);
+
+	/**
+	 * @brief Participating media seen by every surface of the viewport (opaque, translucent, sky).
+	 *
+	 * _integrated is a 3D render target written by the application's passes before the opaque
+	 * surfaces: froxels over the view, rgb = light scattered towards the camera between the camera
+	 * and the froxel, a = transmittance. HRL applies it to every lit surface and to the sky:
+	 * color * a + rgb. _visibility (optional, HRL_INVALID_ID) is a 3D target of the same mapping
+	 * whose red channel scales the light of the first directional light (shadows of volumes).
+	 * Froxel mapping (pass.glsl HRL_FroxelUVW / HRL_FroxelWorld): x, y over the viewport, z = (view
+	 * depth / _maxDistance) ^ (1 / _exponent). HRL_INVALID_ID removes the media.
+	 */
+	HRL_API void HRL_SetViewportMediaVolume(HRL_id _viewport, HRL_id _integrated, HRL_id _visibility,
+		float _maxDistance, float _exponent);
 
 	/* ============================================================================
 	 *  DECALS (OpenGL 3.3)

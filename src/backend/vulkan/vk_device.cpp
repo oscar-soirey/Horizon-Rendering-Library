@@ -933,11 +933,12 @@ bool Device::CreateImage(const ImageDesc& desc, Image& out, const char* name)
 {
 	const bool depth = desc.format == VK_FORMAT_D32_SFLOAT || desc.format == VK_FORMAT_D16_UNORM;
 	VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-	ci.imageType = VK_IMAGE_TYPE_2D;
+	const bool volume = desc.depth > 1;
+	ci.imageType = volume ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
 	ci.format = desc.format;
-	ci.extent = {std::max(desc.width, 1u), std::max(desc.height, 1u), 1};
+	ci.extent = {std::max(desc.width, 1u), std::max(desc.height, 1u), volume ? desc.depth : 1u};
 	ci.mipLevels = std::max(desc.mips, 1u);
-	ci.arrayLayers = desc.cube ? 6u : std::max(desc.layers, 1u);
+	ci.arrayLayers = volume ? 1u : (desc.cube ? 6u : std::max(desc.layers, 1u));
 	ci.samples = VK_SAMPLE_COUNT_1_BIT;
 	ci.tiling = VK_IMAGE_TILING_OPTIMAL;
 	ci.usage = desc.usage;
@@ -951,10 +952,11 @@ bool Device::CreateImage(const ImageDesc& desc, Image& out, const char* name)
 	if (r != VK_SUCCESS) { ReportError("image allocation", r); out = Image{}; return false; }
 	out.format = desc.format;
 	out.extent = {ci.extent.width, ci.extent.height};
+	out.depth = ci.extent.depth;
 	out.mips = ci.mipLevels;
 	out.layers = ci.arrayLayers;
 	out.aspect = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
-	const VkImageViewType type = desc.cube ? VK_IMAGE_VIEW_TYPE_CUBE
+	const VkImageViewType type = volume ? VK_IMAGE_VIEW_TYPE_3D : desc.cube ? VK_IMAGE_VIEW_TYPE_CUBE
 		: ((out.layers > 1 || desc.arrayView) ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D);
 	out.view = CreateView(out, desc.format, type, 0, out.mips, 0, out.layers);
 	if (!out.view) { DestroyImage(out, false); return false; }
@@ -1006,6 +1008,23 @@ void Device::Transition(VkCommandBuffer cmd, Image& image, VkImageLayout newLayo
 	di.pImageMemoryBarriers = &b;
 	vkCmdPipelineBarrier2(cmd, &di);
 	image.layout = newLayout;
+}
+
+void Device::StorageBarrier(VkCommandBuffer cmd, Image& image)
+{
+	VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+	b.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+	b.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+	b.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+	b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+	b.oldLayout = b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+	b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	b.image = image.handle;
+	b.subresourceRange = {image.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+	VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+	di.imageMemoryBarrierCount = 1;
+	di.pImageMemoryBarriers = &b;
+	vkCmdPipelineBarrier2(cmd, &di);
 }
 
 bool Device::UploadToImage(Image& image, uint32_t layer, const void* pixels, VkDeviceSize size)
